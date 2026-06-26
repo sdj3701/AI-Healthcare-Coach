@@ -5,6 +5,7 @@ namespace AIHealthcareCoach.Tts
     public sealed class TtsDemoView : MonoBehaviour
     {
         [SerializeField] private TtsController controller;
+        [SerializeField] private TtsAudioDuckingController duckingController;
         [SerializeField, TextArea(3, 6)]
         private string inputText = "무릎이 안쪽으로 모이고 있어요. 무릎을 발끝 방향으로 맞춰주세요.";
 
@@ -16,21 +17,20 @@ namespace AIHealthcareCoach.Tts
         private GUIStyle textAreaStyle;
         private GUIStyle buttonStyle;
         private GUIStyle statusStyle;
+        private GUIStyle smallStatusStyle;
 
         private void Awake()
         {
-            if (controller == null)
-            {
-                controller = FindFirstObjectByType<TtsController>();
-            }
+            ResolveReferences();
         }
 
         private void OnGUI()
         {
+            ResolveReferences();
             EnsureStyles();
 
-            var panelWidth = Mathf.Min(Screen.width - 48f, 760f);
-            var panelHeight = Mathf.Min(Screen.height - 48f, 430f);
+            var panelWidth = Mathf.Min(Screen.width - 48f, 820f);
+            var panelHeight = Mathf.Min(Screen.height - 48f, 560f);
             var panelRect = new Rect(
                 (Screen.width - panelWidth) * 0.5f,
                 (Screen.height - panelHeight) * 0.5f,
@@ -63,10 +63,27 @@ namespace AIHealthcareCoach.Tts
                 HandleStopClicked();
             }
 
+            GUILayout.Space(12f);
+
+            var musicButtonText = duckingController != null && duckingController.IsTestMusicPlaying
+                ? "Test Music Off"
+                : "Test Music On";
+            if (GUILayout.Button(musicButtonText, buttonStyle, GUILayout.Width(190f), GUILayout.Height(48f)))
+            {
+                HandleTestMusicClicked();
+            }
+
             GUILayout.EndHorizontal();
 
             GUILayout.Space(16f);
             GUILayout.Label(statusMessage, statusStyle);
+
+            if (duckingController != null)
+            {
+                GUILayout.Space(8f);
+                GUILayout.Label($"Ducking: {duckingController.StatusText}", smallStatusStyle);
+                GUILayout.Label("TTS가 재생되면 테스트 음악은 완전히 꺼지지 않고 낮은 볼륨으로 유지됩니다.", smallStatusStyle);
+            }
 
             GUILayout.EndScrollView();
             GUILayout.EndArea();
@@ -74,10 +91,7 @@ namespace AIHealthcareCoach.Tts
 
         public void HandleSpeakClicked()
         {
-            if (controller == null)
-            {
-                controller = FindFirstObjectByType<TtsController>();
-            }
+            ResolveReferences();
 
             if (controller == null)
             {
@@ -90,10 +104,7 @@ namespace AIHealthcareCoach.Tts
 
         public void HandleStopClicked()
         {
-            if (controller == null)
-            {
-                controller = FindFirstObjectByType<TtsController>();
-            }
+            ResolveReferences();
 
             if (controller == null)
             {
@@ -102,6 +113,40 @@ namespace AIHealthcareCoach.Tts
             }
 
             controller.StopSpeaking(out statusMessage);
+        }
+
+        public void HandleTestMusicClicked()
+        {
+            ResolveReferences();
+
+            if (duckingController == null)
+            {
+                statusMessage = "오디오 ducking 컨트롤러를 찾을 수 없습니다.";
+                return;
+            }
+
+            duckingController.ToggleTestMusic();
+            statusMessage = duckingController.IsTestMusicPlaying
+                ? "테스트 음악을 재생했습니다. Speak를 누르면 음악이 작아집니다."
+                : "테스트 음악을 중지했습니다.";
+        }
+
+        private void ResolveReferences()
+        {
+            if (controller == null)
+            {
+                controller = FindFirstObjectByType<TtsController>();
+            }
+
+            if (duckingController == null && controller != null)
+            {
+                duckingController = controller.DuckingController;
+            }
+
+            if (duckingController == null)
+            {
+                duckingController = FindFirstObjectByType<TtsAudioDuckingController>();
+            }
         }
 
         private void EnsureStyles()
@@ -143,6 +188,13 @@ namespace AIHealthcareCoach.Tts
             {
                 fontSize = 16,
                 normal = { textColor = new Color(0.72f, 0.95f, 0.82f) },
+                wordWrap = true
+            };
+
+            smallStatusStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 14,
+                normal = { textColor = new Color(0.75f, 0.82f, 0.88f) },
                 wordWrap = true
             };
         }

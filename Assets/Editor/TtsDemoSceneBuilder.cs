@@ -100,6 +100,7 @@ namespace AIHealthcareCoach.Editor
         private static void CreateRuntime()
         {
             var runtimeObject = new GameObject("TTS Runtime");
+            runtimeObject.AddComponent<TtsAudioDuckingController>();
             runtimeObject.AddComponent<TtsController>();
             runtimeObject.AddComponent<TtsDemoView>();
         }
