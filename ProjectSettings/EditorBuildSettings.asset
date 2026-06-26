@@ -6,6 +6,9 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/Scenes/MediaPipeTest.unity
+    guid: cd30da5bade3460438b64aa5be682a38
+  - enabled: 1
     path: Assets/Scenes/TtsDemo.unity
     guid: 6b612145c855caa4e88c27989b9d3e1b
   - enabled: 1
