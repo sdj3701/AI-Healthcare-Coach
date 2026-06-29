@@ -69,9 +69,17 @@ namespace AIHealthcareCoach.Tts
             EnsureService();
             EnsureDuckingController();
 
-            duckingController.BeginDucking();
-            ttsService.Speak(trimmedText);
+            if (!ttsService.TrySpeak(trimmedText, out var errorMessage))
+            {
+                duckingController.EndDucking();
+                wasSpeaking = false;
+                statusMessage = string.IsNullOrWhiteSpace(errorMessage)
+                    ? "TTS 재생을 시작하지 못했습니다."
+                    : $"TTS 재생을 시작하지 못했습니다: {errorMessage}";
+                return false;
+            }
 
+            duckingController.BeginDucking();
             wasSpeaking = IsSpeaking;
             if (!wasSpeaking)
             {

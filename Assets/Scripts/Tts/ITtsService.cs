@@ -4,7 +4,7 @@ namespace AIHealthcareCoach.Tts
     {
         bool IsSpeaking { get; }
 
-        void Speak(string text);
+        bool TrySpeak(string text, out string errorMessage);
 
         void Stop();
     }

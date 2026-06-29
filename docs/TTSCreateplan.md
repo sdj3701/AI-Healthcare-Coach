@@ -389,3 +389,45 @@ Android 방향:
 4. `AudioMixer`와 `TtsAudioDuckingController` 작성
 5. 버튼 이벤트 연결
 6. Play Mode에서 한국어 문장과 음악 ducking 테스트
+
+## 12. 2026-06-29 TTS 재생 오류 수정 기록
+
+### 문제 현상
+
+- `Speak`를 누르면 테스트 음악 ducking은 동작하지만 코칭 대사가 들리지 않았다.
+- 씬의 `TtsController.backend` 값은 `WindowsPowerShell`로 설정되어 있었고, ducking 컴포넌트도 정상 연결되어 있었다.
+- 로컬 Windows 음성 엔진에는 `Microsoft Heami Desktop`(`ko-KR`)과 `Microsoft Zira Desktop`(`en-US`) 음성이 설치되어 있었다.
+
+### 원인 분석
+
+- 기존 `WindowsPowerShellTtsService`는 Windows 기본 음성을 그대로 사용했다.
+- 기본 음성이 영어 음성으로 잡혀 있으면 한국어 코칭 문장을 제대로 읽지 못할 수 있다.
+- PowerShell TTS 프로세스의 표준 오류를 수집하지 않아, TTS 명령이 실패해도 Unity 화면에는 원인을 확인하기 어려웠다.
+- `TtsController`는 TTS 시작 성공 여부를 확인하지 않고 ducking을 먼저 시작해서, TTS 실패 상황에서도 음악만 줄어드는 것처럼 보일 수 있었다.
+
+### 코드 변경
+
+- `ITtsService`의 음성 시작 메서드를 `TrySpeak(string text, out string errorMessage)`로 변경해 시작 성공 여부를 반환하도록 했다.
+- `WindowsPowerShellTtsService`가 한국어 문장에 한글이 포함되면 `ko-KR` 음성을 우선 선택하도록 수정했다.
+- Windows SpeechSynthesizer에 `SetOutputToDefaultAudioDevice()`를 명시적으로 호출하도록 했다.
+- PowerShell 실행을 `-Sta`, `-NonInteractive`, 명시적 `powershell.exe` 경로 기반으로 바꿔 Unity Editor에서 더 안정적으로 실행되도록 했다.
+- PowerShell 표준 오류와 종료 코드를 Unity Console에 기록하도록 추가했다.
+- `TtsController`는 TTS 프로세스가 시작된 뒤에 ducking을 시작하고, 시작 실패 시 ducking을 복구하며 UI 상태 메시지에 실패 원인을 표시하도록 수정했다.
+- `LogTtsService`도 새 `TrySpeak` 계약에 맞게 수정했다.
+
+### 검증 결과
+
+- `dotnet build .\AI-Healthcare-Coach.slnx` 결과: 오류 0개.
+- 기존 STT DTO 미할당 필드 경고 5개는 남아 있으나 이번 TTS 변경과 무관하다.
+- Windows SpeechSynthesizer가 `Microsoft Heami Desktop` 한국어 음성으로 `코칭 시스템이 준비되었습니다.` 문장을 WAV 파일로 합성하는 것을 확인했다.
+- WAV 합성 테스트 출력 크기: 137,810 bytes.
+
+### 수동 확인 항목
+
+Unity Editor에서 `Assets/Scenes/TtsDemo.unity`를 열고 Play Mode에서 아래를 확인한다.
+
+1. `Test Music On`을 눌러 테스트 음악을 재생한다.
+2. 한국어 코칭 문장을 입력하고 `Speak`를 누른다.
+3. 음악 볼륨이 낮아지는 동시에 한국어 대사가 들리는지 확인한다.
+4. `Stop`을 누르면 TTS가 중지되고 음악 볼륨이 복구되는지 확인한다.
+5. 대사가 들리지 않으면 Unity Console의 `Windows TTS process failed` 로그를 확인한다.
