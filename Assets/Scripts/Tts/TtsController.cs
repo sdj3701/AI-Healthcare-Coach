@@ -5,9 +5,11 @@ namespace AIHealthcareCoach.Tts
 {
     public sealed class TtsController : MonoBehaviour
     {
-        [SerializeField] private TtsBackend backend = TtsBackend.WindowsPowerShell;
+        [SerializeField] private TtsBackend backend = TtsBackend.Auto;
         [SerializeField, Range(-10, 10)] private int windowsVoiceRate;
         [SerializeField, Range(0, 100)] private int windowsVoiceVolume = 100;
+        [SerializeField] private string macOsVoiceName;
+        [SerializeField, Range(80, 320)] private int macOsVoiceRate = 185;
         [SerializeField] private TtsAudioDuckingController duckingController;
 
         private ITtsService ttsService;
@@ -107,11 +109,29 @@ namespace AIHealthcareCoach.Tts
                 return;
             }
 
-            ttsService = backend switch
+            ttsService = CreateService(backend);
+        }
+
+        private ITtsService CreateService(TtsBackend requestedBackend)
+        {
+            return requestedBackend switch
             {
+                TtsBackend.Auto => CreatePlatformDefaultService(),
                 TtsBackend.WindowsPowerShell => new WindowsPowerShellTtsService(windowsVoiceRate, windowsVoiceVolume),
+                TtsBackend.MacOsSay => new MacOsSayTtsService(macOsVoiceName, macOsVoiceRate),
                 _ => new LogTtsService()
             };
+        }
+
+        private ITtsService CreatePlatformDefaultService()
+        {
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+            return new MacOsSayTtsService(macOsVoiceName, macOsVoiceRate);
+#elif UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            return new WindowsPowerShellTtsService(windowsVoiceRate, windowsVoiceVolume);
+#else
+            return new LogTtsService();
+#endif
         }
 
         private void EnsureDuckingController()

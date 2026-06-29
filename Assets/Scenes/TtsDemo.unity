@@ -258,9 +258,11 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 8984768218868814385c2f9ec9012c6d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::AIHealthcareCoach.Tts.TtsController
-  backend: 1
+  backend: 3
   windowsVoiceRate: 0
   windowsVoiceVolume: 100
+  macOsVoiceName: 
+  macOsVoiceRate: 185
   duckingController: {fileID: 0}
 --- !u!114 &952447514
 MonoBehaviour:
