@@ -871,3 +871,45 @@ Unity에서 설정한다.
 - 현재 작업 PC는 Windows라 M1 Mac에서 Python MediaPipe 실제 추론은 직접 실행 검증하지 못했다.
 - M1 Mac에서 Python 패키지 설치 후 Play Mode로 실기 카메라 추적을 확인해야 한다.
 - 성능이 낮으면 `targetPoseFps`를 10~15 사이로 조정한다.
+
+## 18. 2026-06-29 Editor Python MediaPipe 관절 미표시 수정 기록
+
+### 확인한 가능 원인
+
+- Unity `WebCamTexture.GetPixels32()` 픽셀 배열은 일반 이미지 처리 라이브러리가 기대하는 행 방향과 다를 수 있다.
+- Python 워커가 세로로 뒤집힌 프레임을 MediaPipe에 전달하면 사람을 찾지 못해 `NO_POSE`가 계속 나올 수 있다.
+- 프로젝트 루트에 `.venv-mediapipe`를 만들었어도 Unity Inspector에 Python 경로를 넣지 않으면 시스템 Python을 먼저 사용해 `mediapipe` import가 실패할 수 있다.
+- Python MediaPipe의 landmark `presence` 값이 0으로 들어오면 visibility가 정상이어도 QualityGate가 `Ready`로 가지 못할 수 있다.
+
+### 코드 변경
+
+- `EditorPythonMediaPipePoseEstimator`가 프로젝트 루트의 `.venv-mediapipe/bin/python`과 `.venv/bin/python`을 먼저 자동 탐지하도록 했다.
+- Python 워커 시작 실패와 timeout 시 Python 실행 파일, exit code, stderr를 HUD 오류 메시지에 포함하도록 했다.
+- Python stdout에 JSON이 아닌 로그가 섞여도 JSON 라인을 찾아 읽도록 보강했다.
+- `editor_pose_worker.py`에서 Unity 프레임을 MediaPipe에 전달하기 전에 `np.flipud`로 세로 반전하도록 했다.
+- Python landmark의 `presence`가 0이면 `visibility`로 fallback하도록 했다.
+
+### 다시 테스트하는 순서
+
+1. Mac 터미널에서 프로젝트 루트로 이동한다.
+2. 아래 명령으로 venv와 패키지를 확인한다.
+
+```bash
+source .venv-mediapipe/bin/activate
+python -c "import mediapipe, numpy; print('mediapipe ok')"
+```
+
+3. Unity를 완전히 재시작한다.
+4. `Assets/Scenes/MediaPipeTest.unity`를 연다.
+5. `MediaPipe Test Runtime > Editor Python Executable Path`는 비워두거나 `.venv-mediapipe/bin/python` 절대 경로를 넣는다.
+6. Play Mode에서 `Start Camera`를 누른다.
+7. HUD의 `Backend`가 `Editor Python MediaPipe`인지 확인한다.
+8. 전신이 화면에 들어오도록 카메라에서 1.5~2.5m 정도 떨어진다.
+9. `Landmarks: 33`이 나오는지 확인한다.
+
+### 여전히 안 나오면 확인할 HUD 값
+
+- `Backend`가 `Editor Python MediaPipe`가 아니면 Python 백엔드가 선택되지 않은 것이다.
+- `Error`에 `PYTHON_IMPORT_FAILED`가 나오면 Unity가 사용하는 Python에 `mediapipe numpy`가 설치되지 않은 것이다.
+- `Error`에 `NO_POSE`만 나오면 Python은 정상이고, 카메라 거리/조명/프레임 방향 문제다.
+- `Source`가 `0x0`이거나 카메라 FPS가 0이면 카메라 프레임이 아직 준비되지 않은 것이다.

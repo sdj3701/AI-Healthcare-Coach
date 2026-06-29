@@ -17,6 +17,7 @@ namespace AIHealthcareCoach.MediaPipe
         private Process process;
         private Stream stdin;
         private StreamReader stdout;
+        private readonly StringBuilder stderrBuffer = new StringBuilder(4096);
         private byte[] frameBytes;
         private bool isReady;
 
@@ -46,6 +47,7 @@ namespace AIHealthcareCoach.MediaPipe
 
             try
             {
+                stderrBuffer.Length = 0;
                 var executable = ResolvePythonExecutable(settings.editorPythonExecutablePath);
                 var arguments = BuildArguments(workerPath, settings);
                 process = new Process
@@ -67,6 +69,11 @@ namespace AIHealthcareCoach.MediaPipe
                 {
                     if (!string.IsNullOrWhiteSpace(args.Data))
                     {
+                        if (stderrBuffer.Length < 4096)
+                        {
+                            stderrBuffer.AppendLine(args.Data);
+                        }
+
                         Debug.LogWarning("[Editor Python MediaPipe] " + args.Data);
                     }
                 };
@@ -76,10 +83,12 @@ namespace AIHealthcareCoach.MediaPipe
                 stdin = process.StandardInput.BaseStream;
                 stdout = process.StandardOutput;
 
-                var handshakeLine = ReadLineWithTimeout(stdout, StartupTimeoutMs);
+                var handshakeLine = ReadJsonLineWithTimeout(stdout, StartupTimeoutMs);
                 if (string.IsNullOrWhiteSpace(handshakeLine))
                 {
-                    LastError = "Python MediaPipe worker did not report readiness. Install dependencies with: python3 -m pip install mediapipe numpy";
+                    LastError = "Python MediaPipe worker did not report readiness. "
+                                + "Install dependencies with: python3 -m pip install mediapipe numpy. "
+                                + BuildProcessDiagnostic(executable);
                     Dispose();
                     return false;
                 }
@@ -88,7 +97,7 @@ namespace AIHealthcareCoach.MediaPipe
                 if (handshake == null || !handshake.ready)
                 {
                     LastError = handshake == null || string.IsNullOrWhiteSpace(handshake.errorMessage)
-                        ? "Python MediaPipe worker failed to start."
+                        ? "Python MediaPipe worker failed to start. " + BuildProcessDiagnostic(executable)
                         : handshake.errorMessage;
                     Dispose();
                     return false;
@@ -149,10 +158,10 @@ namespace AIHealthcareCoach.MediaPipe
                 stdin.Write(frameBytes, 0, width * height * 4);
                 stdin.Flush();
 
-                var responseLine = ReadLineWithTimeout(stdout, FrameTimeoutMs);
+                var responseLine = ReadJsonLineWithTimeout(stdout, FrameTimeoutMs);
                 if (string.IsNullOrWhiteSpace(responseLine))
                 {
-                    LastError = "Python MediaPipe worker did not return a frame result.";
+                    LastError = "Python MediaPipe worker did not return a frame result. " + BuildProcessDiagnostic(string.Empty);
                     frame = LandmarkFrame.Empty(timestampMs, "EDITOR_MEDIAPIPE_TIMEOUT", LastError);
                     Dispose();
                     return false;
@@ -225,6 +234,36 @@ namespace AIHealthcareCoach.MediaPipe
                 return configuredPath.Trim();
             }
 
+            var projectRoot = Directory.GetParent(Application.dataPath)?.FullName;
+            if (!string.IsNullOrEmpty(projectRoot))
+            {
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX
+                var localVenvPython = Path.Combine(projectRoot, ".venv-mediapipe", "bin", "python");
+                if (File.Exists(localVenvPython))
+                {
+                    return localVenvPython;
+                }
+
+                localVenvPython = Path.Combine(projectRoot, ".venv", "bin", "python");
+                if (File.Exists(localVenvPython))
+                {
+                    return localVenvPython;
+                }
+#elif UNITY_EDITOR_WIN
+                var localVenvPython = Path.Combine(projectRoot, ".venv-mediapipe", "Scripts", "python.exe");
+                if (File.Exists(localVenvPython))
+                {
+                    return localVenvPython;
+                }
+
+                localVenvPython = Path.Combine(projectRoot, ".venv", "Scripts", "python.exe");
+                if (File.Exists(localVenvPython))
+                {
+                    return localVenvPython;
+                }
+#endif
+            }
+
 #if UNITY_EDITOR_OSX
             if (File.Exists("/opt/homebrew/bin/python3"))
             {
@@ -282,10 +321,55 @@ namespace AIHealthcareCoach.MediaPipe
             }
         }
 
-        private static string ReadLineWithTimeout(StreamReader reader, int timeoutMs)
+        private static string ReadJsonLineWithTimeout(StreamReader reader, int timeoutMs)
         {
-            var readTask = Task.Run(() => reader.ReadLine());
-            return readTask.Wait(timeoutMs) ? readTask.Result : string.Empty;
+            var startedAt = Stopwatch.StartNew();
+
+            while (startedAt.ElapsedMilliseconds < timeoutMs)
+            {
+                var remainingMs = Mathf.Max(1, timeoutMs - (int)startedAt.ElapsedMilliseconds);
+                var readTask = Task.Run(() => reader.ReadLine());
+                if (!readTask.Wait(remainingMs))
+                {
+                    return string.Empty;
+                }
+
+                var line = readTask.Result;
+                if (line == null)
+                {
+                    return string.Empty;
+                }
+
+                if (line.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                {
+                    return line;
+                }
+
+                Debug.LogWarning("[Editor Python MediaPipe stdout] " + line);
+            }
+
+            return string.Empty;
+        }
+
+        private string BuildProcessDiagnostic(string executable)
+        {
+            var builder = new StringBuilder();
+            if (!string.IsNullOrWhiteSpace(executable))
+            {
+                builder.Append("Python executable: ").Append(executable).Append(". ");
+            }
+
+            if (process != null && process.HasExited)
+            {
+                builder.Append("Exit code: ").Append(process.ExitCode).Append(". ");
+            }
+
+            if (stderrBuffer.Length > 0)
+            {
+                builder.Append("stderr: ").Append(stderrBuffer.ToString().Trim());
+            }
+
+            return builder.ToString();
         }
 
         private static string QuoteArgument(string value)

@@ -80,8 +80,13 @@ def landmark_payload(landmarks):
 
     payload = []
     for index, landmark in enumerate(landmarks):
-        visibility = float(getattr(landmark, "visibility", 1.0))
-        presence = float(getattr(landmark, "presence", visibility))
+        raw_visibility = float(getattr(landmark, "visibility", 0.0))
+        raw_presence = float(getattr(landmark, "presence", 0.0))
+        visibility = raw_visibility if raw_visibility > 0.0 else raw_presence
+        presence = raw_presence if raw_presence > 0.0 else visibility
+        if visibility <= 0.0 and presence <= 0.0:
+            visibility = 1.0
+            presence = 1.0
         payload.append(
             {
                 "id": index,
@@ -162,8 +167,10 @@ def main():
             if raw is None:
                 break
 
+            # Unity GetPixels32 returns rows from bottom to top. MediaPipe expects
+            # conventional image rows from top to bottom, so flip vertically before inference.
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 4))
-            rgb = np.ascontiguousarray(frame[:, :, :3])
+            rgb = np.ascontiguousarray(np.flipud(frame[:, :, :3]))
             rgb.flags.writeable = False
             result = pose.process(rgb)
 
