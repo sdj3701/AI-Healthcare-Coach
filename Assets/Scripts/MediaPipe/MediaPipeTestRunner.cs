@@ -18,7 +18,7 @@ namespace AIHealthcareCoach.MediaPipe
 
         [Header("MediaPipe")]
         [SerializeField] private string modelRelativePath = "MediaPipe/pose_landmarker_lite.task";
-        [SerializeField] private float minPoseDetectionConfidence = 0.5f;
+        [SerializeField] private float minPoseDetectionConfidence = 0.35f;
         [SerializeField] private float minPosePresenceConfidence = 0.5f;
         [SerializeField] private float minTrackingConfidence = 0.5f;
         [SerializeField] private float requiredVisibility = 0.45f;

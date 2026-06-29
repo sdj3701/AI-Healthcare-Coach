@@ -886,8 +886,11 @@ Unity에서 설정한다.
 - `EditorPythonMediaPipePoseEstimator`가 프로젝트 루트의 `.venv-mediapipe/bin/python`과 `.venv/bin/python`을 먼저 자동 탐지하도록 했다.
 - Python 워커 시작 실패와 timeout 시 Python 실행 파일, exit code, stderr를 HUD 오류 메시지에 포함하도록 했다.
 - Python stdout에 JSON이 아닌 로그가 섞여도 JSON 라인을 찾아 읽도록 보강했다.
-- `editor_pose_worker.py`에서 Unity 프레임을 MediaPipe에 전달하기 전에 `np.flipud`로 세로 반전하도록 했다.
+- `editor_pose_worker.py`에서 원본, 상하반전, 좌우반전, 180도 회전, 90도 회전 후보를 자동으로 시도하도록 했다.
+- 감지에 성공한 이미지 방향은 다음 프레임에서 우선 시도해 추적이 안정되도록 했다.
+- 성공한 방향의 landmark 좌표를 Unity 프리뷰 좌표계로 다시 변환해 overlay 위치가 맞도록 했다.
 - Python landmark의 `presence`가 0이면 `visibility`로 fallback하도록 했다.
+- Editor 테스트 기본 `minPoseDetectionConfidence`를 `0.35`로 낮춰 초기 감지 성공률을 올렸다.
 
 ### 다시 테스트하는 순서
 
@@ -913,3 +916,9 @@ python -c "import mediapipe, numpy; print('mediapipe ok')"
 - `Error`에 `PYTHON_IMPORT_FAILED`가 나오면 Unity가 사용하는 Python에 `mediapipe numpy`가 설치되지 않은 것이다.
 - `Error`에 `NO_POSE`만 나오면 Python은 정상이고, 카메라 거리/조명/프레임 방향 문제다.
 - `Source`가 `0x0`이거나 카메라 FPS가 0이면 카메라 프레임이 아직 준비되지 않은 것이다.
+
+### 전신 여부
+
+- 예시 이미지처럼 머리부터 발목/발끝까지 전신이 들어오면 가장 안정적으로 추적된다.
+- 상반신만 보여도 일부 landmark는 잡힐 수 있지만, 스쿼트/런지처럼 무릎과 발목이 필요한 동작은 하체가 잘리면 `LowerBodyMissing`이 된다.
+- 초록색 skeleton이 아예 안 나오고 `Landmarks: 0`이면 전신 문제만이 아니라 Python 백엔드, 카메라 프레임 방향, 조명, 거리 문제를 먼저 확인한다.

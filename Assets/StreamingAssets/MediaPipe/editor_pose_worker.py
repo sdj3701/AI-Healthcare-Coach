@@ -74,7 +74,51 @@ def empty_frame(timestamp_ms, code, message):
     }
 
 
-def landmark_payload(landmarks):
+def map_normalized_point(x, y, transform_name):
+    if transform_name == "identity":
+        return x, y
+    if transform_name == "flip_vertical":
+        return x, 1.0 - y
+    if transform_name == "flip_horizontal":
+        return 1.0 - x, y
+    if transform_name == "rotate_180":
+        return 1.0 - x, 1.0 - y
+    if transform_name == "rotate_ccw":
+        return 1.0 - y, x
+    if transform_name == "rotate_cw":
+        return y, 1.0 - x
+    return x, y
+
+
+def normalized_landmark_payload(landmarks, transform_name):
+    if landmarks is None:
+        return []
+
+    payload = []
+    for index, landmark in enumerate(landmarks):
+        x, y = map_normalized_point(float(landmark.x), float(landmark.y), transform_name)
+        raw_visibility = float(getattr(landmark, "visibility", 0.0))
+        raw_presence = float(getattr(landmark, "presence", 0.0))
+        visibility = raw_visibility if raw_visibility > 0.0 else raw_presence
+        presence = raw_presence if raw_presence > 0.0 else visibility
+        if visibility <= 0.0 and presence <= 0.0:
+            visibility = 1.0
+            presence = 1.0
+        payload.append(
+            {
+                "id": index,
+                "name": LANDMARK_NAMES[index] if index < len(LANDMARK_NAMES) else "unknown",
+                "x": max(0.0, min(1.0, x)),
+                "y": max(0.0, min(1.0, y)),
+                "z": float(landmark.z),
+                "visibility": visibility,
+                "presence": presence,
+            }
+        )
+    return payload
+
+
+def world_landmark_payload(landmarks):
     if landmarks is None:
         return []
 
@@ -99,6 +143,32 @@ def landmark_payload(landmarks):
             }
         )
     return payload
+
+
+def image_candidates(rgb, preferred_transform):
+    transforms = {
+        "identity": lambda image: image,
+        "flip_vertical": lambda image: __import__("numpy").flipud(image),
+        "flip_horizontal": lambda image: __import__("numpy").fliplr(image),
+        "rotate_180": lambda image: __import__("numpy").rot90(image, 2),
+        "rotate_ccw": lambda image: __import__("numpy").rot90(image, 1),
+        "rotate_cw": lambda image: __import__("numpy").rot90(image, 3),
+    }
+    order = [
+        preferred_transform,
+        "identity",
+        "flip_vertical",
+        "flip_horizontal",
+        "rotate_180",
+        "rotate_ccw",
+        "rotate_cw",
+    ]
+    seen = set()
+    for name in order:
+        if not name or name in seen or name not in transforms:
+            continue
+        seen.add(name)
+        yield name, transforms[name](rgb)
 
 
 def parse_args():
@@ -150,6 +220,7 @@ def main():
     write_json({"ready": True, "errorCode": "", "errorMessage": ""})
 
     input_stream = sys.stdin.buffer
+    preferred_transform = "identity"
     while True:
         header_line = input_stream.readline()
         if not header_line:
@@ -167,19 +238,27 @@ def main():
             if raw is None:
                 break
 
-            # Unity GetPixels32 returns rows from bottom to top. MediaPipe expects
-            # conventional image rows from top to bottom, so flip vertically before inference.
             frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 4))
-            rgb = np.ascontiguousarray(np.flipud(frame[:, :, :3]))
-            rgb.flags.writeable = False
-            result = pose.process(rgb)
+            base_rgb = frame[:, :, :3]
 
-            if not result.pose_landmarks:
+            result = None
+            used_transform = ""
+            for transform_name, candidate in image_candidates(base_rgb, preferred_transform):
+                rgb = np.ascontiguousarray(candidate)
+                rgb.flags.writeable = False
+                candidate_result = pose.process(rgb)
+                if candidate_result.pose_landmarks:
+                    result = candidate_result
+                    used_transform = transform_name
+                    preferred_transform = transform_name
+                    break
+
+            if result is None or not result.pose_landmarks:
                 write_json(
                     empty_frame(
                         timestamp_ms,
                         "NO_POSE",
-                        "No pose landmarks detected in the current frame.",
+                        "No pose landmarks detected in the current frame after trying image orientations.",
                     )
                 )
                 continue
@@ -187,13 +266,16 @@ def main():
             write_json(
                 {
                     "timestampMs": timestamp_ms,
-                    "cameraMode": "editor_python_mediapipe",
+                    "cameraMode": "editor_python_mediapipe/" + used_transform,
                     "sourceWidth": width,
                     "sourceHeight": height,
                     "mirrored": mirrored,
                     "rotationAngle": rotation_angle,
-                    "landmarks": landmark_payload(result.pose_landmarks.landmark),
-                    "worldLandmarks": landmark_payload(
+                    "landmarks": normalized_landmark_payload(
+                        result.pose_landmarks.landmark,
+                        used_transform,
+                    ),
+                    "worldLandmarks": world_landmark_payload(
                         result.pose_world_landmarks.landmark
                         if result.pose_world_landmarks
                         else None
