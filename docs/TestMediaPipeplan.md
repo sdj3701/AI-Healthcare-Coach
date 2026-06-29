@@ -699,3 +699,175 @@ MediaPipe 실시간 테스트 완료 기준:
 - Apple TestFlight overview: https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview/
 - MediaPipe Pose Landmarker guide: https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker
 - MediaPipe Pose Landmarker iOS guide: https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker/ios
+
+## 15. 2026-06-29 M1 Mac Editor 동작 clarification 및 코드 수정 기록
+
+### 확인된 문제
+
+- M1 MacBook의 Unity Editor에서 카메라 프리뷰 위에 관절 skeleton이 보이지만 실제 몸을 따라가지 않는 현상이 있었다.
+- 원인은 실제 MediaPipe 추론이 아니라 `EditorStubPoseEstimator`의 합성 관절 데이터가 기본으로 표시되고 있었기 때문이다.
+- 현재 프로젝트의 실제 MediaPipe 추론 백엔드는 `IOSMediaPipePoseEstimator`이며, `UNITY_IOS && !UNITY_EDITOR` 조건에서만 활성화된다.
+- 따라서 MacBook M1 Unity Editor에서는 카메라 프리뷰는 가능하지만, 이 코드만으로는 실제 관절 추적이 되지 않는다.
+- 이 섹션은 Python Editor 백엔드 추가 전 상태를 기록한 것이다. 현재 상태는 섹션 17을 따른다.
+
+### 코드 변경
+
+- `MediaPipeTestRunner.simulatePoseWhenNativeUnavailable` 기본값을 `false`로 변경했다.
+- `Assets/Scenes/MediaPipeTest.unity`에 저장된 `simulatePoseWhenNativeUnavailable`도 `0`으로 변경했다.
+- `PoseEstimatorSettings.simulatePoseWhenNativeUnavailable` 기본값을 `false`로 변경했다.
+- `EditorStubPoseEstimator`의 백엔드명을 `Editor Simulation (not camera tracking)`으로 바꿔 시뮬레이션임을 명확히 했다.
+- 시뮬레이션이 꺼진 상태에서 Editor로 실행하면 `No Native Pose Backend`와 실제 추적 미지원 메시지를 HUD에 표시하도록 했다.
+
+### 현재 사용 방법
+
+M1 MacBook Unity Editor에서 할 수 있는 것:
+
+1. `Assets/Scenes/MediaPipeTest.unity`를 연다.
+2. Play Mode에서 `Start Camera`를 누른다.
+3. 카메라 권한을 허용하고 프리뷰/FPS/HUD가 정상인지 확인한다.
+4. 이 상태에서는 실제 관절 추적이 되지 않는 것이 정상이다.
+
+Editor에서 오버레이 UI만 테스트하고 싶을 때:
+
+1. `MediaPipe Test Runtime` 오브젝트를 선택한다.
+2. `MediaPipeTestRunner > Simulate Pose When Native Unavailable`을 켠다.
+3. Play Mode에서 가짜 skeleton이 표시되는지 확인한다.
+4. 이 skeleton은 카메라 화면을 분석하지 않으며 몸을 추적하지 않는다.
+
+실제 관절 추적을 테스트할 때:
+
+1. M1 MacBook에서 iOS Build Support와 Xcode를 준비한다.
+2. Unity Build Profile을 iOS로 전환한다.
+3. iPhone XS Max를 연결하고 Xcode에서 실행한다.
+4. iOS 실기기 빌드에서 `IOSMediaPipePoseEstimator`가 활성화되어 실제 MediaPipe 추론을 수행한다.
+
+### M1 MacBook Editor에서 실제 추적을 하려면 필요한 추가 작업
+
+MacBook 내장 카메라로 Unity Editor에서 실제 관절 추적까지 하려면 별도 Editor용 MediaPipe 백엔드가 필요하다. 이후 섹션 17에서 Python MediaPipe 워커 백엔드를 추가했다.
+
+가능한 구현 방향:
+
+- MediaPipe Unity 플러그인을 도입해 macOS Apple Silicon 네이티브 바이너리와 C# adapter를 연결한다.
+- MediaPipe Tasks Vision macOS 네이티브 플러그인을 직접 만들고 `IPoseEstimator` 구현체를 추가한다.
+- 빠른 검증만 필요하면 Python/OpenCV/MediaPipe를 외부 프로세스로 띄우는 프로토타입을 만들 수 있지만, Unity 실시간 앱 구조로는 최종 권장 방식이 아니다.
+
+우선순위:
+
+1. 현재는 M1 Mac Editor에서 카메라 프리뷰/HUD만 검증한다.
+2. 실제 관절 추적은 iPhone iOS 실기기 빌드로 검증한다.
+3. Mac Editor에서도 실제 추적이 필요하면 섹션 17의 Python MediaPipe Editor 백엔드를 우선 사용하고, 제품화 단계에서는 네이티브 macOS 플러그인 또는 검증된 Unity MediaPipe 플러그인을 검토한다.
+
+## 16. 2026-06-29 계획 대비 구현 보강 기록
+
+### 반영한 계획 항목
+
+이번 수정은 `TestMediaPipeplan`의 MVP 테스트 범위 중 아래 항목을 코드에 더 명확히 반영했다.
+
+- PBI-018: 주요 관절 visibility/presence 기준 충족 시에만 시작 허용
+- PBI-019: 발목 누락, 상체 잘림, 조명 부족/낮은 confidence 안내
+- PBI-021: 2~3초 캘리브레이션
+- PBI-024: 카메라 미러링, 회전, 전/후면 모드 확인
+- PBI-029: visibility 낮은 프레임 판정 제외
+- PBI-030: 카메라 표시 FPS와 포즈 추론 FPS 분리
+- PBI-031: FPS, 메모리, 오류 코드 중심의 QA 진단 로그
+- PBI-052: 원본 영상 없이 좌표/성능 로그만 사용
+
+### 코드 변경
+
+- `PoseQualityGate`가 visibility만 보던 구조에서 visibility, presence, 화면 경계 범위를 함께 평가하도록 변경했다.
+- `PoseQualityReport`에 `averagePresence`, `trackableRequiredLandmarks`를 추가했다.
+- 상체/하체 필수 관절이 낮은 confidence이거나 화면 밖에 가까우면 `UpperBodyMissing`/`LowerBodyMissing`으로 분류한다.
+- `MediaPipeTestRunner`에 `requiredPresence`, `landmarkEdgeMargin`, `calibrationSeconds` 설정을 추가했다.
+- 포즈가 `READY`가 되더라도 `calibrationSeconds` 동안 유지되어야 HUD 상태가 `Ready`로 바뀌도록 했다.
+- `CameraPreviewController`에 현재/선호 카메라 방향 상태와 전/후면 선호 전환 기능을 추가했다.
+- 테스트 툴바에 `Switch Camera` 버튼을 추가했다.
+- `PoseDebugHud`에 timestamp, source size, camera mode, average presence, visible/trackable required count를 표시하도록 했다.
+- `MediaPipeQaLogger`를 추가해 `Application.persistentDataPath/mediapipe_pose_qa.jsonl`에 QA 로그를 JSONL로 저장한다.
+- QA 로그는 원본 영상, 이미지 프레임, 얼굴/신체 이미지를 저장하지 않는다.
+- iOS Swift 브릿지에서 MediaPipe landmark의 `visibility` 또는 `presence`가 nil일 때 서로 fallback하도록 수정했다.
+
+### M1 MacBook에서 확인할 것
+
+Unity Editor:
+
+1. `Assets/Scenes/MediaPipeTest.unity`를 연다.
+2. Play Mode에서 `Start Camera`를 누른다.
+3. HUD에 카메라 FPS, 장치명, backend 상태가 표시되는지 확인한다.
+4. `Switch Camera` 버튼으로 카메라 선호 방향이 바뀌는지 확인한다.
+5. Python MediaPipe 환경이 준비되어 있으면 `Editor Python MediaPipe` 백엔드가 실제 관절 추적을 수행한다.
+6. Python 환경이 없거나 실패하면 HUD에 설치 안내 오류가 표시된다.
+7. 오버레이 UI만 확인하려면 Inspector에서 `Use Python MediaPipe In Editor`를 끄고 `Simulate Pose When Native Unavailable`을 켠다.
+
+iPhone 실기기:
+
+1. M1 MacBook에서 iOS Build Support와 Xcode를 준비한다.
+2. Unity를 iOS Build Profile로 전환하고 빌드한다.
+3. Xcode에서 `pod install`이 성공했는지 확인한다.
+4. iPhone XS Max에서 실행한다.
+5. 사람이 화면에 들어오면 landmark count 33, timestamp 증가, quality state 변화를 확인한다.
+6. `Ready` 상태가 2초 캘리브레이션 후 표시되는지 확인한다.
+7. 발목이나 상체를 화면 밖으로 빼면 `LowerBodyMissing` 또는 `UpperBodyMissing`이 나오는지 확인한다.
+8. 앱 실행 후 QA 로그에 원본 영상 없이 JSONL 상태 로그만 남는지 확인한다.
+
+### 남은 구현 항목
+
+- M1 MacBook Unity Editor의 실제 추론은 Python MediaPipe 워커 백엔드로 우선 지원한다.
+- 현재 저장소에는 iOS 실기기용 MediaPipe 브릿지와 Editor Python MediaPipe 백엔드가 있다.
+- iOS에서 실제 빌드 후 Swift/Pod 의존성, 카메라 orientation, landmark 좌우 매핑을 실기기로 검증해야 한다.
+
+## 17. 2026-06-29 Unity Editor 실제 MediaPipe 추적 추가 기록
+
+### 목표
+
+M1 MacBook Unity Editor에서도 내장 카메라 프리뷰 위에 실제 MediaPipe Pose landmark가 따라오도록 Editor 전용 백엔드를 추가한다.
+
+### 구현 방식
+
+- Unity C#이 카메라 프레임 RGBA 데이터를 Python 워커 프로세스 stdin으로 전달한다.
+- Python 워커는 `mediapipe` Python 패키지의 Pose 추론을 실행한다.
+- Python 워커는 33개 landmark와 world landmark를 `LandmarkFrame` JSON으로 stdout에 반환한다.
+- 원본 영상 파일, 이미지 프레임, mp4는 저장하지 않는다.
+- iOS 실기기 빌드는 기존 `IOSMediaPipePoseEstimator`와 Swift bridge를 그대로 사용한다.
+
+### 코드 변경
+
+- `EditorPythonMediaPipePoseEstimator.cs`를 추가했다.
+- `Assets/StreamingAssets/MediaPipe/editor_pose_worker.py`를 추가했다.
+- `PoseEstimatorSettings`에 Editor Python 백엔드 설정을 추가했다.
+- `PoseEstimatorFactory`가 Unity Editor에서는 `EditorPythonMediaPipePoseEstimator`를 우선 생성하도록 변경했다.
+- `MediaPipeTestRunner`에 `Use Python MediaPipe In Editor`, `Editor Python Executable Path`, `Editor Python Worker Relative Path` 설정을 추가했다.
+- `Assets/Scenes/MediaPipeTest.unity` 기본값을 Python Editor 백엔드 사용으로 설정했다.
+
+### M1 MacBook 준비
+
+Mac 터미널에서 Python 환경을 준비한다.
+
+```bash
+python3 -m venv .venv-mediapipe
+source .venv-mediapipe/bin/activate
+python -m pip install --upgrade pip
+python -m pip install mediapipe numpy
+```
+
+Unity에서 설정한다.
+
+1. `Assets/Scenes/MediaPipeTest.unity`를 연다.
+2. `MediaPipe Test Runtime` 오브젝트를 선택한다.
+3. `MediaPipeTestRunner > Use Python MediaPipe In Editor`가 켜져 있는지 확인한다.
+4. venv를 사용했다면 `Editor Python Executable Path`에 `.venv-mediapipe/bin/python`의 절대 경로를 넣는다.
+5. Play Mode에서 `Start Camera`를 누른다.
+6. HUD의 `Backend`가 `Editor Python MediaPipe`인지 확인한다.
+7. 전신이 카메라에 보이도록 물러서서 landmark count가 33으로 바뀌고 skeleton이 몸을 따라오는지 확인한다.
+
+### 실패 시 확인
+
+- `PYTHON_IMPORT_FAILED`: `mediapipe` 또는 `numpy`가 설치되지 않은 Python을 사용 중이다.
+- `Editor MediaPipe worker was not found`: `editor_pose_worker.py` 경로가 잘못되었거나 StreamingAssets가 누락되었다.
+- `NO_POSE`: 카메라에는 들어오지만 사람이 충분히 보이지 않는다. 전신이 보이도록 거리와 조명을 조정한다.
+- `EDITOR_MEDIAPIPE_TIMEOUT`: Python 워커가 너무 느리거나 중단되었다. `targetPoseFps`를 10 이하로 낮춰 확인한다.
+
+### 남은 검증
+
+- 현재 작업 PC는 Windows라 M1 Mac에서 Python MediaPipe 실제 추론은 직접 실행 검증하지 못했다.
+- M1 Mac에서 Python 패키지 설치 후 Play Mode로 실기 카메라 추적을 확인해야 한다.
+- 성능이 낮으면 `targetPoseFps`를 10~15 사이로 조정한다.

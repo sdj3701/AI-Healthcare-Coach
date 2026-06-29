@@ -30,14 +30,20 @@ namespace AIHealthcareCoach.MediaPipe
             if (report != null)
             {
                 builder.Append("Avg Visibility: ").Append(report.averageVisibility.ToString("0.00")).AppendLine();
+                builder.Append("Avg Presence: ").Append(report.averagePresence.ToString("0.00")).AppendLine();
                 builder.Append("Quality: ").Append(report.state).Append(" (")
-                    .Append(report.visibleRequiredLandmarks).Append("/")
+                    .Append(report.trackableRequiredLandmarks).Append("/")
                     .Append(report.requiredLandmarkCount).AppendLine(")");
+                builder.Append("Visible Required: ").Append(report.visibleRequiredLandmarks).Append("/")
+                    .Append(report.requiredLandmarkCount).AppendLine();
                 builder.Append("Message: ").AppendLine(report.message);
             }
 
             if (frame != null)
             {
+                builder.Append("Timestamp ms: ").Append(frame.timestampMs).AppendLine();
+                builder.Append("Source: ").Append(frame.sourceWidth).Append("x").Append(frame.sourceHeight).AppendLine();
+                builder.Append("Camera Mode: ").AppendLine(string.IsNullOrEmpty(frame.cameraMode) ? "-" : frame.cameraMode);
                 builder.Append("Rotation: ").Append(frame.rotationAngle).AppendLine();
                 builder.Append("Mirrored: ").Append(frame.mirrored).AppendLine();
             }

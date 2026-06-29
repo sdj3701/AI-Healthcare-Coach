@@ -11,6 +11,9 @@ namespace AIHealthcareCoach.MediaPipe
         public float minPosePresenceConfidence = 0.5f;
         public float minTrackingConfidence = 0.5f;
         public int targetPoseFps = 15;
-        public bool simulatePoseWhenNativeUnavailable = true;
+        public bool simulatePoseWhenNativeUnavailable;
+        public bool usePythonMediaPipeInEditor = true;
+        public string editorPythonExecutablePath;
+        public string editorPythonWorkerRelativePath = "MediaPipe/editor_pose_worker.py";
     }
 }

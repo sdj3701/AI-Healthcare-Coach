@@ -238,14 +238,16 @@ private final class AHCMediaPipePoseBridge {
         payload.reserveCapacity(landmarks.count)
 
         for (index, landmark) in landmarks.enumerated() {
+            let visibility = landmark.visibility?.floatValue ?? landmark.presence?.floatValue ?? 1.0
+            let presence = landmark.presence?.floatValue ?? landmark.visibility?.floatValue ?? 1.0
             payload.append([
                 "id": index,
                 "name": name(for: index),
                 "x": landmark.x,
                 "y": landmark.y,
                 "z": landmark.z,
-                "visibility": landmark.visibility?.floatValue ?? 0.0,
-                "presence": landmark.presence?.floatValue ?? 0.0
+                "visibility": visibility,
+                "presence": presence
             ])
         }
 
@@ -257,14 +259,16 @@ private final class AHCMediaPipePoseBridge {
         payload.reserveCapacity(landmarks.count)
 
         for (index, landmark) in landmarks.enumerated() {
+            let visibility = landmark.visibility?.floatValue ?? landmark.presence?.floatValue ?? 1.0
+            let presence = landmark.presence?.floatValue ?? landmark.visibility?.floatValue ?? 1.0
             payload.append([
                 "id": index,
                 "name": name(for: index),
                 "x": landmark.x,
                 "y": landmark.y,
                 "z": landmark.z,
-                "visibility": landmark.visibility?.floatValue ?? 0.0,
-                "presence": landmark.presence?.floatValue ?? 0.0
+                "visibility": visibility,
+                "presence": presence
             ])
         }
 

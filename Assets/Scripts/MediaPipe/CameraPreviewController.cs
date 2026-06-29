@@ -51,9 +51,24 @@ namespace AIHealthcareCoach.MediaPipe
             get { return mirrorFrontCameraPreview && activeCameraIsFrontFacing; }
         }
 
+        public bool PreferFrontCamera
+        {
+            get { return preferFrontCamera; }
+        }
+
+        public bool ActiveCameraIsFrontFacing
+        {
+            get { return activeCameraIsFrontFacing; }
+        }
+
         public float CameraFps { get; private set; }
         public string ActiveDeviceName { get; private set; }
         public string LastError { get; private set; }
+
+        public void TogglePreferredCameraFacing()
+        {
+            preferFrontCamera = !preferFrontCamera;
+        }
 
         public IEnumerator StartCamera()
         {

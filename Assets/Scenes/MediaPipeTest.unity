@@ -249,13 +249,22 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::AIHealthcareCoach.MediaPipe.MediaPipeTestRunner
   targetPoseFps: 15
-  simulatePoseWhenNativeUnavailable: 1
+  simulatePoseWhenNativeUnavailable: 0
+  usePythonMediaPipeInEditor: 1
+  editorPythonExecutablePath: 
+  editorPythonWorkerRelativePath: MediaPipe/editor_pose_worker.py
   modelRelativePath: MediaPipe/pose_landmarker_lite.task
   minPoseDetectionConfidence: 0.5
   minPosePresenceConfidence: 0.5
   minTrackingConfidence: 0.5
   requiredVisibility: 0.45
+  requiredPresence: 0.45
   averageVisibilityThreshold: 0.55
+  landmarkEdgeMargin: 0.02
+  calibrationSeconds: 2
+  writeQaLog: 1
+  qaLogIntervalSeconds: 1
+  qaLogFileName: mediapipe_pose_qa.jsonl
 --- !u!114 &417633983
 MonoBehaviour:
   m_ObjectHideFlags: 0

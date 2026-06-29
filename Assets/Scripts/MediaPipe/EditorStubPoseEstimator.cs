@@ -15,7 +15,7 @@ namespace AIHealthcareCoach.MediaPipe
 
         public string BackendName
         {
-            get { return simulatePose ? "Editor Stub Pose" : "No Native Pose Backend"; }
+            get { return simulatePose ? "Editor Simulation (not camera tracking)" : "No Native Pose Backend"; }
         }
 
         public bool IsReady
@@ -28,9 +28,11 @@ namespace AIHealthcareCoach.MediaPipe
         public bool Initialize(PoseEstimatorSettings settings)
         {
             this.settings = settings;
-            isReady = true;
-            LastError = string.Empty;
-            return true;
+            isReady = simulatePose;
+            LastError = simulatePose
+                ? string.Empty
+                : "Real MediaPipe pose tracking is not implemented for Unity Editor in this project. Use an iOS device build, or add a macOS MediaPipe backend/plugin for M1 Mac Editor tracking.";
+            return isReady;
         }
 
         public bool TryProcessFrame(
@@ -50,7 +52,8 @@ namespace AIHealthcareCoach.MediaPipe
 
             if (!simulatePose)
             {
-                frame = LandmarkFrame.Empty(timestampMs, "NATIVE_BACKEND_UNAVAILABLE", "Real MediaPipe inference runs on iOS in this build.");
+                LastError = "Real MediaPipe pose tracking is not implemented for Unity Editor in this project. The old moving skeleton was only synthetic overlay test data.";
+                frame = LandmarkFrame.Empty(timestampMs, "NATIVE_BACKEND_UNAVAILABLE", LastError);
                 return false;
             }
 
