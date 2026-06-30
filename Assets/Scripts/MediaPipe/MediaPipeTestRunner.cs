@@ -1,5 +1,7 @@
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
+using AIHealthcareCoach.Tts;
 using UnityEngine;
 
 namespace AIHealthcareCoach.MediaPipe
@@ -29,6 +31,12 @@ namespace AIHealthcareCoach.MediaPipe
         [Header("Calibration")]
         [SerializeField] private float calibrationSeconds = 2f;
 
+        [Header("Exercise Feedback")]
+        [SerializeField] private bool analyzeExerciseFeedback = true;
+        [SerializeField] private bool speakExerciseFeedback;
+        [SerializeField, Range(0f, 1f)] private float exerciseFeedbackMinimumConfidence = 0.5f;
+        [SerializeField, Range(0f, 10f)] private float exerciseFeedbackCooldownSeconds = 2f;
+
         [Header("QA Logging")]
         [SerializeField] private bool writeQaLog = true;
         [SerializeField] private float qaLogIntervalSeconds = 1f;
@@ -41,6 +49,9 @@ namespace AIHealthcareCoach.MediaPipe
         private IPoseEstimator poseEstimator;
         private PoseQualityGate qualityGate;
         private PoseQualityReport qualityReport;
+        private PoseExerciseFeedbackAnalyzer exerciseFeedbackAnalyzer;
+        private TtsController ttsController;
+        private readonly List<PoseExerciseFeedbackMessage> exerciseFeedback = new List<PoseExerciseFeedbackMessage>();
         private LandmarkFrame latestFrame;
         private Color32[] pixelBuffer;
         private string status = "Stopped";
@@ -52,6 +63,10 @@ namespace AIHealthcareCoach.MediaPipe
         private float nextQaLogAt;
         private float readyStartedAt = -1f;
         private string lastError;
+        private float lastInferenceMs;
+        private int successfulFrameCount;
+        private int failedFrameCount;
+        private int droppedFrameCount;
 
         private void Awake()
         {
@@ -64,6 +79,12 @@ namespace AIHealthcareCoach.MediaPipe
                 averageVisibilityThreshold,
                 landmarkEdgeMargin);
             qualityReport = qualityGate.Evaluate(false, null);
+            exerciseFeedbackAnalyzer = new PoseExerciseFeedbackAnalyzer
+            {
+                minimumConfidence = exerciseFeedbackMinimumConfidence,
+                feedbackCooldownSeconds = exerciseFeedbackCooldownSeconds
+            };
+            ttsController = FindFirstObjectByType<TtsController>();
 
             if (cameraPreview == null)
             {
@@ -96,18 +117,30 @@ namespace AIHealthcareCoach.MediaPipe
                 return;
             }
 
-            nextPoseSampleAt = Time.unscaledTime + 1f / Mathf.Max(1f, targetPoseFps);
+            var interval = 1f / Mathf.Max(1f, targetPoseFps);
+            var skippedSamples = Mathf.FloorToInt(Mathf.Max(0f, Time.unscaledTime - nextPoseSampleAt) / interval);
+            if (skippedSamples > 0)
+            {
+                droppedFrameCount += skippedSamples;
+            }
+
+            nextPoseSampleAt = Time.unscaledTime + interval;
             ProcessPoseSample();
         }
 
         private void ProcessPoseSample()
         {
+            var startedAt = Time.realtimeSinceStartup;
+
             if (poseEstimator == null || !poseEstimator.IsReady)
             {
                 lastError = poseEstimator == null ? "Pose estimator has not been created." : poseEstimator.LastError;
                 latestFrame = LandmarkFrame.Empty(CurrentTimestampMs(), "POSE_BACKEND_NOT_READY", lastError);
+                failedFrameCount++;
+                exerciseFeedback.Clear();
                 qualityReport = qualityGate.Evaluate(cameraPreview.IsRunning, latestFrame);
                 MaybeWriteQaLog();
+                lastInferenceMs = (Time.realtimeSinceStartup - startedAt) * 1000f;
                 return;
             }
 
@@ -115,8 +148,11 @@ namespace AIHealthcareCoach.MediaPipe
             if (pixelBuffer == null || pixelBuffer.Length == 0)
             {
                 latestFrame = LandmarkFrame.Empty(CurrentTimestampMs(), "CAMERA_FRAME_EMPTY", "Camera frame is not ready yet.");
+                failedFrameCount++;
+                exerciseFeedback.Clear();
                 qualityReport = qualityGate.Evaluate(cameraPreview.IsRunning, latestFrame);
                 MaybeWriteQaLog();
+                lastInferenceMs = (Time.realtimeSinceStartup - startedAt) * 1000f;
                 return;
             }
 
@@ -140,18 +176,22 @@ namespace AIHealthcareCoach.MediaPipe
 
             if (success)
             {
+                successfulFrameCount++;
                 CountPoseFrame();
                 status = "Running";
                 lastError = string.Empty;
             }
             else
             {
+                failedFrameCount++;
                 lastError = poseEstimator.LastError;
                 status = string.IsNullOrEmpty(lastError) ? "Running without pose" : "Pose error";
             }
 
             qualityReport = qualityGate.Evaluate(cameraPreview.IsRunning, latestFrame);
+            AnalyzeExerciseFeedback(success);
             UpdateCalibrationStatus(success);
+            lastInferenceMs = (Time.realtimeSinceStartup - startedAt) * 1000f;
             MaybeWriteQaLog();
         }
 
@@ -167,7 +207,7 @@ namespace AIHealthcareCoach.MediaPipe
                 overlayRenderer.DrawOverlay(previewRect, latestFrame, cameraPreview.IsDisplayMirrored);
             }
 
-            var hudRect = new Rect(12f, Screen.height - 272f, Mathf.Min(560f, Screen.width - 24f), 260f);
+            var hudRect = new Rect(12f, Screen.height - 352f, Mathf.Min(620f, Screen.width - 24f), 340f);
             debugHud.DrawHud(
                 hudRect,
                 status,
@@ -177,6 +217,11 @@ namespace AIHealthcareCoach.MediaPipe
                 qualityReport,
                 cameraPreview.CameraFps,
                 poseFps,
+                lastInferenceMs,
+                successfulFrameCount,
+                failedFrameCount,
+                droppedFrameCount,
+                exerciseFeedback,
                 BuildVisibleError());
         }
 
@@ -229,6 +274,7 @@ namespace AIHealthcareCoach.MediaPipe
             poseFpsWindowStartedAt = Time.unscaledTime;
             poseFrameCount = 0;
             poseFps = 0f;
+            ResetPerformanceCounters();
             if (poseReady)
             {
                 status = "Running";
@@ -258,7 +304,9 @@ namespace AIHealthcareCoach.MediaPipe
 
             pixelBuffer = null;
             latestFrame = null;
+            exerciseFeedback.Clear();
             poseFps = 0f;
+            lastInferenceMs = 0f;
             nextQaLogAt = 0f;
             readyStartedAt = -1f;
             lastError = string.Empty;
@@ -392,12 +440,53 @@ namespace AIHealthcareCoach.MediaPipe
                     cameraPreview.ActiveDeviceName,
                     latestFrame,
                     qualityReport,
+                    lastInferenceMs,
+                    successfulFrameCount,
+                    failedFrameCount,
+                    droppedFrameCount,
+                    exerciseFeedback,
                     BuildVisibleError());
             }
             catch (System.Exception exception)
             {
                 lastError = "QA log write failed: " + exception.Message;
                 writeQaLog = false;
+            }
+        }
+
+        private void AnalyzeExerciseFeedback(bool poseSuccess)
+        {
+            exerciseFeedback.Clear();
+
+            if (!analyzeExerciseFeedback || !poseSuccess || latestFrame == null || !latestFrame.HasPose)
+            {
+                return;
+            }
+
+            exerciseFeedbackAnalyzer.minimumConfidence = exerciseFeedbackMinimumConfidence;
+            exerciseFeedbackAnalyzer.feedbackCooldownSeconds = exerciseFeedbackCooldownSeconds;
+            exerciseFeedbackAnalyzer.Analyze(latestFrame, exerciseFeedback);
+
+            if (!speakExerciseFeedback || exerciseFeedback.Count == 0)
+            {
+                return;
+            }
+
+            ttsController ??= FindFirstObjectByType<TtsController>();
+            if (ttsController == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < exerciseFeedback.Count; i++)
+            {
+                if (exerciseFeedback[i].confidence < exerciseFeedbackMinimumConfidence)
+                {
+                    continue;
+                }
+
+                ttsController.TrySpeak(exerciseFeedback[i].text, out _);
+                break;
             }
         }
 
@@ -449,6 +538,15 @@ namespace AIHealthcareCoach.MediaPipe
             poseFps = poseFrameCount / elapsed;
             poseFrameCount = 0;
             poseFpsWindowStartedAt = Time.unscaledTime;
+        }
+
+        private void ResetPerformanceCounters()
+        {
+            successfulFrameCount = 0;
+            failedFrameCount = 0;
+            droppedFrameCount = 0;
+            lastInferenceMs = 0f;
+            exerciseFeedback.Clear();
         }
 
         private static long CurrentTimestampMs()

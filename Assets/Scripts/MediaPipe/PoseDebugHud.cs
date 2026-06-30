@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text;
 using UnityEngine;
 
@@ -16,6 +17,11 @@ namespace AIHealthcareCoach.MediaPipe
             PoseQualityReport report,
             float cameraFps,
             float poseFps,
+            float inferenceMs,
+            int successfulFrames,
+            int failedFrames,
+            int droppedFrames,
+            IReadOnlyList<PoseExerciseFeedbackMessage> feedbackMessages,
             string lastError)
         {
             builder.Length = 0;
@@ -25,6 +31,14 @@ namespace AIHealthcareCoach.MediaPipe
             builder.Append("Camera: ").AppendLine(string.IsNullOrEmpty(deviceName) ? "-" : deviceName);
             builder.Append("Camera FPS: ").Append(cameraFps.ToString("0.0")).AppendLine();
             builder.Append("Pose FPS: ").Append(poseFps.ToString("0.0")).AppendLine();
+            builder.Append("Inference ms: ").Append(inferenceMs.ToString("0.0")).AppendLine();
+            builder.Append("Frames ok/fail/drop: ")
+                .Append(successfulFrames)
+                .Append("/")
+                .Append(failedFrames)
+                .Append("/")
+                .Append(droppedFrames)
+                .AppendLine();
             builder.Append("Landmarks: ").Append(frame == null ? 0 : frame.LandmarkCount).AppendLine();
 
             if (report != null)
@@ -51,6 +65,23 @@ namespace AIHealthcareCoach.MediaPipe
             if (!string.IsNullOrEmpty(lastError))
             {
                 builder.Append("Error: ").AppendLine(lastError);
+            }
+
+            if (feedbackMessages != null && feedbackMessages.Count > 0)
+            {
+                builder.AppendLine("Feedback:");
+                var count = Mathf.Min(3, feedbackMessages.Count);
+                for (var i = 0; i < count; i++)
+                {
+                    var feedback = feedbackMessages[i];
+                    builder.Append("- ")
+                        .Append(feedback.severity)
+                        .Append(": ")
+                        .Append(feedback.text)
+                        .Append(" (")
+                        .Append(feedback.confidence.ToString("0.00"))
+                        .AppendLine(")");
+                }
             }
 
             GUI.Box(rect, builder.ToString());

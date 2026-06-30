@@ -4,9 +4,19 @@ namespace AIHealthcareCoach.MediaPipe
 {
     public sealed class PoseOverlayRenderer : MonoBehaviour
     {
+        private enum LowConfidenceMode
+        {
+            Hide,
+            Dim
+        }
+
         [SerializeField] private float minVisibleConfidence = 0.45f;
+        [SerializeField] private LowConfidenceMode lowConfidenceMode = LowConfidenceMode.Dim;
         [SerializeField] private float lineWidth = 4f;
         [SerializeField] private float pointSize = 8f;
+        [SerializeField] private Color highConfidenceLineColor = new Color(0.15f, 0.9f, 0.68f, 0.95f);
+        [SerializeField] private Color highConfidencePointColor = new Color(0.08f, 1f, 0.74f, 0.95f);
+        [SerializeField] private Color lowConfidenceColor = new Color(0.55f, 0.55f, 0.55f, 0.45f);
 
         private static Texture2D whiteTexture;
 
@@ -29,9 +39,13 @@ namespace AIHealthcareCoach.MediaPipe
 
                 var startVisibility = frame.landmarks[connection.start].visibility;
                 var endVisibility = frame.landmarks[connection.end].visibility;
-                var color = Mathf.Min(startVisibility, endVisibility) >= minVisibleConfidence
-                    ? new Color(0.15f, 0.9f, 0.68f, 0.95f)
-                    : new Color(1f, 0.75f, 0.18f, 0.55f);
+                var confidence = Mathf.Min(startVisibility, endVisibility);
+                if (confidence < minVisibleConfidence && lowConfidenceMode == LowConfidenceMode.Hide)
+                {
+                    continue;
+                }
+
+                var color = confidence >= minVisibleConfidence ? highConfidenceLineColor : lowConfidenceColor;
 
                 DrawLine(start, end, color, lineWidth);
             }
@@ -43,11 +57,16 @@ namespace AIHealthcareCoach.MediaPipe
                     continue;
                 }
 
-                var color = frame.landmarks[i].visibility >= minVisibleConfidence
-                    ? new Color(0.08f, 1f, 0.74f, 0.95f)
-                    : new Color(1f, 0.82f, 0.22f, 0.65f);
+                var confidence = frame.landmarks[i].visibility;
+                if (confidence < minVisibleConfidence && lowConfidenceMode == LowConfidenceMode.Hide)
+                {
+                    continue;
+                }
 
-                DrawPoint(point, color, pointSize);
+                var color = confidence >= minVisibleConfidence ? highConfidencePointColor : lowConfidenceColor;
+                var size = confidence >= minVisibleConfidence ? pointSize : pointSize * 0.8f;
+
+                DrawPoint(point, color, size);
             }
         }
 
