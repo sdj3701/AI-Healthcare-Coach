@@ -49,6 +49,14 @@ namespace AIHealthcareCoach.MediaPipe
         [SerializeField] private float qaLogIntervalSeconds = 1f;
         [SerializeField] private string qaLogFileName = "mediapipe_pose_qa.jsonl";
 
+        [Header("Session Storage")]
+        [SerializeField] private bool recordSessionData = true;
+        [SerializeField] private string sessionExerciseName = "squat";
+        [SerializeField] private string sessionDataFolderName = "pose_sessions";
+        [SerializeField] private float sessionRingBufferSeconds = 5f;
+        [SerializeField] private bool writeDebugLandmarkLog;
+        [SerializeField] private float debugLogRetentionHours = 24f;
+
         private CameraPreviewController cameraPreview;
         private PoseOverlayRenderer overlayRenderer;
         private PoseDebugHud debugHud;
@@ -59,6 +67,13 @@ namespace AIHealthcareCoach.MediaPipe
         private PoseExerciseFeedbackAnalyzer exerciseFeedbackAnalyzer;
         private TtsController ttsController;
         private readonly List<PoseExerciseFeedbackMessage> exerciseFeedback = new List<PoseExerciseFeedbackMessage>();
+        private readonly PoseFrameRingBuffer poseFrameRingBuffer = new PoseFrameRingBuffer();
+        private readonly PoseFeedbackEventRecorder feedbackEventRecorder = new PoseFeedbackEventRecorder();
+        private readonly PoseSessionSummaryBuilder sessionSummaryBuilder = new PoseSessionSummaryBuilder();
+        private readonly PoseStorageRetentionPolicy storageRetentionPolicy = new PoseStorageRetentionPolicy();
+        private PoseSessionStorage sessionStorage;
+        private PoseSessionData currentSession;
+        private PoseDebugLandmarkLogger debugLandmarkLogger;
         private LandmarkFrame latestFrame;
         private Color32[] pixelBuffer;
         private string status = "Stopped";
@@ -76,6 +91,7 @@ namespace AIHealthcareCoach.MediaPipe
         private int droppedFrameCount;
         private bool isSettingUpPython;
         private string pythonSetupStatus;
+        private string sessionStorageStatus;
 
         private void Awake()
         {
@@ -93,6 +109,7 @@ namespace AIHealthcareCoach.MediaPipe
                 minimumConfidence = exerciseFeedbackMinimumConfidence,
                 feedbackCooldownSeconds = exerciseFeedbackCooldownSeconds
             };
+            sessionStorage = new PoseSessionStorage(sessionDataFolderName);
             ttsController = FindFirstObjectByType<TtsController>();
 
             if (cameraPreview == null)
@@ -148,8 +165,9 @@ namespace AIHealthcareCoach.MediaPipe
                 failedFrameCount++;
                 exerciseFeedback.Clear();
                 qualityReport = qualityGate.Evaluate(cameraPreview.IsRunning, latestFrame);
-                MaybeWriteQaLog();
                 lastInferenceMs = (Time.realtimeSinceStartup - startedAt) * 1000f;
+                RecordSessionSample(false);
+                MaybeWriteQaLog();
                 return;
             }
 
@@ -160,8 +178,9 @@ namespace AIHealthcareCoach.MediaPipe
                 failedFrameCount++;
                 exerciseFeedback.Clear();
                 qualityReport = qualityGate.Evaluate(cameraPreview.IsRunning, latestFrame);
-                MaybeWriteQaLog();
                 lastInferenceMs = (Time.realtimeSinceStartup - startedAt) * 1000f;
+                RecordSessionSample(false);
+                MaybeWriteQaLog();
                 return;
             }
 
@@ -198,9 +217,11 @@ namespace AIHealthcareCoach.MediaPipe
             }
 
             qualityReport = qualityGate.Evaluate(cameraPreview.IsRunning, latestFrame);
-            AnalyzeExerciseFeedback(success);
-            UpdateCalibrationStatus(success);
             lastInferenceMs = (Time.realtimeSinceStartup - startedAt) * 1000f;
+            RecordSessionSample(success);
+            AnalyzeExerciseFeedback(success);
+            RecordSessionFeedback();
+            UpdateCalibrationStatus(success);
             MaybeWriteQaLog();
         }
 
@@ -304,6 +325,11 @@ namespace AIHealthcareCoach.MediaPipe
             ResetPerformanceCounters();
             if (poseReady)
             {
+                BeginPoseSession();
+            }
+
+            if (poseReady)
+            {
                 status = "Running";
             }
         }
@@ -321,6 +347,7 @@ namespace AIHealthcareCoach.MediaPipe
             }
 
             isStartingCamera = false;
+            EndPoseSession();
             cameraPreview.StopCamera();
 
             if (poseEstimator != null)
@@ -464,7 +491,7 @@ namespace AIHealthcareCoach.MediaPipe
             {
                 if (qaLogger == null)
                 {
-                    qaLogger = new MediaPipeQaLogger(qaLogFileName);
+                    qaLogger = new MediaPipeQaLogger(BuildQaLogPath());
                 }
 
                 qaLogger.Write(
@@ -485,6 +512,144 @@ namespace AIHealthcareCoach.MediaPipe
                 lastError = "QA log write failed: " + exception.Message;
                 writeQaLog = false;
             }
+        }
+
+        private void BeginPoseSession()
+        {
+            EndPoseSession();
+            sessionStorageStatus = string.Empty;
+            DisposeQaLogger();
+
+            if (!recordSessionData)
+            {
+                poseFrameRingBuffer.Configure(sessionRingBufferSeconds, targetPoseFps);
+                poseFrameRingBuffer.Clear();
+                return;
+            }
+
+            sessionStorage = new PoseSessionStorage(sessionDataFolderName);
+            var deletedDebugLogs = storageRetentionPolicy.DeleteExpiredDebugLogs(
+                sessionStorage.DebugDirectory,
+                debugLogRetentionHours);
+
+            var startedAtUtc = DateTime.UtcNow;
+            currentSession = new PoseSessionData
+            {
+                sessionId = startedAtUtc.ToString("yyyyMMdd_HHmmss_fff"),
+                exercise = string.IsNullOrWhiteSpace(sessionExerciseName) ? "unknown" : sessionExerciseName.Trim(),
+                startedAtUtc = startedAtUtc.ToString("o"),
+                platform = Application.platform.ToString(),
+                backend = poseEstimator == null ? string.Empty : poseEstimator.BackendName,
+                cameraDevice = cameraPreview == null ? string.Empty : cameraPreview.ActiveDeviceName,
+                storagePolicy = "Option C: summary + feedback events, no raw video, no full landmark persistence",
+                startedAtRealtimeSeconds = Time.realtimeSinceStartup
+            };
+
+            poseFrameRingBuffer.Configure(sessionRingBufferSeconds, targetPoseFps);
+            feedbackEventRecorder.Begin(currentSession);
+            sessionSummaryBuilder.Begin(currentSession);
+
+            if (writeDebugLandmarkLog)
+            {
+                debugLandmarkLogger = new PoseDebugLandmarkLogger(
+                    sessionStorage.CreateDebugLandmarkLogPath(currentSession.sessionId));
+            }
+
+            sessionStorageStatus = deletedDebugLogs > 0
+                ? $"Session recording: {currentSession.sessionId} / deleted debug logs: {deletedDebugLogs}"
+                : $"Session recording: {currentSession.sessionId}";
+            Debug.Log("[Pose Session] Started " + currentSession.sessionId);
+        }
+
+        private void EndPoseSession()
+        {
+            debugLandmarkLogger?.Dispose();
+            debugLandmarkLogger = null;
+            DisposeQaLogger();
+
+            if (currentSession == null)
+            {
+                poseFrameRingBuffer.Clear();
+                feedbackEventRecorder.Clear();
+                sessionSummaryBuilder.Clear();
+                return;
+            }
+
+            var summary = sessionSummaryBuilder.Build(
+                successfulFrameCount,
+                failedFrameCount,
+                droppedFrameCount,
+                feedbackEventRecorder.Events,
+                poseFrameRingBuffer);
+
+            if (recordSessionData && sessionStorage != null && summary != null)
+            {
+                var result = sessionStorage.SaveSession(summary, feedbackEventRecorder.Events);
+                if (result.success)
+                {
+                    sessionStorageStatus = "Session saved: " + Path.GetFileName(result.summaryPath);
+                    Debug.Log(
+                        "[Pose Session] Saved " + currentSession.sessionId
+                        + "\nSummary: " + result.summaryPath
+                        + "\nEvents: " + result.eventsPath);
+                }
+                else
+                {
+                    sessionStorageStatus = "Session save failed. See Console.";
+                    Debug.LogError("[Pose Session] Save failed: " + result.error);
+                }
+            }
+
+            currentSession = null;
+            poseFrameRingBuffer.Clear();
+            feedbackEventRecorder.Clear();
+            sessionSummaryBuilder.Clear();
+        }
+
+        private void RecordSessionSample(bool poseSuccess)
+        {
+            if (currentSession == null)
+            {
+                return;
+            }
+
+            sessionSummaryBuilder.RecordFrame(latestFrame, qualityReport, lastInferenceMs);
+
+            if (poseSuccess && latestFrame != null && latestFrame.HasPose)
+            {
+                poseFrameRingBuffer.Add(latestFrame, qualityReport, lastInferenceMs);
+            }
+
+            if (writeDebugLandmarkLog)
+            {
+                debugLandmarkLogger?.Write(latestFrame);
+            }
+        }
+
+        private void RecordSessionFeedback()
+        {
+            if (currentSession == null || exerciseFeedback.Count == 0)
+            {
+                return;
+            }
+
+            feedbackEventRecorder.Record(latestFrame, qualityReport, exerciseFeedback);
+        }
+
+        private string BuildQaLogPath()
+        {
+            if (currentSession != null && sessionStorage != null)
+            {
+                return sessionStorage.CreateDebugQaLogPath(currentSession.sessionId);
+            }
+
+            return qaLogFileName;
+        }
+
+        private void DisposeQaLogger()
+        {
+            qaLogger?.Dispose();
+            qaLogger = null;
         }
 
         private void AnalyzeExerciseFeedback(bool poseSuccess)
@@ -558,10 +723,17 @@ namespace AIHealthcareCoach.MediaPipe
             var preferred = cameraPreview.PreferFrontCamera ? "front" : "rear";
             if (!cameraPreview.IsRunning)
             {
-                return $"{status} / preferred camera: {preferred}";
+                return AppendSessionStorageStatus($"{status} / preferred camera: {preferred}");
             }
 
-            return $"{status} / active camera: {facing} / preferred: {preferred}";
+            return AppendSessionStorageStatus($"{status} / active camera: {facing} / preferred: {preferred}");
+        }
+
+        private string AppendSessionStorageStatus(string value)
+        {
+            return string.IsNullOrWhiteSpace(sessionStorageStatus)
+                ? value
+                : value + " / " + sessionStorageStatus;
         }
 
 #if UNITY_EDITOR
@@ -881,8 +1053,7 @@ namespace AIHealthcareCoach.MediaPipe
         private void OnDestroy()
         {
             StopCameraAndPose();
-            qaLogger?.Dispose();
-            qaLogger = null;
+            DisposeQaLogger();
         }
     }
 }

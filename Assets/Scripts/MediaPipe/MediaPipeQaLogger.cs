@@ -14,8 +14,15 @@ namespace AIHealthcareCoach.MediaPipe
             var safeFileName = string.IsNullOrWhiteSpace(fileName)
                 ? "mediapipe_pose_qa.jsonl"
                 : fileName.Trim();
-            var path = Path.Combine(Application.persistentDataPath, safeFileName);
-            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            var path = Path.IsPathRooted(safeFileName)
+                ? safeFileName
+                : Path.Combine(Application.persistentDataPath, safeFileName);
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
             writer = new StreamWriter(path, true);
             FilePath = path;
         }
