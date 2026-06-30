@@ -922,3 +922,47 @@ python -c "import mediapipe, numpy; print('mediapipe ok')"
 - 예시 이미지처럼 머리부터 발목/발끝까지 전신이 들어오면 가장 안정적으로 추적된다.
 - 상반신만 보여도 일부 landmark는 잡힐 수 있지만, 스쿼트/런지처럼 무릎과 발목이 필요한 동작은 하체가 잘리면 `LowerBodyMissing`이 된다.
 - 초록색 skeleton이 아예 안 나오고 `Landmarks: 0`이면 전신 문제만이 아니라 Python 백엔드, 카메라 프레임 방향, 조명, 거리 문제를 먼저 확인한다.
+
+## 19. 2026-06-30 MediaPipe 패키지/Protobuf 오류 수정 기록
+
+상세 참고 문서:
+
+```text
+docs/MediaPipeTroubleshooting.md
+```
+
+### 발생 오류
+
+```text
+Library\PackageCache\com.github.homuler.mediapipe@7e96a7aa4f9a\Runtime\Scripts\Protobuf\Util\RenderData.cs(4673,32): error CS0538: 'Google.Protobuf.IMessage' in explicit interface declaration is not an interface
+```
+
+### 원인
+
+- Homuler MediaPipe Git 패키지 안에 `Google.Protobuf.dll` 실제 파일이 없고 `.meta`만 있었다.
+- `Mediapipe.Runtime.asmdef`는 `Google.Protobuf.dll`, `System.Buffers.dll`, `System.Memory.dll`, `System.Runtime.CompilerServices.Unsafe.dll`을 precompiled reference로 기대한다.
+- DLL 본체가 없어서 Unity가 protobuf 생성 코드를 컴파일할 때 올바른 `Google.Protobuf` 참조를 잡지 못했다.
+
+### 수정
+
+- `Assets/Plugins/Protobuf` 폴더를 추가했다.
+- 아래 DLL과 `.meta`를 프로젝트에 명시적으로 추가했다.
+  - `Google.Protobuf.dll`
+  - `System.Buffers.dll`
+  - `System.Memory.dll`
+  - `System.Runtime.CompilerServices.Unsafe.dll`
+- Unity batchmode로 재컴파일해 `Mediapipe.Runtime.dll`, `Assembly-CSharp.dll`, `Assembly-CSharp-Editor.dll` 생성을 확인했다.
+
+### 검증 결과
+
+- `CS0538` 오류 해결.
+- Unity batchmode 컴파일 성공.
+- `Assembly-CSharp.csproj` 빌드 성공.
+- `Assembly-CSharp-Editor.csproj` 빌드 성공.
+- Unity `.meta` GUID 중복 없음.
+
+### 남은 주의사항
+
+- Homuler Git 패키지에는 여전히 일부 모델 `.bytes`와 네이티브 바이너리 `.dll/.so/.dylib/.aar/.framework`가 실제 파일 없이 `.meta`만 있을 수 있다.
+- 현재 수정은 Protobuf 컴파일 오류 해결이다.
+- 실제 MediaPipe Native 추론을 켤 때는 `mediapipe_c.dll`과 pose model 파일 존재 여부를 별도로 확인해야 한다.
