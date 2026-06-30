@@ -966,3 +966,39 @@ Library\PackageCache\com.github.homuler.mediapipe@7e96a7aa4f9a\Runtime\Scripts\P
 - Homuler Git 패키지에는 여전히 일부 모델 `.bytes`와 네이티브 바이너리 `.dll/.so/.dylib/.aar/.framework`가 실제 파일 없이 `.meta`만 있을 수 있다.
 - 현재 수정은 Protobuf 컴파일 오류 해결이다.
 - 실제 MediaPipe Native 추론을 켤 때는 `mediapipe_c.dll`과 pose model 파일 존재 여부를 별도로 확인해야 한다.
+
+## 20. 2026-06-30 M1 Mac Python MediaPipe 환경 자동 설정 추가
+
+### 발생 로그
+
+```text
+configuredExecutable: (empty)
+resolvedExecutable: /usr/bin/python3
+executable: /Library/Developer/CommandLineTools/usr/bin/python3
+numpy import: FAILED
+mediapipe import: FAILED
+```
+
+### 원인
+
+- M1 Mac 프로젝트 루트에 `.venv-mediapipe`가 없었다.
+- Unity Inspector의 `Editor Python Executable Path`도 비어 있었다.
+- Unity가 macOS CommandLineTools Python을 사용했고, 해당 Python에는 `numpy`와 `mediapipe`가 없었다.
+
+### 수정
+
+- Game 화면 상단에 `Setup Python` 버튼을 추가했다.
+- 버튼을 누르면 Unity Editor에서 `.venv-mediapipe`를 만들고 `mediapipe numpy`를 설치한다.
+- 성공하면 `Editor Python Executable Path`가 `.venv-mediapipe/bin/python`으로 자동 설정된다.
+- 터미널용 스크립트도 추가했다.
+
+```bash
+bash tools/setup_mediapipe_python_macos.sh
+```
+
+### 확인 기준
+
+- Python diagnostics에 `in_venv: True`가 나온다.
+- `numpy import: OK`가 나온다.
+- `mediapipe import: OK`가 나온다.
+- 이후 `Start Camera`를 다시 누르면 Pose backend가 시작되어야 한다.

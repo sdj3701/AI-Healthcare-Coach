@@ -1,8 +1,13 @@
 using System.Collections;
 using System.Collections.Generic;
+using System;
+using System.Diagnostics;
 using System.IO;
+using System.Text;
+using System.Threading.Tasks;
 using AIHealthcareCoach.Tts;
 using UnityEngine;
+using Debug = UnityEngine.Debug;
 
 namespace AIHealthcareCoach.MediaPipe
 {
@@ -17,6 +22,8 @@ namespace AIHealthcareCoach.MediaPipe
         [SerializeField] private bool usePythonMediaPipeInEditor = true;
         [SerializeField] private string editorPythonExecutablePath;
         [SerializeField] private string editorPythonWorkerRelativePath = "MediaPipe/editor_pose_worker.py";
+        [SerializeField, Tooltip("Shows a Unity Editor button that creates .venv-mediapipe and installs mediapipe/numpy.")]
+        private bool showEditorPythonSetupButton = true;
 
         [Header("MediaPipe")]
         [SerializeField] private string modelRelativePath = "MediaPipe/pose_landmarker_lite.task";
@@ -67,6 +74,8 @@ namespace AIHealthcareCoach.MediaPipe
         private int successfulFrameCount;
         private int failedFrameCount;
         private int droppedFrameCount;
+        private bool isSettingUpPython;
+        private string pythonSetupStatus;
 
         private void Awake()
         {
@@ -249,8 +258,24 @@ namespace AIHealthcareCoach.MediaPipe
                 StartCoroutine(SwitchCameraAndRestart());
             }
 
+#if UNITY_EDITOR
+            var labelX = 424f;
+            if (showEditorPythonSetupButton)
+            {
+                GUI.enabled = !isSettingUpPython && !cameraPreview.IsRunning && !isStartingCamera;
+                if (GUI.Button(new Rect(418f, 20f, 140f, 30f), isSettingUpPython ? "Setting Up..." : "Setup Python"))
+                {
+                    StartCoroutine(SetupEditorPythonEnvironment());
+                }
+
+                labelX = 568f;
+            }
+#else
+            const float labelX = 424f;
+#endif
+
             GUI.enabled = true;
-            GUI.Label(new Rect(424f, 24f, Screen.width - 440f, 24f), BuildToolbarStatus());
+            GUI.Label(new Rect(labelX, 24f, Screen.width - labelX - 16f, 24f), BuildToolbarStatus());
         }
 
         private IEnumerator StartCameraAndPose()
@@ -524,6 +549,11 @@ namespace AIHealthcareCoach.MediaPipe
 
         private string BuildToolbarStatus()
         {
+            if (!string.IsNullOrWhiteSpace(pythonSetupStatus))
+            {
+                return pythonSetupStatus;
+            }
+
             var facing = cameraPreview.ActiveCameraIsFrontFacing ? "front" : "rear/unknown";
             var preferred = cameraPreview.PreferFrontCamera ? "front" : "rear";
             if (!cameraPreview.IsRunning)
@@ -533,6 +563,292 @@ namespace AIHealthcareCoach.MediaPipe
 
             return $"{status} / active camera: {facing} / preferred: {preferred}";
         }
+
+#if UNITY_EDITOR
+        private IEnumerator SetupEditorPythonEnvironment()
+        {
+            isSettingUpPython = true;
+            pythonSetupStatus = "Setting up .venv-mediapipe...";
+            lastError = string.Empty;
+
+            var projectRoot = Directory.GetParent(Application.dataPath)?.FullName;
+            var configuredPython = editorPythonExecutablePath;
+            var setupTask = Task.Run(() => RunEditorPythonSetup(projectRoot, configuredPython));
+
+            while (!setupTask.IsCompleted)
+            {
+                yield return null;
+            }
+
+            isSettingUpPython = false;
+
+            if (setupTask.Exception != null)
+            {
+                var message = setupTask.Exception.GetBaseException().Message;
+                pythonSetupStatus = "Python setup failed. See Console.";
+                lastError = message;
+                Debug.LogError("[Editor Python MediaPipe Setup] " + message);
+                yield break;
+            }
+
+            var result = setupTask.Result;
+            if (result.success)
+            {
+                editorPythonExecutablePath = result.venvPythonPath;
+                pythonSetupStatus = "Python setup complete. Start Camera again.";
+                lastError = string.Empty;
+                Debug.Log("[Editor Python MediaPipe Setup] " + result.message);
+            }
+            else
+            {
+                pythonSetupStatus = "Python setup failed. See Console.";
+                lastError = result.message;
+                Debug.LogError("[Editor Python MediaPipe Setup] " + result.message);
+            }
+        }
+
+        private static PythonSetupResult RunEditorPythonSetup(string projectRoot, string configuredPython)
+        {
+            if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
+            {
+                return PythonSetupResult.Fail("Project root could not be resolved.");
+            }
+
+            var venvDirectory = Path.Combine(projectRoot, ".venv-mediapipe");
+            var venvPython = GetVenvPythonPath(venvDirectory);
+            var log = new StringBuilder();
+
+            var bootstrapPython = File.Exists(venvPython)
+                ? venvPython
+                : ResolveBootstrapPython(projectRoot, configuredPython);
+            if (string.IsNullOrWhiteSpace(bootstrapPython))
+            {
+                return PythonSetupResult.Fail("Python executable was not found. Install Python 3 first, then retry.");
+            }
+
+            log.Append("projectRoot: ").AppendLine(projectRoot);
+            log.Append("venvDirectory: ").AppendLine(venvDirectory);
+            log.Append("bootstrapPython: ").AppendLine(bootstrapPython);
+
+            if (!File.Exists(venvPython))
+            {
+                var createVenv = RunProcess(bootstrapPython, "-m venv " + QuoteProcessArgument(venvDirectory), projectRoot, 120000);
+                log.AppendLine(createVenv.ToLog("create venv"));
+                if (createVenv.exitCode != 0 || !File.Exists(venvPython))
+                {
+                    return PythonSetupResult.Fail("Failed to create .venv-mediapipe.\n" + log);
+                }
+            }
+
+            var ensurePip = RunProcess(venvPython, "-m ensurepip --upgrade", projectRoot, 120000);
+            log.AppendLine(ensurePip.ToLog("ensurepip"));
+
+            var upgradePip = RunProcess(venvPython, "-m pip install --upgrade pip setuptools wheel", projectRoot, 300000);
+            log.AppendLine(upgradePip.ToLog("upgrade pip"));
+            if (upgradePip.exitCode != 0)
+            {
+                return PythonSetupResult.Fail("Failed to upgrade pip.\n" + log);
+            }
+
+            var installPackages = RunProcess(venvPython, "-m pip install mediapipe numpy", projectRoot, 600000);
+            log.AppendLine(installPackages.ToLog("install mediapipe numpy"));
+            if (installPackages.exitCode != 0)
+            {
+                return PythonSetupResult.Fail("Failed to install mediapipe/numpy.\n" + log);
+            }
+
+            var verify = RunProcess(
+                venvPython,
+                "-c \"import sys, numpy, mediapipe; print(sys.executable); print('numpy', numpy.__version__); print('mediapipe', mediapipe.__version__)\"",
+                projectRoot,
+                120000);
+            log.AppendLine(verify.ToLog("verify imports"));
+            if (verify.exitCode != 0)
+            {
+                return PythonSetupResult.Fail("mediapipe/numpy install verification failed.\n" + log);
+            }
+
+            return PythonSetupResult.Ok(venvPython, log.ToString());
+        }
+
+        private static string ResolveBootstrapPython(string projectRoot, string configuredPython)
+        {
+            if (!string.IsNullOrWhiteSpace(configuredPython) && File.Exists(configuredPython.Trim()))
+            {
+                return configuredPython.Trim();
+            }
+
+            var existingVenv = GetVenvPythonPath(Path.Combine(projectRoot, ".venv-mediapipe"));
+            if (File.Exists(existingVenv))
+            {
+                return existingVenv;
+            }
+
+#if UNITY_EDITOR_OSX
+            var candidates = new[]
+            {
+                "/opt/homebrew/bin/python3.12",
+                "/opt/homebrew/bin/python3.11",
+                "/opt/homebrew/bin/python3.10",
+                "/opt/homebrew/bin/python3",
+                "/usr/local/bin/python3.12",
+                "/usr/local/bin/python3.11",
+                "/usr/local/bin/python3.10",
+                "/usr/local/bin/python3",
+                "/usr/bin/python3"
+            };
+#elif UNITY_EDITOR_WIN
+            var candidates = new[] { "python" };
+#else
+            var candidates = new[] { "/usr/bin/python3", "python3", "python" };
+#endif
+
+            for (var i = 0; i < candidates.Length; i++)
+            {
+                var candidate = candidates[i];
+                if (Path.IsPathRooted(candidate))
+                {
+                    if (File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+                else
+                {
+                    return candidate;
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static string GetVenvPythonPath(string venvDirectory)
+        {
+#if UNITY_EDITOR_WIN
+            return Path.Combine(venvDirectory, "Scripts", "python.exe");
+#else
+            return Path.Combine(venvDirectory, "bin", "python");
+#endif
+        }
+
+        private static ProcessResult RunProcess(string executable, string arguments, string workingDirectory, int timeoutMs)
+        {
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = executable,
+                    Arguments = arguments,
+                    WorkingDirectory = workingDirectory,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }
+            };
+
+            var output = new StringBuilder();
+            var error = new StringBuilder();
+            process.OutputDataReceived += (_, args) =>
+            {
+                if (!string.IsNullOrEmpty(args.Data))
+                {
+                    output.AppendLine(args.Data);
+                }
+            };
+            process.ErrorDataReceived += (_, args) =>
+            {
+                if (!string.IsNullOrEmpty(args.Data))
+                {
+                    error.AppendLine(args.Data);
+                }
+            };
+
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            if (!process.WaitForExit(timeoutMs))
+            {
+                try
+                {
+                    process.Kill();
+                }
+                catch
+                {
+                    // Ignore kill failures during setup diagnostics.
+                }
+
+                return new ProcessResult(-1, output.ToString(), "Timed out after " + timeoutMs + "ms.\n" + error);
+            }
+
+            process.WaitForExit();
+            return new ProcessResult(process.ExitCode, output.ToString(), error.ToString());
+        }
+
+        private static string QuoteProcessArgument(string value)
+        {
+            return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+        }
+
+        private readonly struct ProcessResult
+        {
+            public readonly int exitCode;
+            public readonly string stdout;
+            public readonly string stderr;
+
+            public ProcessResult(int exitCode, string stdout, string stderr)
+            {
+                this.exitCode = exitCode;
+                this.stdout = stdout ?? string.Empty;
+                this.stderr = stderr ?? string.Empty;
+            }
+
+            public string ToLog(string title)
+            {
+                var builder = new StringBuilder();
+                builder.Append("== ").Append(title).Append(" ==").AppendLine();
+                builder.Append("exitCode: ").Append(exitCode).AppendLine();
+                if (!string.IsNullOrWhiteSpace(stdout))
+                {
+                    builder.AppendLine("stdout:");
+                    builder.AppendLine(stdout.TrimEnd());
+                }
+
+                if (!string.IsNullOrWhiteSpace(stderr))
+                {
+                    builder.AppendLine("stderr:");
+                    builder.AppendLine(stderr.TrimEnd());
+                }
+
+                return builder.ToString();
+            }
+        }
+
+        private readonly struct PythonSetupResult
+        {
+            public readonly bool success;
+            public readonly string venvPythonPath;
+            public readonly string message;
+
+            private PythonSetupResult(bool success, string venvPythonPath, string message)
+            {
+                this.success = success;
+                this.venvPythonPath = venvPythonPath;
+                this.message = message ?? string.Empty;
+            }
+
+            public static PythonSetupResult Ok(string venvPythonPath, string message)
+            {
+                return new PythonSetupResult(true, venvPythonPath, message);
+            }
+
+            public static PythonSetupResult Fail(string message)
+            {
+                return new PythonSetupResult(false, string.Empty, message);
+            }
+        }
+#endif
 
         private void CountPoseFrame()
         {

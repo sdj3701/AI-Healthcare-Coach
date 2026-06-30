@@ -318,3 +318,66 @@ $dups=$items | Group-Object Guid | Where-Object {$_.Count -gt 1}
   - 플랫폼별 Native MediaPipe bridge 직접 관리
 - Android/iOS 실기기 검증은 별도 단계로 필요하다.
 
+## 9. M1 Mac Unity Editor Python 환경 오류
+
+### 실제 로그
+
+```text
+configuredExecutable: (empty)
+resolvedExecutable: /usr/bin/python3
+executable: /Library/Developer/CommandLineTools/usr/bin/python3
+in_venv: False
+numpy import: FAILED
+mediapipe import: FAILED
+```
+
+### 원인
+
+- Unity Inspector의 `Editor Python Executable Path`가 비어 있었다.
+- 프로젝트 루트에 `.venv-mediapipe`가 없었다.
+- 그래서 Unity가 macOS 기본 CommandLineTools Python을 실행했다.
+- 해당 Python에는 `numpy`와 `mediapipe`가 설치되어 있지 않았다.
+
+### 수정
+
+Unity Game 화면 상단에 `Setup Python` 버튼을 추가했다.
+
+- 버튼 동작:
+  - 프로젝트 루트에 `.venv-mediapipe` 생성
+  - `pip`, `setuptools`, `wheel` 업그레이드
+  - `mediapipe`, `numpy` 설치
+  - 설치 검증
+  - 성공 시 `editorPythonExecutablePath`를 `.venv-mediapipe/bin/python`으로 자동 설정
+
+터미널에서 직접 실행할 수도 있다.
+
+```bash
+cd /Users/sindongju/AI-Healthcare-Coach
+bash tools/setup_mediapipe_python_macos.sh
+```
+
+스크립트 성공 후 Unity Inspector에 직접 넣을 경로:
+
+```text
+/Users/sindongju/AI-Healthcare-Coach/.venv-mediapipe/bin/python
+```
+
+### 정상 상태
+
+HUD 또는 Console의 Python diagnostics가 아래처럼 바뀌어야 한다.
+
+```text
+configuredExecutable: /Users/sindongju/AI-Healthcare-Coach/.venv-mediapipe/bin/python
+executable: /Users/sindongju/AI-Healthcare-Coach/.venv-mediapipe/bin/python
+in_venv: True
+numpy import: OK
+mediapipe import: OK
+```
+
+그 다음 카메라 테스트에서 기대하는 값:
+
+```text
+Status: Ready 또는 Running
+Pose FPS: 0보다 큼
+Landmarks: 33
+```
