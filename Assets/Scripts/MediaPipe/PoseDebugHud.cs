@@ -22,7 +22,8 @@ namespace AIHealthcareCoach.MediaPipe
             int failedFrames,
             int droppedFrames,
             IReadOnlyList<PoseExerciseFeedbackMessage> feedbackMessages,
-            string lastError)
+            string lastError,
+            string diagnosticInfo)
         {
             builder.Length = 0;
             builder.AppendLine("MediaPipe Pose Test");
@@ -67,6 +68,12 @@ namespace AIHealthcareCoach.MediaPipe
                 builder.Append("Error: ").AppendLine(lastError);
             }
 
+            if (!string.IsNullOrEmpty(diagnosticInfo))
+            {
+                builder.AppendLine("Python Diagnostics:");
+                builder.AppendLine(TrimForHud(diagnosticInfo, 1600));
+            }
+
             if (feedbackMessages != null && feedbackMessages.Count > 0)
             {
                 builder.AppendLine("Feedback:");
@@ -85,6 +92,16 @@ namespace AIHealthcareCoach.MediaPipe
             }
 
             GUI.Box(rect, builder.ToString());
+        }
+
+        private static string TrimForHud(string value, int maxLength)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length <= maxLength)
+            {
+                return value;
+            }
+
+            return value.Substring(0, maxLength) + "\n...trimmed. See Unity Console for full diagnostics.";
         }
     }
 }

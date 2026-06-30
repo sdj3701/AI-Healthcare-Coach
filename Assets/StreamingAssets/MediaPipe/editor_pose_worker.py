@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 import argparse
+import importlib.util
 import json
+import os
+import platform
+import subprocess
 import sys
 import traceback
 
@@ -57,6 +61,72 @@ def read_exact(stream, length):
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def get_pip_version():
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        if output:
+            return output
+        return "pip returned no output, exit_code=" + str(result.returncode)
+    except Exception as exc:
+        return "pip check failed: " + str(exc)
+
+
+def get_package_diagnostic(package_name):
+    lines = []
+    try:
+        spec = importlib.util.find_spec(package_name)
+        if spec is None:
+            lines.append(package_name + ": not found by importlib")
+        else:
+            lines.append(package_name + " spec: " + str(spec.origin))
+    except Exception as exc:
+        lines.append(package_name + " spec check failed: " + str(exc))
+
+    try:
+        module = __import__(package_name)
+        version = str(getattr(module, "__version__", "unknown"))
+        location = str(getattr(module, "__file__", "unknown"))
+        lines.append(package_name + " import: OK")
+        lines.append(package_name + " version: " + version)
+        lines.append(package_name + " file: " + location)
+    except Exception as exc:
+        lines.append(package_name + " import: FAILED")
+        lines.append(package_name + " error: " + repr(exc))
+
+    return "\n".join(lines)
+
+
+def build_python_diagnostics():
+    path_head = os.environ.get("PATH", "").split(os.pathsep)[:6]
+    python_path_head = sys.path[:8]
+    venv_value = os.environ.get("VIRTUAL_ENV", "")
+    in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+
+    lines = [
+        "Python diagnostics",
+        "executable: " + sys.executable,
+        "version: " + sys.version.replace("\n", " "),
+        "prefix: " + sys.prefix,
+        "base_prefix: " + getattr(sys, "base_prefix", ""),
+        "in_venv: " + str(in_venv),
+        "VIRTUAL_ENV: " + (venv_value if venv_value else "-"),
+        "cwd: " + os.getcwd(),
+        "platform: " + platform.platform(),
+        "pip: " + get_pip_version(),
+        "PATH head: " + " | ".join(path_head),
+        "sys.path head: " + " | ".join(python_path_head),
+        get_package_diagnostic("numpy"),
+        get_package_diagnostic("mediapipe"),
+    ]
+    return "\n".join(lines)
 
 
 def empty_frame(timestamp_ms, code, message):
@@ -181,6 +251,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    diagnostics = build_python_diagnostics()
 
     try:
         import numpy as np
@@ -192,8 +263,9 @@ def main():
                 "errorCode": "PYTHON_IMPORT_FAILED",
                 "errorMessage": (
                     "Python MediaPipe import failed. Install dependencies with "
-                    "`python3 -m pip install mediapipe numpy`. Details: " + str(exc)
+                    "`" + sys.executable + " -m pip install mediapipe numpy`. Details: " + str(exc)
                 ),
+                "pythonDiagnostics": diagnostics,
             }
         )
         return 2
@@ -213,11 +285,19 @@ def main():
                 "ready": False,
                 "errorCode": "MEDIAPIPE_POSE_INIT_FAILED",
                 "errorMessage": "Failed to initialize MediaPipe Pose: " + str(exc),
+                "pythonDiagnostics": diagnostics,
             }
         )
         return 3
 
-    write_json({"ready": True, "errorCode": "", "errorMessage": ""})
+    write_json(
+        {
+            "ready": True,
+            "errorCode": "",
+            "errorMessage": "",
+            "pythonDiagnostics": diagnostics,
+        }
+    )
 
     input_stream = sys.stdin.buffer
     preferred_transform = "identity"

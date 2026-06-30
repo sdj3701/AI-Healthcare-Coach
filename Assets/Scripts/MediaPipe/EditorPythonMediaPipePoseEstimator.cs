@@ -32,6 +32,7 @@ namespace AIHealthcareCoach.MediaPipe
         }
 
         public string LastError { get; private set; }
+        public string DiagnosticInfo { get; private set; }
 
         public bool Initialize(PoseEstimatorSettings settings)
         {
@@ -42,6 +43,8 @@ namespace AIHealthcareCoach.MediaPipe
             if (!File.Exists(workerPath))
             {
                 LastError = "Editor MediaPipe worker was not found: " + workerPath;
+                DiagnosticInfo = BuildStartupDiagnostic(settings.editorPythonExecutablePath, string.Empty, workerPath, string.Empty);
+                Debug.LogError("[Editor Python MediaPipe] " + LastError + "\n" + DiagnosticInfo);
                 return false;
             }
 
@@ -50,6 +53,7 @@ namespace AIHealthcareCoach.MediaPipe
                 stderrBuffer.Length = 0;
                 var executable = ResolvePythonExecutable(settings.editorPythonExecutablePath);
                 var arguments = BuildArguments(workerPath, settings);
+                DiagnosticInfo = BuildStartupDiagnostic(settings.editorPythonExecutablePath, executable, workerPath, arguments);
                 process = new Process
                 {
                     StartInfo = new ProcessStartInfo
@@ -79,6 +83,7 @@ namespace AIHealthcareCoach.MediaPipe
                 };
 
                 process.Start();
+                Debug.Log("[Editor Python MediaPipe] Starting worker.\n" + DiagnosticInfo);
                 process.BeginErrorReadLine();
                 stdin = process.StandardInput.BaseStream;
                 stdout = process.StandardOutput;
@@ -89,32 +94,39 @@ namespace AIHealthcareCoach.MediaPipe
                     LastError = "Python MediaPipe worker did not report readiness. "
                                 + "Install dependencies with: python3 -m pip install mediapipe numpy. "
                                 + BuildProcessDiagnostic(executable);
+                    Debug.LogError("[Editor Python MediaPipe] Startup failed.\n" + LastError + "\n" + DiagnosticInfo);
                     Dispose();
                     return false;
                 }
 
                 var handshake = JsonUtility.FromJson<WorkerHandshake>(handshakeLine);
+                DiagnosticInfo = AppendWorkerDiagnostics(DiagnosticInfo, handshake == null ? string.Empty : handshake.pythonDiagnostics);
                 if (handshake == null || !handshake.ready)
                 {
                     LastError = handshake == null || string.IsNullOrWhiteSpace(handshake.errorMessage)
                         ? "Python MediaPipe worker failed to start. " + BuildProcessDiagnostic(executable)
                         : handshake.errorMessage;
+                    Debug.LogError("[Editor Python MediaPipe] Startup failed.\n" + LastError + "\n" + DiagnosticInfo);
                     Dispose();
                     return false;
                 }
 
                 isReady = true;
                 LastError = string.Empty;
+                Debug.Log("[Editor Python MediaPipe] Worker ready.\n" + DiagnosticInfo);
                 return true;
             }
             catch (Exception exception)
             {
                 LastError = "Failed to start Python MediaPipe worker: " + exception.Message;
+                DiagnosticInfo = AppendWorkerDiagnostics(DiagnosticInfo, BuildProcessDiagnostic(string.Empty));
+                Debug.LogError("[Editor Python MediaPipe] " + LastError + "\n" + DiagnosticInfo);
                 Dispose();
                 return false;
             }
 #else
             LastError = "Editor Python MediaPipe backend is only available in Unity Editor.";
+            DiagnosticInfo = string.Empty;
             return false;
 #endif
         }
@@ -372,6 +384,43 @@ namespace AIHealthcareCoach.MediaPipe
             return builder.ToString();
         }
 
+        private static string BuildStartupDiagnostic(
+            string configuredExecutable,
+            string resolvedExecutable,
+            string workerPath,
+            string arguments)
+        {
+            var builder = new StringBuilder();
+            builder.Append("Unity startup diagnostics").AppendLine();
+            builder.Append("configuredExecutable: ")
+                .AppendLine(string.IsNullOrWhiteSpace(configuredExecutable) ? "(empty)" : configuredExecutable.Trim());
+            builder.Append("resolvedExecutable: ")
+                .AppendLine(string.IsNullOrWhiteSpace(resolvedExecutable) ? "(unresolved)" : resolvedExecutable);
+            builder.Append("workerPath: ").AppendLine(string.IsNullOrWhiteSpace(workerPath) ? "-" : workerPath);
+            builder.Append("workerExists: ").Append(File.Exists(workerPath)).AppendLine();
+            builder.Append("arguments: ").AppendLine(string.IsNullOrWhiteSpace(arguments) ? "-" : arguments);
+            builder.Append("Application.dataPath: ").AppendLine(Application.dataPath);
+            builder.Append("Application.streamingAssetsPath: ").AppendLine(Application.streamingAssetsPath);
+            builder.Append("projectRoot: ").AppendLine(Directory.GetParent(Application.dataPath)?.FullName ?? "-");
+            builder.Append("platform: ").AppendLine(Application.platform.ToString());
+            return builder.ToString().TrimEnd();
+        }
+
+        private static string AppendWorkerDiagnostics(string startupDiagnostics, string workerDiagnostics)
+        {
+            if (string.IsNullOrWhiteSpace(workerDiagnostics))
+            {
+                return startupDiagnostics ?? string.Empty;
+            }
+
+            if (string.IsNullOrWhiteSpace(startupDiagnostics))
+            {
+                return workerDiagnostics;
+            }
+
+            return startupDiagnostics.TrimEnd() + "\n\n" + workerDiagnostics.Trim();
+        }
+
         private static string QuoteArgument(string value)
         {
             return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
@@ -383,6 +432,7 @@ namespace AIHealthcareCoach.MediaPipe
             public bool ready = false;
             public string errorCode = string.Empty;
             public string errorMessage = string.Empty;
+            public string pythonDiagnostics = string.Empty;
         }
 
         [Serializable]

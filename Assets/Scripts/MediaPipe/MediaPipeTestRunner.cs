@@ -207,7 +207,8 @@ namespace AIHealthcareCoach.MediaPipe
                 overlayRenderer.DrawOverlay(previewRect, latestFrame, cameraPreview.IsDisplayMirrored);
             }
 
-            var hudRect = new Rect(12f, Screen.height - 352f, Mathf.Min(620f, Screen.width - 24f), 340f);
+            var hudHeight = Mathf.Min(540f, Screen.height - 92f);
+            var hudRect = new Rect(12f, Screen.height - hudHeight - 12f, Mathf.Min(940f, Screen.width - 24f), hudHeight);
             debugHud.DrawHud(
                 hudRect,
                 status,
@@ -222,7 +223,8 @@ namespace AIHealthcareCoach.MediaPipe
                 failedFrameCount,
                 droppedFrameCount,
                 exerciseFeedback,
-                BuildVisibleError());
+                BuildVisibleError(),
+                BuildDiagnosticInfo());
         }
 
         private void DrawToolbar()
@@ -416,6 +418,12 @@ namespace AIHealthcareCoach.MediaPipe
             }
 
             return string.Empty;
+        }
+
+        private string BuildDiagnosticInfo()
+        {
+            var editorPythonEstimator = poseEstimator as EditorPythonMediaPipePoseEstimator;
+            return editorPythonEstimator == null ? string.Empty : editorPythonEstimator.DiagnosticInfo;
         }
 
         private void MaybeWriteQaLog()
