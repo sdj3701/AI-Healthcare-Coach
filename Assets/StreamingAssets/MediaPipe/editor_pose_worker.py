@@ -144,20 +144,22 @@ def empty_frame(timestamp_ms, code, message):
     }
 
 
-def map_normalized_point(x, y, transform_name):
+def map_normalized_point_to_display(x, y, transform_name):
+    # Unity WebCamTexture.GetPixels32 arrives bottom-to-top. The display space used by
+    # the IMGUI overlay is top-to-bottom, so return landmarks in preview-display space.
     if transform_name == "identity":
-        return x, y
-    if transform_name == "flip_vertical":
         return x, 1.0 - y
+    if transform_name == "flip_vertical":
+        return x, y
     if transform_name == "flip_horizontal":
-        return 1.0 - x, y
-    if transform_name == "rotate_180":
         return 1.0 - x, 1.0 - y
+    if transform_name == "rotate_180":
+        return 1.0 - x, y
     if transform_name == "rotate_ccw":
-        return 1.0 - y, x
+        return 1.0 - y, 1.0 - x
     if transform_name == "rotate_cw":
-        return y, 1.0 - x
-    return x, y
+        return y, x
+    return x, 1.0 - y
 
 
 def normalized_landmark_payload(landmarks, transform_name):
@@ -166,7 +168,7 @@ def normalized_landmark_payload(landmarks, transform_name):
 
     payload = []
     for index, landmark in enumerate(landmarks):
-        x, y = map_normalized_point(float(landmark.x), float(landmark.y), transform_name)
+        x, y = map_normalized_point_to_display(float(landmark.x), float(landmark.y), transform_name)
         raw_visibility = float(getattr(landmark, "visibility", 0.0))
         raw_presence = float(getattr(landmark, "presence", 0.0))
         visibility = raw_visibility if raw_visibility > 0.0 else raw_presence
