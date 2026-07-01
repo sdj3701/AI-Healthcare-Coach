@@ -8,7 +8,7 @@ namespace Rag.Healthcare.Tts
     {
         [SerializeField] private TtsBackend backend = TtsBackend.Auto;
         [SerializeField] private bool speakOnStart = true;
-        [SerializeField] private string startupMessage = "코칭 시스템이 준비되었습니다.";
+        [SerializeField] private string startupMessage = "코치 시스템이 준비되었습니다.";
         [SerializeField, Range(-10, 10)] private int windowsVoiceRate;
         [SerializeField, Range(0, 100)] private int windowsVoiceVolume = 100;
         [SerializeField] private string macOsVoice = string.Empty;

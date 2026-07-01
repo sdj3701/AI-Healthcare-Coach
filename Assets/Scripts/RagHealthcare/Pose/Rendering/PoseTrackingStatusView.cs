@@ -10,6 +10,7 @@ namespace Rag.Healthcare.Pose.Rendering
     {
         [SerializeField] private JointTrackingController trackingController;
         [SerializeField] private CameraCaptureSource cameraSource;
+        [SerializeField] private PoseFeedbackJsonReceiver feedbackReceiver;
         [SerializeField] private Text statusText;
         [SerializeField, Min(0.05f)] private float updateIntervalSeconds = 0.25f;
 
@@ -20,6 +21,7 @@ namespace Rag.Healthcare.Pose.Rendering
         {
             trackingController ??= FindFirstObjectByType<JointTrackingController>();
             cameraSource ??= FindFirstObjectByType<CameraCaptureSource>();
+            feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
             statusText ??= GetComponent<Text>();
         }
 
@@ -87,6 +89,14 @@ namespace Rag.Healthcare.Pose.Rendering
             if (!string.IsNullOrWhiteSpace(trackingController.LastTrackingError))
             {
                 builder.Append("Error: ").AppendLine(trackingController.LastTrackingError);
+            }
+
+            if (feedbackReceiver != null)
+            {
+                builder.Append("Latest Feedback: ");
+                builder.AppendLine(string.IsNullOrWhiteSpace(feedbackReceiver.LatestFeedbackText)
+                    ? "-"
+                    : feedbackReceiver.LatestFeedbackText);
             }
 
             return builder.ToString();

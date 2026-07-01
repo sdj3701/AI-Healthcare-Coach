@@ -12,6 +12,10 @@ namespace Rag.Healthcare.Pose
 
         private readonly Dictionary<string, float> lastSpokenTimes = new Dictionary<string, float>();
 
+        public PoseFeedbackMessage LatestFeedback { get; private set; }
+        public string LatestFeedbackText { get; private set; } = string.Empty;
+        public float LatestFeedbackTime { get; private set; } = -1f;
+
         private void Awake()
         {
             if (coachTts == null)
@@ -47,6 +51,10 @@ namespace Rag.Healthcare.Pose
             {
                 return;
             }
+
+            LatestFeedback = feedback;
+            LatestFeedbackText = feedback.text;
+            LatestFeedbackTime = Time.unscaledTime;
 
             coachTts ??= FindFirstObjectByType<CoachTtsController>();
             coachTts?.SpeakPoseFeedback(feedback);

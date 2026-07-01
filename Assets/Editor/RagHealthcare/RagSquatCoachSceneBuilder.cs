@@ -100,8 +100,9 @@ namespace Rag.Healthcare.Editor
 
             SetObject(debugView, "cameraSource", cameraSource);
             SetObject(debugView, "trackingController", trackingController);
+            SetObject(debugView, "feedbackReceiver", feedbackReceiver);
 
-            CreateUi(cameraSource, trackingController);
+            CreateUi(cameraSource, trackingController, feedbackReceiver);
 
             EditorSceneManager.SaveScene(scene, ScenePath);
 
@@ -133,7 +134,10 @@ namespace Rag.Healthcare.Editor
             light.intensity = 1f;
         }
 
-        private static void CreateUi(CameraCaptureSource cameraSource, JointTrackingController trackingController)
+        private static void CreateUi(
+            CameraCaptureSource cameraSource,
+            JointTrackingController trackingController,
+            PoseFeedbackJsonReceiver feedbackReceiver)
         {
             var canvasObject = new GameObject("Coach Canvas", typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             var canvas = canvasObject.GetComponent<Canvas>();
@@ -203,6 +207,7 @@ namespace Rag.Healthcare.Editor
             var statusView = statusObject.GetComponent<PoseTrackingStatusView>();
             SetObject(statusView, "trackingController", trackingController);
             SetObject(statusView, "cameraSource", cameraSource);
+            SetObject(statusView, "feedbackReceiver", feedbackReceiver);
             SetObject(statusView, "statusText", statusText);
         }
 

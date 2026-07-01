@@ -10,6 +10,8 @@ using Mediapipe.Tasks.Core;
 using Mediapipe.Tasks.Vision.Core;
 using Mediapipe.Tasks.Vision.PoseLandmarker;
 using Mediapipe.Unity.Experimental;
+#else
+using AIHealthcareCoach.MediaPipe;
 #endif
 
 namespace Rag.Healthcare.Pose.Providers
@@ -36,6 +38,14 @@ namespace Rag.Healthcare.Pose.Providers
         [Header("Runtime")]
         [SerializeField, Min(1)] private int framePoolSize = 2;
 
+#if !AHC_USE_HOMULER_MEDIAPIPE
+        [Header("Editor Python Fallback")]
+        [SerializeField] private bool useEditorPythonMediaPipeFallback = true;
+        [SerializeField, Min(1)] private int targetPoseFps = 15;
+        [SerializeField] private string editorPythonExecutablePath = string.Empty;
+        [SerializeField] private string editorPythonWorkerRelativePath = "MediaPipe/editor_pose_worker.py";
+#endif
+
         private bool isReady;
         private bool isProcessingFrame;
         private string resolvedModelPath;
@@ -46,6 +56,9 @@ namespace Rag.Healthcare.Pose.Providers
         private PoseLandmarkerResult resultBuffer;
         private TextureFramePool textureFramePool;
         private ImageProcessingOptions imageProcessingOptions;
+#else
+        private IPoseEstimator fallbackPoseEstimator;
+        private Color32[] fallbackPixels;
 #endif
 
         public override PoseTrackingBackend Backend => PoseTrackingBackend.LocalMediaPipe;
@@ -93,9 +106,43 @@ namespace Rag.Healthcare.Pose.Providers
                 Dispose();
             }
 #else
-            SetFailure(
-                "MediaPipe Unity Plugin package is configured, but the provider is compiled in fallback mode. " +
-                $"Install/resolve com.github.homuler.mediapipe and add scripting define '{PluginDefine}'.");
+            if (!useEditorPythonMediaPipeFallback)
+            {
+                SetFailure(
+                    "MediaPipe Unity Plugin package is configured, but the provider is compiled in fallback mode. " +
+                    $"Install/resolve com.github.homuler.mediapipe and add scripting define '{PluginDefine}', " +
+                    "or enable the Editor Python MediaPipe fallback.");
+                yield break;
+            }
+
+            var settings = new PoseEstimatorSettings
+            {
+                modelPath = resolvedModelPath,
+                numPoses = Mathf.Max(1, numPoses),
+                minPoseDetectionConfidence = minPoseDetectionConfidence,
+                minPosePresenceConfidence = minPosePresenceConfidence,
+                minTrackingConfidence = minTrackingConfidence,
+                targetPoseFps = Mathf.Max(1, targetPoseFps),
+                simulatePoseWhenNativeUnavailable = false,
+                usePythonMediaPipeInEditor = true,
+                editorPythonExecutablePath = editorPythonExecutablePath,
+                editorPythonWorkerRelativePath = editorPythonWorkerRelativePath
+            };
+
+            fallbackPoseEstimator = PoseEstimatorFactory.Create(settings);
+            if (fallbackPoseEstimator == null || !fallbackPoseEstimator.Initialize(settings))
+            {
+                var error = fallbackPoseEstimator == null
+                    ? "Pose estimator factory returned no fallback provider."
+                    : fallbackPoseEstimator.LastError;
+                SetFailure("Editor Python MediaPipe fallback failed to initialize: " + error);
+                Dispose();
+                yield break;
+            }
+
+            isReady = true;
+            LastError = string.Empty;
+            Debug.Log("[MediaPipePoseTrackingProvider] Using " + fallbackPoseEstimator.BackendName + " fallback.");
 #endif
 
             yield break;
@@ -182,7 +229,26 @@ namespace Rag.Healthcare.Pose.Providers
                 isProcessingFrame = false;
             }
 #else
-            onError?.Invoke(BuildNotReadyMessage());
+            isProcessingFrame = true;
+            var startedAt = Time.realtimeSinceStartup;
+            try
+            {
+                var error = ProcessFallbackFrame(source, timestampUnixMilliseconds, out var frame);
+                if (!string.IsNullOrWhiteSpace(error))
+                {
+                    onError?.Invoke(error);
+                }
+                else
+                {
+                    onFrame?.Invoke(frame);
+                }
+            }
+            finally
+            {
+                LastInferenceMilliseconds = (Time.realtimeSinceStartup - startedAt) * 1000f;
+                isProcessingFrame = false;
+            }
+
             yield break;
 #endif
         }
@@ -195,6 +261,10 @@ namespace Rag.Healthcare.Pose.Providers
             textureFramePool?.Dispose();
             textureFramePool = null;
             resultBuffer = default;
+#else
+            fallbackPoseEstimator?.Dispose();
+            fallbackPoseEstimator = null;
+            fallbackPixels = null;
 #endif
             isReady = false;
             isProcessingFrame = false;
@@ -258,6 +328,144 @@ namespace Rag.Healthcare.Pose.Providers
 
             return normalized;
         }
+
+#if !AHC_USE_HOMULER_MEDIAPIPE
+        private string ProcessFallbackFrame(Texture source, long timestampUnixMilliseconds, out JointTrackingFrame frame)
+        {
+            frame = null;
+
+            if (fallbackPoseEstimator == null || !fallbackPoseEstimator.IsReady)
+            {
+                return BuildNotReadyMessage();
+            }
+
+            if (!TryReadFallbackPixels(source, out var pixels, out var width, out var height, out var rotationAngle))
+            {
+                return "Editor Python MediaPipe fallback requires a readable WebCamTexture or Texture2D frame.";
+            }
+
+            try
+            {
+                var mediaPipeTimestamp = NormalizeTimestamp(timestampUnixMilliseconds);
+                var success = fallbackPoseEstimator.TryProcessFrame(
+                    pixels,
+                    width,
+                    height,
+                    mediaPipeTimestamp,
+                    false,
+                    rotationAngle,
+                    out var landmarkFrame);
+
+                if (!success)
+                {
+                    LastError = string.IsNullOrWhiteSpace(fallbackPoseEstimator.LastError)
+                        ? "Pose landmarks were not detected."
+                        : fallbackPoseEstimator.LastError;
+                    return LastError;
+                }
+
+                frame = BuildFrame(landmarkFrame, mediaPipeTimestamp);
+                if (frame == null)
+                {
+                    LastError = "Pose result has an unexpected landmark count.";
+                    return LastError;
+                }
+
+                LastError = string.Empty;
+                return string.Empty;
+            }
+            catch (Exception exception)
+            {
+                SetFailure("Editor Python MediaPipe frame processing failed: " + exception.Message);
+                return LastError;
+            }
+        }
+
+        private bool TryReadFallbackPixels(Texture source, out Color32[] pixels, out int width, out int height, out int rotationAngle)
+        {
+            pixels = null;
+            width = 0;
+            height = 0;
+            rotationAngle = NormalizeRotation(imageRotationDegrees);
+
+            if (source is WebCamTexture webCamTexture)
+            {
+                width = webCamTexture.width;
+                height = webCamTexture.height;
+                if (!webCamTexture.isPlaying || width <= 16 || height <= 16)
+                {
+                    return false;
+                }
+
+                var requiredLength = width * height;
+                if (fallbackPixels == null || fallbackPixels.Length != requiredLength)
+                {
+                    fallbackPixels = new Color32[requiredLength];
+                }
+
+                pixels = webCamTexture.GetPixels32(fallbackPixels);
+                rotationAngle = NormalizeRotation(imageRotationDegrees != 0 ? imageRotationDegrees : webCamTexture.videoRotationAngle);
+                return pixels != null && pixels.Length >= requiredLength;
+            }
+
+            if (source is Texture2D texture2D)
+            {
+                width = texture2D.width;
+                height = texture2D.height;
+                if (width <= 16 || height <= 16)
+                {
+                    return false;
+                }
+
+                pixels = texture2D.GetPixels32();
+                return pixels != null && pixels.Length >= width * height;
+            }
+
+            return false;
+        }
+
+        private JointTrackingFrame BuildFrame(LandmarkFrame result, long timestampUnixMilliseconds)
+        {
+            if (result == null || result.landmarks == null || result.landmarks.Length < ExpectedLandmarkCount)
+            {
+                return null;
+            }
+
+            var joints = new TrackedJoint[ExpectedLandmarkCount];
+            var names = PoseJointNames.MediaPipe33;
+            for (var i = 0; i < ExpectedLandmarkCount; i++)
+            {
+                var landmark = result.landmarks[i];
+                var visibility = landmark.visibility > 0f ? landmark.visibility : landmark.presence;
+                if (visibility <= 0f)
+                {
+                    visibility = 1f;
+                }
+
+                var confidence = landmark.presence > 0f ? landmark.presence : visibility;
+                var x = mirrorXOutput ? 1f - landmark.x : landmark.x;
+                var y = invertYOutput ? 1f - landmark.y : landmark.y;
+
+                joints[i] = new TrackedJoint
+                {
+                    name = names[i],
+                    x = Mathf.Clamp01(x),
+                    y = Mathf.Clamp01(y),
+                    z = landmark.z,
+                    visibility = Mathf.Clamp01(visibility),
+                    confidence = Mathf.Clamp01(confidence)
+                };
+            }
+
+            return new JointTrackingFrame
+            {
+                id = Guid.NewGuid().ToString("N"),
+                timestampUnixMilliseconds = timestampUnixMilliseconds,
+                joints = joints,
+                feedback = Array.Empty<PoseFeedbackMessage>()
+            };
+        }
+#endif
 
 #if AHC_USE_HOMULER_MEDIAPIPE
         private BaseOptions.Delegate ResolveDelegate()
