@@ -325,6 +325,7 @@ GameObject:
   - component: {fileID: 12007}
   - component: {fileID: 12008}
   - component: {fileID: 12009}
+  - component: {fileID: 12010}
   m_Layer: 0
   m_Name: TestRagSysten Runtime
   m_TagString: Untagged
@@ -363,6 +364,7 @@ MonoBehaviour:
   requestedWidth: 1280
   requestedHeight: 720
   requestedFps: 30
+  preferFrontCamera: 1
   playOnStart: 1
 --- !u!114 &12003
 MonoBehaviour:
@@ -508,6 +510,22 @@ MonoBehaviour:
     maximumTorsoTiltDegrees: 35
     maximumCenterBalanceOffset: 0.12
     phaseVelocityDeadZoneDegreesPerSecond: 8
+--- !u!114 &12010
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 12000}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0c81697815114179b699ef8f878d4225, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Rag.Healthcare.Camera.CameraPreviewDebugView
+  cameraSource: {fileID: 12002}
+  trackingController: {fileID: 12003}
+  showPreview: 1
+  showHud: 1
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
