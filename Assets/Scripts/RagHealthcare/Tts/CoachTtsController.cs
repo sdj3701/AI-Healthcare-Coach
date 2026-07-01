@@ -6,11 +6,13 @@ namespace Rag.Healthcare.Tts
 {
     public sealed class CoachTtsController : MonoBehaviour
     {
-        [SerializeField] private TtsBackend backend = TtsBackend.WindowsPowerShell;
+        [SerializeField] private TtsBackend backend = TtsBackend.Auto;
         [SerializeField] private bool speakOnStart = true;
         [SerializeField] private string startupMessage = "코칭 시스템이 준비되었습니다.";
         [SerializeField, Range(-10, 10)] private int windowsVoiceRate;
         [SerializeField, Range(0, 100)] private int windowsVoiceVolume = 100;
+        [SerializeField] private string macOsVoice = string.Empty;
+        [SerializeField, Range(80, 320)] private int macOsWordsPerMinute = 185;
 
         private ITtsService ttsService;
 
@@ -66,16 +68,33 @@ namespace Rag.Healthcare.Tts
         [ContextMenu("Test Korean Coaching")]
         private void TestKoreanCoaching()
         {
-            Speak("무릎이 안쪽으로 모이고 있어요. 무릎을 발끝 방향으로 맞춰주세요.");
+            Speak("무릎을 발끝 방향으로 맞춰 주세요.");
         }
 
         private ITtsService CreateTtsService()
         {
-            return backend switch
+            return ResolveBackend() switch
             {
                 TtsBackend.WindowsPowerShell => new WindowsPowerShellTtsService(windowsVoiceRate, windowsVoiceVolume),
+                TtsBackend.MacOsSay => new MacOsSayTtsService(macOsVoice, macOsWordsPerMinute),
                 _ => new LogTtsService()
             };
+        }
+
+        private TtsBackend ResolveBackend()
+        {
+            if (backend != TtsBackend.Auto)
+            {
+                return backend;
+            }
+
+#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+            return TtsBackend.MacOsSay;
+#elif UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
+            return TtsBackend.WindowsPowerShell;
+#else
+            return TtsBackend.LogOnly;
+#endif
         }
     }
 }

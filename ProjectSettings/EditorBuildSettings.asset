@@ -20,6 +20,9 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scenes/SpeechToTextTest.unity
     guid: c2ce9d889c283b54bb4a8e9fa5e82e32
+  - enabled: 1
+    path: Assets/Scenes/TestRagSysten.unity
+    guid: 8a5273019c524252a4cecc6e645bd7a2
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
   m_UseUCBPForAssetBundles: 0
