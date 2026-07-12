@@ -8,6 +8,7 @@ using Rag.Healthcare.Rag.Knowledge;
 using Rag.Healthcare.Rag.Logging;
 using Rag.Healthcare.Rag.Runtime;
 using Rag.Healthcare.Tts;
+using Rag.Healthcare.UI;
 using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.SceneManagement;
@@ -87,6 +88,7 @@ namespace Rag.Healthcare.Editor
             var orchestrator = runtime.AddComponent<RealtimeFeedbackOrchestrator>();
             var replayPlayer = runtime.AddComponent<PoseJsonReplayPlayer>();
             var debugView = runtime.AddComponent<CameraPreviewDebugView>();
+            var mobileView = runtime.AddComponent<MobileWorkoutPrototypeView>();
 
             SetObject(trackingController, "cameraSource", cameraSource);
             SetObject(trackingController, "feedbackReceiver", feedbackReceiver);
@@ -110,6 +112,12 @@ namespace Rag.Healthcare.Editor
             SetObject(debugView, "replayPlayer", replayPlayer);
 
             SetObject(replayPlayer, "sessionLogger", sessionLogger);
+
+            SetObject(mobileView, "cameraSource", cameraSource);
+            SetObject(mobileView, "trackingController", trackingController);
+            SetObject(mobileView, "feedbackReceiver", feedbackReceiver);
+            SetObject(mobileView, "feedbackOrchestrator", orchestrator);
+            SetObject(mobileView, "replayPlayer", replayPlayer);
 
             CreateUi(cameraSource, trackingController, feedbackReceiver, orchestrator);
 
