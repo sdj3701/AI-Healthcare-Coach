@@ -1,4 +1,5 @@
 using Rag.Healthcare.Pose;
+using Rag.Healthcare.Pose.Rendering;
 using UnityEngine;
 
 namespace Rag.Healthcare.Camera
@@ -36,6 +37,7 @@ namespace Rag.Healthcare.Camera
         [SerializeField] private CameraCaptureSource cameraSource;
         [SerializeField] private JointTrackingController trackingController;
         [SerializeField] private PoseFeedbackJsonReceiver feedbackReceiver;
+        [SerializeField] private PoseJsonReplayPlayer replayPlayer;
         [SerializeField] private bool showPreview = true;
         [SerializeField] private bool showHud = true;
         [SerializeField, Range(0f, 1f)] private float minimumOverlayConfidence = 0.35f;
@@ -52,6 +54,11 @@ namespace Rag.Healthcare.Camera
             cameraSource ??= FindFirstObjectByType<CameraCaptureSource>();
             trackingController ??= FindFirstObjectByType<JointTrackingController>();
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
+            replayPlayer ??= FindFirstObjectByType<PoseJsonReplayPlayer>();
+            if (replayPlayer == null)
+            {
+                replayPlayer = gameObject.AddComponent<PoseJsonReplayPlayer>();
+            }
         }
 
         private void OnGUI()
@@ -76,6 +83,7 @@ namespace Rag.Healthcare.Camera
             GUI.enabled = cameraSource != null && !cameraSource.IsRunning && !cameraSource.IsStarting;
             if (GUI.Button(new Rect(18f, 20f, 120f, 30f), "Start Camera"))
             {
+                replayPlayer?.StopReplay();
                 cameraSource.StartCamera();
                 trackingController?.StartTracking();
             }
@@ -85,11 +93,13 @@ namespace Rag.Healthcare.Camera
             {
                 trackingController?.StopTracking();
                 cameraSource.StopCamera();
+                replayPlayer?.PlayLatestSession();
             }
 
             GUI.enabled = cameraSource != null && !cameraSource.IsStarting;
             if (GUI.Button(new Rect(278f, 20f, 130f, 30f), "Switch Camera"))
             {
+                replayPlayer?.StopReplay();
                 var wasTracking = trackingController != null && trackingController.IsTracking;
                 trackingController?.StopTracking();
                 cameraSource.StopCamera();
@@ -185,8 +195,20 @@ namespace Rag.Healthcare.Camera
                 $"Inference ms: {(trackingController == null ? 0f : trackingController.LastInferenceMilliseconds):0.0}\n" +
                 $"Frames ok/fail/drop: {(trackingController == null ? 0 : trackingController.SuccessfulFrameCount)}/{(trackingController == null ? 0 : trackingController.FailedFrameCount)}/{(trackingController == null ? 0 : trackingController.DroppedFrameCount)}\n" +
                 $"Landmarks: {jointCount}\n" +
+                $"Replay: {BuildReplayStatus()}\n" +
                 $"Latest Feedback: {TrimForHud(latestFeedback, 92)}{feedbackAge}\n" +
                 $"Tracking Error: {(trackingController == null ? string.Empty : trackingController.LastTrackingError)}";
+        }
+
+        private string BuildReplayStatus()
+        {
+            if (replayPlayer == null)
+            {
+                return "-";
+            }
+
+            var state = replayPlayer.IsPlaying ? "Playing" : replayPlayer.LastReplayStatus;
+            return $"{state} / frames: {replayPlayer.LoadedFrameCount}";
         }
 
         private void DrawPoseOverlay(Rect previewRect)

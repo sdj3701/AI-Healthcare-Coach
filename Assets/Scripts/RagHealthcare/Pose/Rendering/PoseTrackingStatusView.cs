@@ -22,6 +22,8 @@ namespace Rag.Healthcare.Pose.Rendering
         [SerializeField] private bool createTargetInput = true;
         [SerializeField] private InputField targetCountInput;
         [SerializeField] private Button targetCountConfirmButton;
+        [SerializeField] private bool createAvatar3DPreview = true;
+        [SerializeField] private PoseAvatar3DPreview avatar3DPreview;
 
         private readonly StringBuilder builder = new StringBuilder(512);
         private float nextUpdateAt;
@@ -34,6 +36,7 @@ namespace Rag.Healthcare.Pose.Rendering
             feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
             statusText ??= GetComponent<Text>();
             EnsureTargetInput();
+            EnsureAvatar3DPreview();
         }
 
         private void Update()
@@ -296,6 +299,22 @@ namespace Rag.Healthcare.Pose.Rendering
             }
 
             feedbackOrchestrator.SetCorrectRepTarget(Mathf.Max(0, targetCount));
+        }
+
+        private void EnsureAvatar3DPreview()
+        {
+            if (!createAvatar3DPreview)
+            {
+                return;
+            }
+
+            avatar3DPreview ??= FindFirstObjectByType<PoseAvatar3DPreview>();
+            if (avatar3DPreview == null)
+            {
+                avatar3DPreview = gameObject.AddComponent<PoseAvatar3DPreview>();
+            }
+
+            avatar3DPreview.Initialize(trackingController);
         }
 
         private static void EnsureEventSystem()

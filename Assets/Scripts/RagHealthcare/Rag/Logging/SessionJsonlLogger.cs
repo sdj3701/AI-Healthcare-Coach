@@ -160,6 +160,11 @@ namespace Rag.Healthcare.Rag.Logging
                 "}");
         }
 
+        public void Flush()
+        {
+            writer?.Flush();
+        }
+
         private string GetSessionId(string frameSessionId)
         {
             if (!string.IsNullOrWhiteSpace(frameSessionId))

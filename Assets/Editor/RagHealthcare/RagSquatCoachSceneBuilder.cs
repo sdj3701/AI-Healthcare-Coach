@@ -85,6 +85,7 @@ namespace Rag.Healthcare.Editor
             var ragRetriever = runtime.AddComponent<RagRetriever>();
             var sessionLogger = runtime.AddComponent<SessionJsonlLogger>();
             var orchestrator = runtime.AddComponent<RealtimeFeedbackOrchestrator>();
+            var replayPlayer = runtime.AddComponent<PoseJsonReplayPlayer>();
             var debugView = runtime.AddComponent<CameraPreviewDebugView>();
 
             SetObject(trackingController, "cameraSource", cameraSource);
@@ -106,6 +107,9 @@ namespace Rag.Healthcare.Editor
             SetObject(debugView, "cameraSource", cameraSource);
             SetObject(debugView, "trackingController", trackingController);
             SetObject(debugView, "feedbackReceiver", feedbackReceiver);
+            SetObject(debugView, "replayPlayer", replayPlayer);
+
+            SetObject(replayPlayer, "sessionLogger", sessionLogger);
 
             CreateUi(cameraSource, trackingController, feedbackReceiver, orchestrator);
 

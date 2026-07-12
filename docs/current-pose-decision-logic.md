@@ -188,6 +188,28 @@ TTS 문구는 `RealtimeFeedbackOrchestrator.correctRepFeedbackFormat`에서 바�
 
 목표를 `0` 또는 빈 값으로 확인하면 목표 제한 없이 올바른 rep를 계속 누적한다.
 
+## 3D 캐릭터 리플레이
+
+테스트용 3D 캐릭터는 외부 모델 에셋 없이 Unity primitive로 생성한다.
+
+- 관절: `Sphere`
+- 뼈대: `Capsule`
+- 왼쪽/오른쪽 관절 색상 분리
+- `JointTrackingFrame`의 `x`, `y`, `z`를 단순 3D 좌표로 변환
+
+라이브 추적 중에는 `PoseAvatar3DPreview`가 `JointTrackingController.TrackingFrameReceived`를 받아 캐릭터를 즉시 움직인다.
+
+`Stop Camera` 버튼을 누르면 다음 순서로 리플레이가 시작된다.
+
+1. `JointTrackingController.StopTracking()`으로 추적을 멈춘다.
+2. `CameraCaptureSource.StopCamera()`로 카메라를 멈춘다.
+3. `SessionJsonlLogger.Flush()`로 현재 JSONL 로그를 디스크에 반영한다.
+4. `PoseJsonReplayPlayer`가 현재 세션 JSONL 또는 가장 최근 `RagSessions/*.jsonl` 파일을 읽는다.
+5. `"type":"frame"` 라인만 파싱해 `JointTrackingFrame`으로 변환한다.
+6. timestamp 간격에 맞춰 `PoseAvatar3DPreview.RenderFrame()`으로 3D 캐릭터를 재생한다.
+
+카메라를 다시 시작하면 현재 리플레이는 중지되고 라이브 추적 미리보기로 돌아간다.
+
 ## 현재 씬에서 쓰지 않는 분석기
 
 `PoseFeedbackAnalyzer`도 존재한다. 이 분석기는 단일 프레임 기준으로 무릎 정렬, 깊이, 좌우 대칭, 상체 기울기, 골반/어깨 높이, 중심 균형, 발 visibility를 검사한다.
