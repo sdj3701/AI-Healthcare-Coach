@@ -118,6 +118,7 @@ namespace Rag.Healthcare.Editor
             SetObject(mobileView, "feedbackReceiver", feedbackReceiver);
             SetObject(mobileView, "feedbackOrchestrator", orchestrator);
             SetObject(mobileView, "replayPlayer", replayPlayer);
+            SetBool(mobileView, "showUiInEditMode", true);
 
             CreateUi(cameraSource, trackingController, feedbackReceiver, orchestrator);
 

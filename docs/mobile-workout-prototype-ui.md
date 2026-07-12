@@ -2,7 +2,7 @@
 
 이 문서는 `code_artifact.tsx` 와이어프레임을 Unity 프로젝트에 맞게 재구성한 모바일 운동 UI의 현재 구현 내용을 정리한다.
 
-원본 와이어프레임은 React/Tailwind 기반 모바일 프로토타입이었지만, 현재 프로젝트는 Unity 런타임 앱이므로 TSX를 그대로 사용하지 않고 Unity `Canvas`, `Text`, `Button`, `InputField`, `RawImage` 기반 UI로 다시 만들었다.
+원본 와이어프레임은 React/Tailwind 기반 모바일 프로토타입이었지만, 현재 프로젝트는 Unity 런타임 앱이므로 TSX를 그대로 사용하지 않고 Unity UI Toolkit 기반 UI로 다시 만들었다. 현재 구현은 `UIDocument`, `PanelSettings`, `VisualElement`, `Button`, `TextField`, `Image`를 코드에서 생성하는 방식이다.
 
 ## 구현 위치
 
@@ -44,8 +44,9 @@ Unity 에셋 메타 파일:
 
 - `CameraPreviewDebugView` 비활성화
 - 기존 데스크톱용 `Coach Canvas` 비활성화
-- 새 `Mobile Coach Canvas`를 `ScreenSpaceOverlay`로 생성
-- 새 Canvas의 `sortingOrder`를 높게 설정해 모바일 UI가 위에 보이도록 처리
+- `MobileWorkoutPrototypeView`가 `UIDocument`를 생성하거나 기존 `UIDocument`를 재사용
+- `PanelSettings`가 없으면 런타임/에디터 미리보기용 PanelSettings 인스턴스를 생성
+- 모바일 화면은 UI Toolkit `VisualElement` 트리로 구성
 
 이 처리 덕분에 기존 IMGUI 버튼과 데스크톱 상태 패널이 모바일 UI 위에 겹쳐 보이지 않는다.
 
@@ -140,8 +141,8 @@ RealtimeFeedbackOrchestrator.SetCorrectRepTarget(targetCount)
 3. `CameraCaptureSource.StartCamera()` 호출
 4. `JointTrackingController.StartTracking()` 호출
 5. 세션 타이머 시작
-6. 카메라 프리뷰를 `RawImage`에 표시
-7. `PoseSkeletonRenderer`가 관절 오버레이를 그림
+6. 카메라 프리뷰를 UI Toolkit `Image`에 표시
+7. 자세 상태, 카운트, FPS를 UI Toolkit `Label`에 표시
 
 관련 코드:
 
@@ -185,7 +186,7 @@ private void StopWorkoutAndReplay()
 
 ## 카메라 프리뷰와 리플레이 표시
 
-운동 세션 화면의 중앙 프리뷰 영역은 `RawImage`로 구성된다.
+운동 세션 화면의 중앙 프리뷰 영역은 UI Toolkit `Image`로 구성된다.
 
 표시 우선순위:
 
@@ -354,7 +355,8 @@ SetObject(mobileView, "replayPlayer", replayPlayer);
 - 씬에 `CameraCaptureSource`가 있는지
 - 씬에 `JointTrackingController`가 있는지
 - 콘솔에 컴파일 오류가 없는지
-- 다른 Canvas가 화면을 덮고 있지 않은지
+- `Coach Runtime`에 `MobileWorkoutPrototypeView`가 붙어 있는지
+- `MobileWorkoutPrototypeView`가 실행되며 `UIDocument`가 생성되었는지
 
 ### START 후 카메라가 안 보일 때
 
@@ -379,7 +381,7 @@ SetObject(mobileView, "replayPlayer", replayPlayer);
 1. 스쿼트 외 운동별 자세 판별 로직 추가
 2. 운동별 목표 설정을 세트 단위로 분리
 3. 모바일 UI를 prefab으로 분리
-4. Unity UI Toolkit 또는 TextMeshPro 기반으로 디자인 개선
+4. UXML/USS 에셋 분리
 5. 실제 3D 캐릭터 모델 적용
 6. 리플레이 재생/일시정지/속도 조절 버튼 추가
 7. 세션 종료 후 요약 화면 추가

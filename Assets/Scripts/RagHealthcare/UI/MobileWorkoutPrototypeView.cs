@@ -4,14 +4,15 @@ using Rag.Healthcare.Pose;
 using Rag.Healthcare.Pose.Rendering;
 using Rag.Healthcare.Rag.Runtime;
 using UnityEngine;
-using UnityEngine.EventSystems;
-#if ENABLE_INPUT_SYSTEM
-using UnityEngine.InputSystem.UI;
+using UnityEngine.UIElements;
+#if UNITY_EDITOR
+using UnityEditor;
 #endif
-using UnityEngine.UI;
 
 namespace Rag.Healthcare.UI
 {
+    [ExecuteAlways]
+    [DisallowMultipleComponent]
     public sealed class MobileWorkoutPrototypeView : MonoBehaviour
     {
         private enum ScreenStep
@@ -43,8 +44,12 @@ namespace Rag.Healthcare.UI
         {
             new ExerciseOption("squat", "스쿼트", "하체", 0.5f, true),
             new ExerciseOption("lunge", "런지", "하체", 0.45f, false),
+            new ExerciseOption("legpress", "레그 프레스", "하체", 0.4f, false),
+            new ExerciseOption("deadlift", "데드리프트", "하체", 0.7f, false),
             new ExerciseOption("pushup", "푸시업", "상체", 0.4f, false),
-            new ExerciseOption("plank", "플랭크", "맨몸", 0.3f, false)
+            new ExerciseOption("pullup", "풀업", "상체", 0.6f, false),
+            new ExerciseOption("plank", "플랭크", "맨몸", 0.3f, false),
+            new ExerciseOption("burpee", "버피 테스트", "맨몸", 0.8f, false)
         };
 
         [SerializeField] private CameraCaptureSource cameraSource;
@@ -54,26 +59,27 @@ namespace Rag.Healthcare.UI
         [SerializeField] private PoseJsonReplayPlayer replayPlayer;
         [SerializeField] private bool hideLegacyDebugView = true;
         [SerializeField] private bool hideGeneratedDesktopCanvas = true;
+        [SerializeField] private bool showUiInEditMode = true;
         [SerializeField, Min(0.05f)] private float refreshIntervalSeconds = 0.2f;
 
-        private Canvas canvas;
-        private RectTransform contentRoot;
-        private Text stepLabel;
-        private Text titleLabel;
-        private Text statusLabel;
-        private Text timerLabel;
-        private Text counterLabel;
-        private Text targetLabel;
-        private Text phaseLabel;
-        private Text feedbackLabel;
-        private Text cameraStateLabel;
-        private Text replayStateLabel;
-        private Text poseFpsLabel;
-        private RawImage previewImage;
-        private GameObject previewPlaceholder;
-        private RectTransform progressRoot;
-        private InputField repsInput;
-        private InputField setsInput;
+        private UIDocument document;
+        private PanelSettings runtimePanelSettings;
+        private VisualElement root;
+        private VisualElement contentRoot;
+        private VisualElement[] progressPips;
+        private Image previewImage;
+        private VisualElement previewPlaceholder;
+        private Label stepLabel;
+        private Label timerLabel;
+        private Label correctCountLabel;
+        private Label targetCountLabel;
+        private Label poseFpsLabel;
+        private Label phaseLabel;
+        private Label feedbackLabel;
+        private Label cameraStateLabel;
+        private Label replayStateLabel;
+        private TextField repsField;
+        private TextField setsField;
 
         private ScreenStep currentStep = ScreenStep.Exercise;
         private string selectedExerciseId = "squat";
@@ -85,7 +91,9 @@ namespace Rag.Healthcare.UI
         private float sessionStartedAt;
         private float elapsedBeforePause;
         private float nextRefreshAt;
-        private Font uiFont;
+#if UNITY_EDITOR
+        private bool editorRebuildQueued;
+#endif
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void Bootstrap()
@@ -107,18 +115,20 @@ namespace Rag.Healthcare.UI
 
         private void Awake()
         {
-            ResolveReferences();
-            EnsureEventSystem();
-            uiFont = Resources.GetBuiltinResource<Font>("Arial.ttf");
-            BuildUi();
-            ApplyCompatibilityVisibility();
-            ApplyTargetCount();
-            RenderCurrentStep();
+            EnsureDocumentAndUi();
+#if UNITY_EDITOR
+            QueueEditorRebuild();
+#endif
         }
 
         private void OnEnable()
         {
-            if (cameraSource != null)
+            EnsureDocumentAndUi();
+#if UNITY_EDITOR
+            QueueEditorRebuild();
+#endif
+
+            if (Application.isPlaying && cameraSource != null)
             {
                 cameraSource.PreviewTextureChanged += HandlePreviewTextureChanged;
             }
@@ -130,10 +140,41 @@ namespace Rag.Healthcare.UI
             {
                 cameraSource.PreviewTextureChanged -= HandlePreviewTextureChanged;
             }
+
+            if (!Application.isPlaying && document != null)
+            {
+                document.rootVisualElement?.Clear();
+            }
+        }
+
+        private void OnDestroy()
+        {
+            if (runtimePanelSettings != null)
+            {
+                DestroyPanelSettings();
+            }
+        }
+
+        private void Start()
+        {
+            EnsureDocumentAndUi();
+#if UNITY_EDITOR
+            QueueEditorRebuild();
+#endif
         }
 
         private void Update()
         {
+            if (!Application.isPlaying && !showUiInEditMode)
+            {
+                return;
+            }
+
+            if (root == null)
+            {
+                EnsureDocumentAndUi();
+            }
+
             if (Time.unscaledTime < nextRefreshAt)
             {
                 return;
@@ -144,6 +185,45 @@ namespace Rag.Healthcare.UI
             RefreshPreviewTexture();
         }
 
+        private void EnsureDocumentAndUi(bool forceRebuild = false)
+        {
+            if (!Application.isPlaying && !showUiInEditMode)
+            {
+                return;
+            }
+
+            ResolveReferences();
+            EnsureDocument();
+
+            if (document == null || document.rootVisualElement == null)
+            {
+                return;
+            }
+
+            if (!forceRebuild && root != null && root.panel != null)
+            {
+                if (Application.isPlaying)
+                {
+                    ApplyCompatibilityVisibility();
+                    ApplyTargetCount();
+                }
+
+                document.rootVisualElement.MarkDirtyRepaint();
+                return;
+            }
+
+            BuildUi();
+
+            if (Application.isPlaying)
+            {
+                ApplyCompatibilityVisibility();
+                ApplyTargetCount();
+            }
+
+            RenderCurrentStep();
+            document.rootVisualElement.MarkDirtyRepaint();
+        }
+
         private void ResolveReferences()
         {
             cameraSource ??= FindFirstObjectByType<CameraCaptureSource>();
@@ -152,140 +232,312 @@ namespace Rag.Healthcare.UI
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
             replayPlayer ??= FindFirstObjectByType<PoseJsonReplayPlayer>();
 
-            if (replayPlayer == null)
+            if (Application.isPlaying && replayPlayer == null)
             {
                 replayPlayer = gameObject.AddComponent<PoseJsonReplayPlayer>();
             }
         }
 
-        private void BuildUi()
+        private void EnsureDocument()
         {
-            var canvasObject = new GameObject("Mobile Coach Canvas", typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
-            canvasObject.transform.SetParent(transform, false);
-
-            canvas = canvasObject.GetComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 80;
-
-            var scaler = canvasObject.GetComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(390f, 844f);
-            scaler.matchWidthOrHeight = 0.5f;
-
-            var background = CreateImage(canvasObject.transform, "Background", new Color(0.035f, 0.045f, 0.06f, 1f));
-            Stretch(background.rectTransform);
-
-            var phone = CreateImage(canvasObject.transform, "Phone Frame", new Color(0.075f, 0.09f, 0.115f, 1f));
-            var phoneRect = phone.rectTransform;
-            phoneRect.anchorMin = new Vector2(0.5f, 0.5f);
-            phoneRect.anchorMax = new Vector2(0.5f, 0.5f);
-            phoneRect.pivot = new Vector2(0.5f, 0.5f);
-            phoneRect.sizeDelta = new Vector2(374f, 812f);
-            phoneRect.anchoredPosition = Vector2.zero;
-
-            var screen = CreateImage(phone.transform, "Phone Screen", new Color(0.025f, 0.035f, 0.05f, 1f));
-            var screenRect = screen.rectTransform;
-            Stretch(screenRect);
-            screenRect.offsetMin = new Vector2(12f, 12f);
-            screenRect.offsetMax = new Vector2(-12f, -12f);
-
-            var layout = screen.gameObject.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(14, 14, 18, 12);
-            layout.spacing = 8f;
-            layout.childAlignment = TextAnchor.UpperCenter;
-            layout.childControlWidth = true;
-            layout.childControlHeight = false;
-            layout.childForceExpandWidth = true;
-            layout.childForceExpandHeight = false;
-
-            BuildStatusBar(screen.transform);
-            BuildTitle(screen.transform);
-            BuildProgress(screen.transform);
-
-            var contentObject = new GameObject("Step Content", typeof(RectTransform), typeof(VerticalLayoutGroup), typeof(LayoutElement));
-            contentObject.transform.SetParent(screen.transform, false);
-            contentRoot = contentObject.GetComponent<RectTransform>();
-
-            var contentLayout = contentObject.GetComponent<VerticalLayoutGroup>();
-            contentLayout.spacing = 8f;
-            contentLayout.padding = new RectOffset(0, 0, 0, 0);
-            contentLayout.childAlignment = TextAnchor.UpperCenter;
-            contentLayout.childControlWidth = true;
-            contentLayout.childControlHeight = false;
-            contentLayout.childForceExpandWidth = true;
-            contentLayout.childForceExpandHeight = false;
-
-            var contentElement = contentObject.GetComponent<LayoutElement>();
-            contentElement.flexibleHeight = 1f;
-        }
-
-        private void BuildStatusBar(Transform parent)
-        {
-            var row = CreateRow(parent, "Status Bar", 24f, 0f);
-            row.padding = new RectOffset(8, 8, 0, 0);
-            row.childAlignment = TextAnchor.MiddleCenter;
-
-            statusLabel = CreateText(row.transform, "Status", "19:44  5G", 11, new Color(0.68f, 0.75f, 0.84f, 1f), TextAnchor.MiddleLeft);
-            statusLabel.gameObject.AddComponent<LayoutElement>().flexibleWidth = 1f;
-
-            var battery = CreateText(row.transform, "Battery", "배터리 82%", 10, new Color(0.25f, 0.9f, 0.62f, 1f), TextAnchor.MiddleRight);
-            battery.gameObject.AddComponent<LayoutElement>().preferredWidth = 84f;
-        }
-
-        private void BuildTitle(Transform parent)
-        {
-            var panel = CreateImage(parent, "Title Panel", new Color(0.045f, 0.06f, 0.08f, 0.95f));
-            panel.gameObject.AddComponent<LayoutElement>().preferredHeight = 48f;
-
-            var layout = panel.gameObject.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(10, 10, 3, 3);
-            layout.spacing = 0f;
-            layout.childControlWidth = true;
-            layout.childControlHeight = false;
-            layout.childForceExpandWidth = true;
-            layout.childForceExpandHeight = false;
-
-            titleLabel = CreateText(panel.transform, "Title", "AI 헬스케어 코치", 16, Color.white, TextAnchor.MiddleLeft);
-            titleLabel.fontStyle = FontStyle.Bold;
-            titleLabel.gameObject.AddComponent<LayoutElement>().preferredHeight = 24f;
-
-            var subtitle = CreateText(panel.transform, "Subtitle", "운동 선택부터 자세 추적, 리플레이까지 한 화면 흐름으로 확인합니다.", 10, new Color(0.56f, 0.63f, 0.72f, 1f), TextAnchor.MiddleLeft);
-            subtitle.gameObject.AddComponent<LayoutElement>().preferredHeight = 18f;
-        }
-
-        private void BuildProgress(Transform parent)
-        {
-            var rowObject = new GameObject("Step Progress", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
-            rowObject.transform.SetParent(parent, false);
-            progressRoot = rowObject.GetComponent<RectTransform>();
-
-            var row = rowObject.GetComponent<HorizontalLayoutGroup>();
-            row.padding = new RectOffset(8, 8, 0, 0);
-            row.spacing = 5f;
-            row.childAlignment = TextAnchor.MiddleCenter;
-            row.childControlWidth = false;
-            row.childControlHeight = false;
-
-            rowObject.GetComponent<LayoutElement>().preferredHeight = 26f;
-
-            for (var i = 1; i <= 3; i++)
+            document ??= GetComponent<UIDocument>();
+            if (document == null)
             {
-                var dot = CreateImage(progressRoot, "Step " + i, new Color(0.18f, 0.22f, 0.3f, 1f));
-                var element = dot.gameObject.AddComponent<LayoutElement>();
-                element.preferredWidth = i == 1 ? 44f : 18f;
-                element.preferredHeight = 8f;
+                document = gameObject.AddComponent<UIDocument>();
             }
 
-            stepLabel = CreateText(progressRoot, "Step Label", "STEP 1 / 3", 11, new Color(0.25f, 0.9f, 0.62f, 1f), TextAnchor.MiddleRight);
-            stepLabel.fontStyle = FontStyle.Bold;
-            var labelElement = stepLabel.gameObject.AddComponent<LayoutElement>();
-            labelElement.flexibleWidth = 1f;
-            labelElement.preferredHeight = 18f;
+            if (document.panelSettings == null)
+            {
+                runtimePanelSettings = ScriptableObject.CreateInstance<PanelSettings>();
+                runtimePanelSettings.name = "Mobile Workout Runtime Panel Settings";
+                runtimePanelSettings.hideFlags = HideFlags.DontSave;
+                document.panelSettings = runtimePanelSettings;
+            }
+
+            document.sortingOrder = 100;
+            ConfigurePanelSettings(document.panelSettings);
+        }
+
+        private static void ConfigurePanelSettings(PanelSettings panelSettings)
+        {
+            if (panelSettings == null)
+            {
+                return;
+            }
+
+            panelSettings.scaleMode = PanelScaleMode.ConstantPixelSize;
+            panelSettings.referenceResolution = new Vector2Int(390, 844);
+            panelSettings.match = 0.5f;
+            panelSettings.sortingOrder = 100;
+            panelSettings.clearColor = true;
+            panelSettings.colorClearValue = new Color(0.035f, 0.045f, 0.06f, 1f);
+#if UNITY_EDITOR
+            var theme = AssetDatabase.LoadAssetAtPath<ThemeStyleSheet>("Assets/UI Toolkit/UnityThemes/UnityDefaultRuntimeTheme.tss");
+            if (theme != null)
+            {
+                panelSettings.themeStyleSheet = theme;
+            }
+#endif
+        }
+
+#if UNITY_EDITOR
+        private void QueueEditorRebuild()
+        {
+            if (Application.isPlaying || !showUiInEditMode || editorRebuildQueued)
+            {
+                return;
+            }
+
+            editorRebuildQueued = true;
+            EditorApplication.delayCall += RebuildEditorPreview;
+        }
+
+        private void RebuildEditorPreview()
+        {
+            editorRebuildQueued = false;
+            if (this == null || Application.isPlaying || !isActiveAndEnabled || !showUiInEditMode)
+            {
+                return;
+            }
+
+            root = null;
+            EnsureDocumentAndUi(true);
+            document?.rootVisualElement?.MarkDirtyRepaint();
+            EditorApplication.QueuePlayerLoopUpdate();
+            SceneView.RepaintAll();
+        }
+#endif
+
+        private void BuildUi()
+        {
+            var documentRoot = document.rootVisualElement;
+            documentRoot.Clear();
+
+            root = new VisualElement { name = "mobile-workout-root" };
+            root.style.flexGrow = 1f;
+            root.style.backgroundColor = ColorFromHex(0x090D12);
+            root.style.alignItems = Align.Center;
+            root.style.justifyContent = Justify.FlexStart;
+            root.style.paddingTop = 34f;
+            root.style.paddingRight = 14f;
+            root.style.paddingBottom = 14f;
+            root.style.paddingLeft = 14f;
+            documentRoot.Add(root);
+
+            root.Add(BuildHeroHeader());
+
+            var phone = new VisualElement { name = "phone-frame" };
+            phone.style.width = 376f;
+            phone.style.height = 780f;
+            phone.style.backgroundColor = ColorFromHex(0x161B22);
+            phone.style.borderTopLeftRadius = 40f;
+            phone.style.borderTopRightRadius = 40f;
+            phone.style.borderBottomLeftRadius = 40f;
+            phone.style.borderBottomRightRadius = 40f;
+            phone.style.borderTopWidth = 4f;
+            phone.style.borderRightWidth = 4f;
+            phone.style.borderBottomWidth = 4f;
+            phone.style.borderLeftWidth = 4f;
+            phone.style.borderTopColor = ColorFromHex(0x30363D);
+            phone.style.borderRightColor = ColorFromHex(0x30363D);
+            phone.style.borderBottomColor = ColorFromHex(0x30363D);
+            phone.style.borderLeftColor = ColorFromHex(0x30363D);
+            phone.style.paddingTop = 12f;
+            phone.style.paddingRight = 12f;
+            phone.style.paddingBottom = 12f;
+            phone.style.paddingLeft = 12f;
+            phone.style.marginTop = 20f;
+            root.Add(phone);
+
+            var screen = new VisualElement { name = "phone-screen" };
+            screen.style.flexGrow = 1f;
+            screen.style.backgroundColor = ColorFromHex(0x0B1119);
+            screen.style.borderTopLeftRadius = 30f;
+            screen.style.borderTopRightRadius = 30f;
+            screen.style.borderBottomLeftRadius = 30f;
+            screen.style.borderBottomRightRadius = 30f;
+            screen.style.paddingTop = 18f;
+            screen.style.paddingRight = 14f;
+            screen.style.paddingBottom = 12f;
+            screen.style.paddingLeft = 14f;
+            phone.Add(screen);
+
+            screen.Add(BuildPhoneNotch());
+            screen.Add(BuildStatusBar());
+            screen.Add(BuildProgressBlock());
+
+            contentRoot = new VisualElement { name = "step-content" };
+            contentRoot.style.flexGrow = 1f;
+            contentRoot.style.flexDirection = FlexDirection.Column;
+            contentRoot.style.marginTop = 8f;
+            screen.Add(contentRoot);
+
+            screen.Add(BuildHomeIndicator());
+        }
+
+        private VisualElement BuildHeroHeader()
+        {
+            var header = new VisualElement { name = "wireframe-header" };
+            header.style.width = 420f;
+            header.style.maxWidth = Length.Percent(100f);
+            header.style.alignItems = Align.Center;
+            header.style.height = 86f;
+
+            var title = Label("🏋 Smart Fitness Wireframe", 23, ColorFromHex(0x34D399), FontStyle.Bold);
+            title.style.unityTextAlign = TextAnchor.MiddleCenter;
+            title.style.height = 34f;
+            header.Add(title);
+
+            var subtitle = Label("실제 스마트폰처럼 화면들을 터치하며 작동하는 초고화질 인터랙티브 와이어프레임 데모입니다.", 12, ColorFromHex(0xB6C2D5));
+            subtitle.style.unityTextAlign = TextAnchor.MiddleCenter;
+            subtitle.style.whiteSpace = WhiteSpace.Normal;
+            subtitle.style.width = 410f;
+            subtitle.style.height = 40f;
+            header.Add(subtitle);
+            return header;
+        }
+
+        private VisualElement BuildPhoneNotch()
+        {
+            var row = new VisualElement { name = "phone-notch-row" };
+            row.style.height = 26f;
+            row.style.alignItems = Align.Center;
+            row.style.justifyContent = Justify.Center;
+
+            var notch = new VisualElement { name = "phone-notch" };
+            notch.style.width = 128f;
+            notch.style.height = 24f;
+            notch.style.backgroundColor = Color.black;
+            notch.style.borderTopLeftRadius = 12f;
+            notch.style.borderTopRightRadius = 12f;
+            notch.style.borderBottomLeftRadius = 12f;
+            notch.style.borderBottomRightRadius = 12f;
+            notch.style.flexDirection = FlexDirection.Row;
+            notch.style.alignItems = Align.Center;
+            notch.style.justifyContent = Justify.Center;
+
+            var leftDot = new VisualElement();
+            leftDot.style.width = 10f;
+            leftDot.style.height = 10f;
+            leftDot.style.borderTopLeftRadius = 5f;
+            leftDot.style.borderTopRightRadius = 5f;
+            leftDot.style.borderBottomLeftRadius = 5f;
+            leftDot.style.borderBottomRightRadius = 5f;
+            leftDot.style.backgroundColor = ColorFromHex(0x111827);
+            leftDot.style.marginRight = 14f;
+            notch.Add(leftDot);
+
+            var speaker = new VisualElement();
+            speaker.style.width = 48f;
+            speaker.style.height = 4f;
+            speaker.style.borderTopLeftRadius = 2f;
+            speaker.style.borderTopRightRadius = 2f;
+            speaker.style.borderBottomLeftRadius = 2f;
+            speaker.style.borderBottomRightRadius = 2f;
+            speaker.style.backgroundColor = ColorFromHex(0x25324A);
+            speaker.style.marginRight = 14f;
+            notch.Add(speaker);
+
+            var rightDot = new VisualElement();
+            rightDot.style.width = 10f;
+            rightDot.style.height = 10f;
+            rightDot.style.borderTopLeftRadius = 5f;
+            rightDot.style.borderTopRightRadius = 5f;
+            rightDot.style.borderBottomLeftRadius = 5f;
+            rightDot.style.borderBottomRightRadius = 5f;
+            rightDot.style.backgroundColor = ColorFromHex(0x1D4ED8);
+            notch.Add(rightDot);
+
+            row.Add(notch);
+            return row;
+        }
+
+        private VisualElement BuildHomeIndicator()
+        {
+            var row = new VisualElement { name = "phone-home-indicator-row" };
+            row.style.height = 12f;
+            row.style.alignItems = Align.Center;
+            row.style.justifyContent = Justify.Center;
+
+            var bar = new VisualElement { name = "phone-home-indicator" };
+            bar.style.width = 128f;
+            bar.style.height = 6f;
+            bar.style.backgroundColor = ColorFromHex(0x334155);
+            bar.style.borderTopLeftRadius = 3f;
+            bar.style.borderTopRightRadius = 3f;
+            bar.style.borderBottomLeftRadius = 3f;
+            bar.style.borderBottomRightRadius = 3f;
+            row.Add(bar);
+            return row;
+        }
+
+        private VisualElement BuildStatusBar()
+        {
+            var row = Row("status-bar", 24f, 0f);
+            row.style.justifyContent = Justify.SpaceBetween;
+            row.style.paddingLeft = 8f;
+            row.style.paddingRight = 8f;
+
+            row.Add(Label("19:44  🏃", 10, ColorFromHex(0xB6C2D5), FontStyle.Bold));
+            row.Add(Label("5G   ◇  ▰", 9, ColorFromHex(0x34D399), FontStyle.Bold));
+            return row;
+        }
+
+        private VisualElement BuildTitleBlock()
+        {
+            var block = Card("title-block", 54f);
+            block.style.paddingTop = 6f;
+            block.style.paddingRight = 10f;
+            block.style.paddingBottom = 6f;
+            block.style.paddingLeft = 10f;
+
+            var title = Label("AI 헬스케어 코치", 17, Color.white, FontStyle.Bold);
+            title.style.height = 24f;
+            block.Add(title);
+
+            var subtitle = Label("운동 선택, 목표 설정, 자세 추적, 리플레이를 한 흐름으로 확인합니다.", 10, ColorFromHex(0x8F9AAF));
+            subtitle.style.height = 18f;
+            block.Add(subtitle);
+            return block;
+        }
+
+        private VisualElement BuildProgressBlock()
+        {
+            var row = Row("step-progress", 28f, 6f);
+            row.style.paddingLeft = 8f;
+            row.style.paddingRight = 8f;
+            row.style.alignItems = Align.Center;
+
+            progressPips = new VisualElement[3];
+            for (var i = 0; i < progressPips.Length; i++)
+            {
+                var pip = new VisualElement { name = "step-pip-" + (i + 1) };
+                pip.style.height = 8f;
+                pip.style.width = i == 0 ? 42f : 18f;
+                pip.style.borderTopLeftRadius = 4f;
+                pip.style.borderTopRightRadius = 4f;
+                pip.style.borderBottomLeftRadius = 4f;
+                pip.style.borderBottomRightRadius = 4f;
+                row.Add(pip);
+                progressPips[i] = pip;
+            }
+
+            stepLabel = Label("STEP 1 / 3", 11, ColorFromHex(0x34D399), FontStyle.Bold);
+            stepLabel.style.flexGrow = 1f;
+            stepLabel.style.unityTextAlign = TextAnchor.MiddleRight;
+            row.Add(stepLabel);
+            return row;
         }
 
         private void RenderCurrentStep()
         {
-            ClearContent();
+            if (contentRoot == null)
+            {
+                return;
+            }
+
+            contentRoot.Clear();
+            ResetStepReferences();
             UpdateProgress();
 
             switch (currentStep)
@@ -307,47 +559,97 @@ namespace Rag.Healthcare.UI
 
         private void RenderExerciseStep()
         {
-            AddHeader("운동 선택", "현재 자세 판별은 스쿼트를 기준으로 동작합니다.");
-
             var selected = GetSelectedExercise();
-            var selectedPanel = CreateCard(contentRoot, "Selected Exercise", 74f);
-            var selectedLayout = selectedPanel.gameObject.AddComponent<VerticalLayoutGroup>();
-            selectedLayout.padding = new RectOffset(12, 12, 8, 8);
-            selectedLayout.spacing = 3f;
+            var pickedHeader = Row("picked-header", 22f, 0f);
+            pickedHeader.style.justifyContent = Justify.SpaceBetween;
+            var pickedTitle = Label("✓ 내가 고른 운동 목록 (1)", 11, ColorFromHex(0xB6C2D5), FontStyle.Normal);
+            pickedTitle.style.flexGrow = 1f;
+            pickedHeader.Add(pickedTitle);
+            pickedHeader.Add(Label("Real-time Save", 9, ColorFromHex(0x34D399), FontStyle.Bold));
+            contentRoot.Add(pickedHeader);
 
-            var selectedTitle = CreateText(selectedPanel.transform, "Selected Title", "선택한 운동", 10, new Color(0.55f, 0.63f, 0.73f, 1f), TextAnchor.MiddleLeft);
-            selectedTitle.gameObject.AddComponent<LayoutElement>().preferredHeight = 16f;
+            var chipRow = Row("picked-chip-row", 38f, 0f);
+            var chip = new Button(() => { }) { text = GetExerciseIcon(selected.Id) + "  " + selected.Name + "  ×" };
+            chip.style.width = 104f;
+            chip.style.height = 30f;
+            chip.style.backgroundColor = new Color(0.015f, 0.18f, 0.14f, 0.92f);
+            chip.style.color = ColorFromHex(0x5EEAD4);
+            chip.style.unityFontStyleAndWeight = FontStyle.Bold;
+            chip.style.fontSize = 12f;
+            chip.style.borderTopLeftRadius = 16f;
+            chip.style.borderTopRightRadius = 16f;
+            chip.style.borderBottomLeftRadius = 16f;
+            chip.style.borderBottomRightRadius = 16f;
+            chip.style.borderTopColor = ColorFromHex(0x10B981);
+            chip.style.borderRightColor = ColorFromHex(0x10B981);
+            chip.style.borderBottomColor = ColorFromHex(0x10B981);
+            chip.style.borderLeftColor = ColorFromHex(0x10B981);
+            chip.style.borderTopWidth = 1f;
+            chip.style.borderRightWidth = 1f;
+            chip.style.borderBottomWidth = 1f;
+            chip.style.borderLeftWidth = 1f;
+            chipRow.Add(chip);
+            contentRoot.Add(chipRow);
 
-            var selectedName = CreateText(selectedPanel.transform, "Selected Name", selected.Name + "  " + (selected.Supported ? "자세 추적 지원" : "준비 중"), 17, Color.white, TextAnchor.MiddleLeft);
-            selectedName.fontStyle = FontStyle.Bold;
-            selectedName.gameObject.AddComponent<LayoutElement>().preferredHeight = 28f;
+            var divider = new VisualElement { name = "section-divider" };
+            divider.style.height = 1f;
+            divider.style.backgroundColor = ColorFromHex(0x1F2937);
+            divider.style.marginTop = 2f;
+            divider.style.marginBottom = 14f;
+            contentRoot.Add(divider);
 
-            var categoryRow = CreateRow(contentRoot, "Category Row", 48f, 6f);
-            CreateCategoryButton(categoryRow.transform, "하체");
-            CreateCategoryButton(categoryRow.transform, "상체");
-            CreateCategoryButton(categoryRow.transform, "맨몸");
+            var categoryRow = Row("category-row", 48f, 7f);
+            contentRoot.Add(Label("운동 카테고리 선택", 10, ColorFromHex(0x9AA7BB), FontStyle.Bold));
+            categoryRow.style.marginTop = 8f;
+            AddCategoryButton(categoryRow, "상체");
+            AddCategoryButton(categoryRow, "하체");
+            AddCategoryButton(categoryRow, "맨몸");
+            contentRoot.Add(categoryRow);
 
-            var list = CreateCard(contentRoot, "Exercise List", 238f);
-            var listLayout = list.gameObject.AddComponent<VerticalLayoutGroup>();
-            listLayout.padding = new RectOffset(10, 10, 8, 8);
-            listLayout.spacing = 7f;
+            var list = Card("exercise-list", 354f);
+            list.style.marginTop = 16f;
+            list.style.paddingTop = 12f;
+            list.style.paddingRight = 12f;
+            list.style.paddingBottom = 12f;
+            list.style.paddingLeft = 12f;
 
-            foreach (var exercise in Exercises)
+            var visibleExercises = GetVisibleExercises();
+            var listHeader = Row("exercise-list-header", 26f, 0f);
+            var listTitle = Label("🌟 " + selectedCategory + " 운동 리스트 (터치 시 선택)", 12, ColorFromHex(0xD6E0EF), FontStyle.Bold);
+            listTitle.style.flexGrow = 1f;
+            listHeader.Add(listTitle);
+
+            var countPill = Label(visibleExercises.Length + "개 항목", 10, ColorFromHex(0xCBD5E1), FontStyle.Bold);
+            countPill.style.unityTextAlign = TextAnchor.MiddleCenter;
+            countPill.style.width = 58f;
+            countPill.style.height = 22f;
+            countPill.style.backgroundColor = ColorFromHex(0x263347);
+            countPill.style.borderTopLeftRadius = 10f;
+            countPill.style.borderTopRightRadius = 10f;
+            countPill.style.borderBottomLeftRadius = 10f;
+            countPill.style.borderBottomRightRadius = 10f;
+            listHeader.Add(countPill);
+            list.Add(listHeader);
+
+            for (var i = 0; i < visibleExercises.Length; i += 2)
             {
-                if (exercise.Category != selectedCategory)
+                var exerciseRow = Row("exercise-row-" + i, 58f, 8f);
+                exerciseRow.style.marginTop = i == 0 ? 8f : 8f;
+                AddExerciseButton(exerciseRow, visibleExercises[i]);
+                if (i + 1 < visibleExercises.Length)
                 {
-                    continue;
+                    AddExerciseButton(exerciseRow, visibleExercises[i + 1]);
                 }
-
-                CreateExerciseButton(list.transform, exercise);
+                list.Add(exerciseRow);
             }
 
-            AddSpacer(8f);
-            CreateButton(contentRoot, "다음: 목표 횟수 설정", new Color(0.12f, 0.82f, 0.5f, 1f), new Color(0.02f, 0.04f, 0.05f, 1f), 48f, () =>
+            contentRoot.Add(list);
+            contentRoot.Add(Spacer(24f));
+            contentRoot.Add(ActionButton("개수 설정하러 가기 (다음)  ›", ColorFromHex(0x14B8A6), Color.black, 52f, () =>
             {
                 currentStep = ScreenStep.Target;
                 RenderCurrentStep();
-            });
+            }));
         }
 
         private void RenderTargetStep()
@@ -355,207 +657,203 @@ namespace Rag.Healthcare.UI
             AddHeader("목표 설정", "반복 횟수와 세트를 정하면 정확한 자세 카운트 목표가 적용됩니다.");
 
             var selected = GetSelectedExercise();
-            var card = CreateCard(contentRoot, "Target Card", 280f);
-            var layout = card.gameObject.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(12, 12, 10, 10);
-            layout.spacing = 9f;
-            layout.childControlWidth = true;
-            layout.childControlHeight = false;
-            layout.childForceExpandWidth = true;
+            var card = Card("target-card", 292f);
+            card.style.paddingTop = 12f;
+            card.style.paddingRight = 12f;
+            card.style.paddingBottom = 12f;
+            card.style.paddingLeft = 12f;
+            card.Add(Label(selected.Name, 22, Color.white, FontStyle.Bold));
+            repsField = AddNumberField(card, "반복 횟수", repsPerSet, value =>
+            {
+                repsPerSet = Mathf.Clamp(value, 1, 999);
+                RefreshDynamicText();
+            });
+            setsField = AddNumberField(card, "세트 수", sets, value =>
+            {
+                sets = Mathf.Clamp(value, 1, 999);
+                RefreshDynamicText();
+            });
+            targetCountLabel = Label(string.Empty, 14, ColorFromHex(0x34D399), FontStyle.Bold);
+            targetCountLabel.style.marginTop = 8f;
+            targetCountLabel.style.height = 28f;
+            card.Add(targetCountLabel);
 
-            var name = CreateText(card.transform, "Exercise Name", selected.Name, 20, Color.white, TextAnchor.MiddleLeft);
-            name.fontStyle = FontStyle.Bold;
-            name.gameObject.AddComponent<LayoutElement>().preferredHeight = 30f;
+            var calorieLabel = Label("예상 소모: " + (repsPerSet * sets * selected.CaloriesPerRep).ToString("0.0") + " kcal", 12, ColorFromHex(0xFB7185), FontStyle.Bold);
+            calorieLabel.style.height = 24f;
+            card.Add(calorieLabel);
+            contentRoot.Add(card);
 
-            repsInput = CreateNumberInput(card.transform, "반복 횟수", repsPerSet);
-            setsInput = CreateNumberInput(card.transform, "세트 수", sets);
-
-            targetLabel = CreateText(card.transform, "Target Summary", string.Empty, 13, new Color(0.25f, 0.9f, 0.62f, 1f), TextAnchor.MiddleLeft);
-            targetLabel.fontStyle = FontStyle.Bold;
-            targetLabel.gameObject.AddComponent<LayoutElement>().preferredHeight = 38f;
-
-            var totalCalorie = CreateText(card.transform, "Calorie Summary", string.Empty, 11, new Color(0.86f, 0.52f, 0.52f, 1f), TextAnchor.MiddleLeft);
-            totalCalorie.gameObject.AddComponent<LayoutElement>().preferredHeight = 22f;
-            totalCalorie.text = "예상 소모: " + (repsPerSet * sets * selected.CaloriesPerRep).ToString("0.0") + " kcal";
-
-            var buttonRow = CreateRow(contentRoot, "Target Buttons", 50f, 8f);
-            CreateButton(buttonRow.transform, "이전", new Color(0.1f, 0.13f, 0.18f, 1f), Color.white, 50f, () =>
+            contentRoot.Add(Spacer(10f));
+            var row = Row("target-buttons", 52f, 8f);
+            row.Add(ActionButton("이전", ColorFromHex(0x161B22), Color.white, 52f, () =>
             {
                 currentStep = ScreenStep.Exercise;
                 RenderCurrentStep();
-            });
-            CreateButton(buttonRow.transform, "운동 화면으로", new Color(0.12f, 0.82f, 0.5f, 1f), new Color(0.02f, 0.04f, 0.05f, 1f), 50f, () =>
+            }));
+            row.Add(ActionButton("운동 화면으로", ColorFromHex(0x22C55E), ColorFromHex(0x07110C), 52f, () =>
             {
-                ApplyTargetCountFromInputs();
+                ApplyTargetCountFromFields();
                 currentStep = ScreenStep.Session;
                 RenderCurrentStep();
-            });
-
-            RefreshTargetSummary();
+            }));
+            contentRoot.Add(row);
         }
 
         private void RenderSessionStep()
         {
-            AddHeader("운동 세션", "Start로 카메라 추적을 시작하고 Stop으로 JSON 기반 3D 리플레이를 확인합니다.");
+            AddHeader("운동 세션", "Start로 추적을 시작하고 Stop으로 저장 JSON 기반 3D 리플레이를 확인합니다.");
 
-            var hud = CreateCard(contentRoot, "Session HUD", 64f);
-            var hudRow = hud.gameObject.AddComponent<HorizontalLayoutGroup>();
-            hudRow.padding = new RectOffset(10, 10, 6, 6);
-            hudRow.spacing = 8f;
-            hudRow.childControlWidth = true;
-            hudRow.childControlHeight = true;
-            hudRow.childForceExpandWidth = true;
+            var hud = Card("session-hud", 64f);
+            hud.style.flexDirection = FlexDirection.Row;
+            hud.style.alignItems = Align.Center;
+            hud.style.paddingLeft = 10f;
+            hud.style.paddingRight = 10f;
+            phaseLabel = Label("Phase: -", 11, Color.white, FontStyle.Bold);
+            phaseLabel.style.flexGrow = 1f;
+            timerLabel = Label("00:00", 17, ColorFromHex(0x34D399), FontStyle.Bold);
+            timerLabel.style.unityTextAlign = TextAnchor.MiddleRight;
+            timerLabel.style.width = 84f;
+            hud.Add(phaseLabel);
+            hud.Add(timerLabel);
+            contentRoot.Add(hud);
 
-            phaseLabel = CreateText(hud.transform, "Phase", "Phase: -", 11, Color.white, TextAnchor.MiddleLeft);
-            phaseLabel.gameObject.AddComponent<LayoutElement>().flexibleWidth = 1f;
+            contentRoot.Add(BuildPreviewPanel());
+            contentRoot.Add(BuildMetricRow());
 
-            timerLabel = CreateText(hud.transform, "Timer", "00:00", 16, new Color(0.25f, 0.9f, 0.62f, 1f), TextAnchor.MiddleRight);
-            timerLabel.fontStyle = FontStyle.Bold;
-            timerLabel.gameObject.AddComponent<LayoutElement>().preferredWidth = 80f;
+            feedbackLabel = Label("최근 피드백: -", 10, ColorFromHex(0x9AA7BB));
+            feedbackLabel.style.height = 34f;
+            feedbackLabel.style.marginTop = 6f;
+            contentRoot.Add(feedbackLabel);
 
-            BuildPreviewPanel();
-            BuildMetricRow();
-
-            feedbackLabel = CreateText(contentRoot, "Latest Feedback", "최근 피드백: -", 10, new Color(0.62f, 0.69f, 0.78f, 1f), TextAnchor.MiddleLeft);
-            feedbackLabel.gameObject.AddComponent<LayoutElement>().preferredHeight = 34f;
-
-            var utilityRow = CreateRow(contentRoot, "Camera Utilities", 38f, 6f);
-            CreateButton(utilityRow.transform, "카메라 전환", new Color(0.1f, 0.13f, 0.18f, 1f), Color.white, 38f, SwitchCamera);
-            CreateButton(utilityRow.transform, "목표 수정", new Color(0.1f, 0.13f, 0.18f, 1f), Color.white, 38f, () =>
+            var utilityRow = Row("utility-row", 38f, 7f);
+            utilityRow.Add(ActionButton("카메라 전환", ColorFromHex(0x161B22), Color.white, 38f, SwitchCamera));
+            utilityRow.Add(ActionButton("목표 수정", ColorFromHex(0x161B22), Color.white, 38f, () =>
             {
                 StopWorkoutOnly();
                 currentStep = ScreenStep.Target;
                 RenderCurrentStep();
-            });
+            }));
+            contentRoot.Add(utilityRow);
 
-            var controlRow = CreateRow(contentRoot, "Session Controls", 54f, 8f);
-            CreateButton(controlRow.transform, "START", new Color(0.12f, 0.82f, 0.5f, 1f), new Color(0.02f, 0.04f, 0.05f, 1f), 54f, StartWorkout);
-            CreateButton(controlRow.transform, "STOP", new Color(0.82f, 0.18f, 0.25f, 1f), Color.white, 54f, StopWorkoutAndReplay);
+            var controlRow = Row("control-row", 54f, 8f);
+            controlRow.style.marginTop = 6f;
+            controlRow.Add(ActionButton("START", ColorFromHex(0x22C55E), ColorFromHex(0x07110C), 54f, StartWorkout));
+            controlRow.Add(ActionButton("STOP", ColorFromHex(0xE11D48), Color.white, 54f, StopWorkoutAndReplay));
+            contentRoot.Add(controlRow);
 
-            var resetRow = CreateRow(contentRoot, "Reset Row", 30f, 6f);
-            CreateButton(resetRow.transform, "리셋", new Color(0.07f, 0.09f, 0.13f, 1f), new Color(0.62f, 0.69f, 0.78f, 1f), 30f, ResetSession);
-            CreateButton(resetRow.transform, "운동 선택", new Color(0.07f, 0.09f, 0.13f, 1f), new Color(0.62f, 0.69f, 0.78f, 1f), 30f, () =>
+            var resetRow = Row("reset-row", 30f, 7f);
+            resetRow.style.marginTop = 6f;
+            resetRow.Add(ActionButton("리셋", ColorFromHex(0x101621), ColorFromHex(0x94A3B8), 30f, ResetSession));
+            resetRow.Add(ActionButton("운동 선택", ColorFromHex(0x101621), ColorFromHex(0x94A3B8), 30f, () =>
             {
                 StopWorkoutOnly();
                 currentStep = ScreenStep.Exercise;
                 RenderCurrentStep();
-            });
+            }));
+            contentRoot.Add(resetRow);
         }
 
-        private void BuildPreviewPanel()
+        private VisualElement BuildPreviewPanel()
         {
-            var panel = CreateCard(contentRoot, "Camera Preview Panel", 270f);
-            panel.color = new Color(0.005f, 0.007f, 0.012f, 1f);
+            var frame = Card("preview-frame", 270f);
+            frame.style.marginTop = 8f;
+            frame.style.backgroundColor = Color.black;
+            frame.style.position = Position.Relative;
+            frame.style.overflow = Overflow.Hidden;
 
-            previewImage = panel.gameObject.AddComponent<RawImage>();
-            previewImage.color = Color.white;
+            previewImage = new Image { name = "camera-or-replay-preview", scaleMode = ScaleMode.ScaleToFit };
+            previewImage.style.position = Position.Absolute;
+            previewImage.style.left = 0f;
+            previewImage.style.right = 0f;
+            previewImage.style.top = 0f;
+            previewImage.style.bottom = 0f;
+            frame.Add(previewImage);
 
-            var overlay = new GameObject("Pose Overlay", typeof(RectTransform), typeof(PoseSkeletonRenderer));
-            overlay.transform.SetParent(panel.transform, false);
-            Stretch(overlay.GetComponent<RectTransform>());
+            previewPlaceholder = new VisualElement { name = "preview-placeholder" };
+            previewPlaceholder.style.position = Position.Absolute;
+            previewPlaceholder.style.left = 0f;
+            previewPlaceholder.style.right = 0f;
+            previewPlaceholder.style.top = 0f;
+            previewPlaceholder.style.bottom = 0f;
+            previewPlaceholder.style.backgroundColor = new Color(0.02f, 0.03f, 0.045f, 0.94f);
+            previewPlaceholder.style.alignItems = Align.Center;
+            previewPlaceholder.style.justifyContent = Justify.Center;
+            previewPlaceholder.style.paddingLeft = 18f;
+            previewPlaceholder.style.paddingRight = 18f;
 
-            var label = CreateText(panel.transform, "Preview Label", "AI SKELETON DETECTING", 10, new Color(0.25f, 0.9f, 0.62f, 1f), TextAnchor.UpperLeft);
-            var labelRect = label.rectTransform;
-            labelRect.anchorMin = new Vector2(0f, 1f);
-            labelRect.anchorMax = new Vector2(1f, 1f);
-            labelRect.pivot = new Vector2(0.5f, 1f);
-            labelRect.offsetMin = new Vector2(12f, -34f);
-            labelRect.offsetMax = new Vector2(-12f, -8f);
+            cameraStateLabel = Label("Start를 누르면 카메라 추적이 시작됩니다.", 13, Color.white, FontStyle.Bold);
+            cameraStateLabel.style.unityTextAlign = TextAnchor.MiddleCenter;
+            replayStateLabel = Label("Stop을 누르면 저장 JSON 기반 3D 리플레이가 표시됩니다.", 10, ColorFromHex(0x9AA7BB));
+            replayStateLabel.style.unityTextAlign = TextAnchor.MiddleCenter;
+            replayStateLabel.style.marginTop = 8f;
+            previewPlaceholder.Add(cameraStateLabel);
+            previewPlaceholder.Add(replayStateLabel);
+            frame.Add(previewPlaceholder);
 
-            previewPlaceholder = new GameObject("Preview Placeholder", typeof(RectTransform), typeof(Image));
-            previewPlaceholder.transform.SetParent(panel.transform, false);
-            Stretch(previewPlaceholder.GetComponent<RectTransform>());
-            previewPlaceholder.GetComponent<Image>().color = new Color(0.02f, 0.03f, 0.045f, 0.92f);
-
-            var placeholderLayout = previewPlaceholder.AddComponent<VerticalLayoutGroup>();
-            placeholderLayout.padding = new RectOffset(18, 18, 82, 26);
-            placeholderLayout.spacing = 8f;
-            placeholderLayout.childAlignment = TextAnchor.MiddleCenter;
-            placeholderLayout.childControlWidth = true;
-            placeholderLayout.childControlHeight = false;
-
-            cameraStateLabel = CreateText(previewPlaceholder.transform, "Camera State", "Start를 누르면 카메라 추적이 시작됩니다.", 13, Color.white, TextAnchor.MiddleCenter);
-            cameraStateLabel.fontStyle = FontStyle.Bold;
-            cameraStateLabel.gameObject.AddComponent<LayoutElement>().preferredHeight = 42f;
-
-            replayStateLabel = CreateText(previewPlaceholder.transform, "Replay State", "Stop을 누르면 저장 JSON 기반 3D 리플레이가 표시됩니다.", 10, new Color(0.62f, 0.69f, 0.78f, 1f), TextAnchor.MiddleCenter);
-            replayStateLabel.gameObject.AddComponent<LayoutElement>().preferredHeight = 44f;
+            var tag = Label("AI SKELETON DETECTING", 10, ColorFromHex(0x34D399), FontStyle.Bold);
+            tag.style.position = Position.Absolute;
+            tag.style.left = 12f;
+            tag.style.top = 10f;
+            tag.style.backgroundColor = new Color(0.02f, 0.03f, 0.045f, 0.7f);
+            tag.style.paddingTop = 4f;
+            tag.style.paddingRight = 8f;
+            tag.style.paddingBottom = 4f;
+            tag.style.paddingLeft = 8f;
+            tag.style.borderTopLeftRadius = 10f;
+            tag.style.borderTopRightRadius = 10f;
+            tag.style.borderBottomLeftRadius = 10f;
+            tag.style.borderBottomRightRadius = 10f;
+            frame.Add(tag);
+            return frame;
         }
 
-        private void BuildMetricRow()
+        private VisualElement BuildMetricRow()
         {
-            var row = CreateRow(contentRoot, "Metric Row", 62f, 6f);
-            counterLabel = CreateMetric(row.transform, "정확한 자세", "0");
-            targetLabel = CreateMetric(row.transform, "목표", GetTargetCount().ToString());
-            poseFpsLabel = CreateMetric(row.transform, "Pose FPS", "0.0");
-        }
-
-        private Text CreateMetric(Transform parent, string caption, string value)
-        {
-            var card = CreateImage(parent, caption, new Color(0.055f, 0.075f, 0.105f, 1f));
-            var element = card.gameObject.AddComponent<LayoutElement>();
-            element.flexibleWidth = 1f;
-            element.preferredHeight = 62f;
-
-            var layout = card.gameObject.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(4, 4, 6, 5);
-            layout.spacing = 2f;
-            layout.childAlignment = TextAnchor.MiddleCenter;
-            layout.childControlWidth = true;
-            layout.childControlHeight = false;
-
-            var top = CreateText(card.transform, caption + " Caption", caption, 9, new Color(0.48f, 0.55f, 0.65f, 1f), TextAnchor.MiddleCenter);
-            top.gameObject.AddComponent<LayoutElement>().preferredHeight = 16f;
-
-            var bottom = CreateText(card.transform, caption + " Value", value, 17, new Color(0.25f, 0.9f, 0.62f, 1f), TextAnchor.MiddleCenter);
-            bottom.fontStyle = FontStyle.Bold;
-            bottom.gameObject.AddComponent<LayoutElement>().preferredHeight = 28f;
-            return bottom;
+            var row = Row("metric-row", 64f, 7f);
+            row.style.marginTop = 8f;
+            correctCountLabel = AddMetric(row, "정확한 자세", "0");
+            targetCountLabel = AddMetric(row, "목표", GetTargetCount().ToString());
+            poseFpsLabel = AddMetric(row, "Pose FPS", "0.0");
+            return row;
         }
 
         private void AddHeader(string title, string body)
         {
-            var header = CreateImage(contentRoot, "Step Header", new Color(0f, 0f, 0f, 0f));
-            header.gameObject.AddComponent<LayoutElement>().preferredHeight = 54f;
-            var layout = header.gameObject.AddComponent<VerticalLayoutGroup>();
-            layout.spacing = 2f;
-            layout.childControlWidth = true;
-            layout.childControlHeight = false;
-
-            var heading = CreateText(header.transform, "Heading", title, 18, Color.white, TextAnchor.MiddleLeft);
-            heading.fontStyle = FontStyle.Bold;
-            heading.gameObject.AddComponent<LayoutElement>().preferredHeight = 26f;
-
-            var description = CreateText(header.transform, "Description", body, 10, new Color(0.56f, 0.63f, 0.72f, 1f), TextAnchor.UpperLeft);
-            description.gameObject.AddComponent<LayoutElement>().preferredHeight = 24f;
+            var header = new VisualElement { name = "step-header" };
+            header.style.height = 56f;
+            header.Add(Label(title, 18, Color.white, FontStyle.Bold));
+            var description = Label(body, 10, ColorFromHex(0x8F9AAF));
+            description.style.marginTop = 2f;
+            header.Add(description);
+            contentRoot.Add(header);
         }
 
-        private void CreateCategoryButton(Transform parent, string category)
+        private void AddCategoryButton(VisualElement parent, string category)
         {
             var selected = selectedCategory == category;
-            CreateButton(
-                parent,
-                category,
-                selected ? new Color(0.12f, 0.82f, 0.5f, 1f) : new Color(0.08f, 0.105f, 0.145f, 1f),
-                selected ? new Color(0.02f, 0.04f, 0.05f, 1f) : Color.white,
+            var button = ActionButton(
+                BuildCategoryLabel(category),
+                selected ? ColorFromHex(0x22C55E) : ColorFromHex(0x161B22),
+                selected ? ColorFromHex(0x07110C) : Color.white,
                 48f,
                 () =>
                 {
                     selectedCategory = category;
                     RenderCurrentStep();
                 });
+            button.style.marginRight = 8f;
+            parent.Add(button);
         }
 
-        private void CreateExerciseButton(Transform parent, ExerciseOption exercise)
+        private void AddExerciseButton(VisualElement parent, ExerciseOption exercise)
         {
             var selected = selectedExerciseId == exercise.Id;
-            var label = exercise.Name + "   " + exercise.Category + "   " + (exercise.Supported ? "지원" : "준비 중");
-            var button = CreateButton(
-                parent,
+            var label = GetExerciseIcon(exercise.Id) + "  " + exercise.Name + "\n" + exercise.CaloriesPerRep.ToString("0.0") + " kcal/회";
+            var button = ActionButton(
                 label,
-                selected ? new Color(0.07f, 0.35f, 0.24f, 1f) : new Color(0.08f, 0.105f, 0.145f, 1f),
-                selected ? new Color(0.55f, 1f, 0.78f, 1f) : new Color(0.72f, 0.78f, 0.86f, 1f),
-                44f,
+                selected ? ColorFromHex(0x064E3B) : ColorFromHex(0x161B22),
+                selected ? ColorFromHex(0xBBF7D0) : exercise.Supported ? ColorFromHex(0xCBD5E1) : ColorFromHex(0x7B879A),
+                56f,
                 () =>
                 {
                     if (!exercise.Supported)
@@ -566,188 +864,116 @@ namespace Rag.Healthcare.UI
                     selectedExerciseId = exercise.Id;
                     RenderCurrentStep();
                 });
-
-            button.interactable = exercise.Supported;
+            button.style.unityTextAlign = TextAnchor.MiddleLeft;
+            button.style.fontSize = 11f;
+            button.style.paddingLeft = 10f;
+            button.style.paddingRight = 8f;
+            button.style.marginRight = 8f;
+            button.style.borderTopWidth = selected ? 1f : 0f;
+            button.style.borderRightWidth = selected ? 1f : 0f;
+            button.style.borderBottomWidth = selected ? 1f : 0f;
+            button.style.borderLeftWidth = selected ? 1f : 0f;
+            button.style.borderTopColor = ColorFromHex(0x10B981);
+            button.style.borderRightColor = ColorFromHex(0x10B981);
+            button.style.borderBottomColor = ColorFromHex(0x10B981);
+            button.style.borderLeftColor = ColorFromHex(0x10B981);
+            parent.Add(button);
         }
 
-        private InputField CreateNumberInput(Transform parent, string label, int value)
+        private TextField AddNumberField(VisualElement parent, string label, int value, Action<int> onChanged)
         {
-            var row = CreateRow(parent, label + " Row", 56f, 8f);
-            var labelText = CreateText(row.transform, label, label, 12, new Color(0.72f, 0.78f, 0.86f, 1f), TextAnchor.MiddleLeft);
-            labelText.fontStyle = FontStyle.Bold;
-            labelText.gameObject.AddComponent<LayoutElement>().flexibleWidth = 1f;
+            var row = Row(label + "-row", 54f, 8f);
+            row.style.marginTop = 10f;
+            var title = Label(label, 12, ColorFromHex(0xCBD5E1), FontStyle.Bold);
+            title.style.flexGrow = 1f;
+            title.style.unityTextAlign = TextAnchor.MiddleLeft;
+            row.Add(title);
 
-            var minus = CreateButton(row.transform, "-", new Color(0.1f, 0.13f, 0.18f, 1f), Color.white, 38f, () => AdjustInput(label, -1));
-            minus.gameObject.GetComponent<LayoutElement>().preferredWidth = 42f;
-
-            var inputObject = new GameObject(label + " Input", typeof(RectTransform), typeof(Image), typeof(InputField), typeof(LayoutElement));
-            inputObject.transform.SetParent(row.transform, false);
-            inputObject.GetComponent<Image>().color = new Color(0.92f, 0.96f, 1f, 1f);
-
-            var element = inputObject.GetComponent<LayoutElement>();
-            element.preferredWidth = 64f;
-            element.preferredHeight = 38f;
-
-            var input = inputObject.GetComponent<InputField>();
-            input.contentType = InputField.ContentType.IntegerNumber;
-            input.characterLimit = 3;
-
-            var text = CreateText(inputObject.transform, "Text", value.ToString(), 17, new Color(0.02f, 0.04f, 0.05f, 1f), TextAnchor.MiddleCenter);
-            Stretch(text.rectTransform);
-            text.fontStyle = FontStyle.Bold;
-
-            var placeholder = CreateText(inputObject.transform, "Placeholder", "0", 17, new Color(0.3f, 0.35f, 0.42f, 0.6f), TextAnchor.MiddleCenter);
-            Stretch(placeholder.rectTransform);
-
-            input.textComponent = text;
-            input.placeholder = placeholder;
-            input.text = value.ToString();
-            input.onEndEdit.AddListener(_ => ApplyTargetCountFromInputs());
-
-            var plus = CreateButton(row.transform, "+", new Color(0.1f, 0.13f, 0.18f, 1f), Color.white, 38f, () => AdjustInput(label, 1));
-            plus.gameObject.GetComponent<LayoutElement>().preferredWidth = 42f;
-            return input;
-        }
-
-        private Button CreateButton(Transform parent, string label, Color background, Color textColor, float height, Action onClick)
-        {
-            var buttonObject = new GameObject(label, typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
-            buttonObject.transform.SetParent(parent, false);
-
-            var image = buttonObject.GetComponent<Image>();
-            image.color = background;
-
-            var element = buttonObject.GetComponent<LayoutElement>();
-            element.preferredHeight = height;
-            element.flexibleWidth = 1f;
-
-            var button = buttonObject.GetComponent<Button>();
-            var colors = button.colors;
-            colors.normalColor = background;
-            colors.highlightedColor = Color.Lerp(background, Color.white, 0.08f);
-            colors.pressedColor = Color.Lerp(background, Color.black, 0.15f);
-            colors.disabledColor = new Color(background.r, background.g, background.b, 0.45f);
-            button.colors = colors;
-
-            if (onClick != null)
+            row.Add(ActionButton("-", ColorFromHex(0x111827), Color.white, 38f, () =>
             {
-                button.onClick.AddListener(() => onClick());
-            }
+                value = Mathf.Clamp(ReadIntField(label == "세트 수" ? setsField : repsField, value) - 1, 1, 999);
+                var target = label == "세트 수" ? setsField : repsField;
+                if (target != null)
+                {
+                    target.value = value.ToString();
+                }
+                onChanged(value);
+            }, 42f));
 
-            var text = CreateText(buttonObject.transform, "Text", label, 12, textColor, TextAnchor.MiddleCenter);
-            text.fontStyle = FontStyle.Bold;
-            Stretch(text.rectTransform);
-            return button;
-        }
-
-        private HorizontalLayoutGroup CreateRow(Transform parent, string name, float height, float spacing)
-        {
-            var rowObject = new GameObject(name, typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
-            rowObject.transform.SetParent(parent, false);
-            rowObject.GetComponent<LayoutElement>().preferredHeight = height;
-
-            var row = rowObject.GetComponent<HorizontalLayoutGroup>();
-            row.spacing = spacing;
-            row.childAlignment = TextAnchor.MiddleCenter;
-            row.childControlWidth = true;
-            row.childControlHeight = true;
-            row.childForceExpandWidth = true;
-            row.childForceExpandHeight = true;
-            return row;
-        }
-
-        private Image CreateCard(Transform parent, string name, float height)
-        {
-            var image = CreateImage(parent, name, new Color(0.055f, 0.075f, 0.105f, 1f));
-            image.gameObject.AddComponent<LayoutElement>().preferredHeight = height;
-            return image;
-        }
-
-        private Image CreateImage(Transform parent, string name, Color color)
-        {
-            var imageObject = new GameObject(name, typeof(RectTransform), typeof(Image));
-            imageObject.transform.SetParent(parent, false);
-            var image = imageObject.GetComponent<Image>();
-            image.color = color;
-            return image;
-        }
-
-        private Text CreateText(Transform parent, string name, string value, int fontSize, Color color, TextAnchor alignment)
-        {
-            var textObject = new GameObject(name, typeof(RectTransform), typeof(Text));
-            textObject.transform.SetParent(parent, false);
-
-            var text = textObject.GetComponent<Text>();
-            text.font = uiFont;
-            text.fontSize = fontSize;
-            text.color = color;
-            text.alignment = alignment;
-            text.horizontalOverflow = HorizontalWrapMode.Wrap;
-            text.verticalOverflow = VerticalWrapMode.Truncate;
-            text.text = value;
-            return text;
-        }
-
-        private void AddSpacer(float height)
-        {
-            var spacer = new GameObject("Spacer", typeof(RectTransform), typeof(LayoutElement));
-            spacer.transform.SetParent(contentRoot, false);
-            spacer.GetComponent<LayoutElement>().preferredHeight = height;
-        }
-
-        private void ClearContent()
-        {
-            previewImage = null;
-            previewPlaceholder = null;
-            timerLabel = null;
-            counterLabel = null;
-            targetLabel = null;
-            phaseLabel = null;
-            feedbackLabel = null;
-            cameraStateLabel = null;
-            replayStateLabel = null;
-            poseFpsLabel = null;
-            repsInput = null;
-            setsInput = null;
-
-            for (var i = contentRoot.childCount - 1; i >= 0; i--)
+            var field = new TextField { value = value.ToString(), maxLength = 3 };
+            field.style.width = 64f;
+            field.style.height = 38f;
+            field.style.unityTextAlign = TextAnchor.MiddleCenter;
+            field.style.backgroundColor = ColorFromHex(0xF1F5F9);
+            field.style.color = ColorFromHex(0x020617);
+            field.style.borderTopLeftRadius = 8f;
+            field.style.borderTopRightRadius = 8f;
+            field.style.borderBottomLeftRadius = 8f;
+            field.style.borderBottomRightRadius = 8f;
+            field.RegisterValueChangedCallback(evt =>
             {
-                Destroy(contentRoot.GetChild(i).gameObject);
-            }
+                var parsed = ParsePositiveInt(evt.newValue, value);
+                onChanged(parsed);
+            });
+            row.Add(field);
+
+            row.Add(ActionButton("+", ColorFromHex(0x111827), Color.white, 38f, () =>
+            {
+                value = Mathf.Clamp(ReadIntField(label == "세트 수" ? setsField : repsField, value) + 1, 1, 999);
+                var target = label == "세트 수" ? setsField : repsField;
+                if (target != null)
+                {
+                    target.value = value.ToString();
+                }
+                onChanged(value);
+            }, 42f));
+
+            parent.Add(row);
+            return field;
         }
 
-        private void UpdateProgress()
+        private Label AddMetric(VisualElement parent, string title, string value)
         {
-            var step = (int)currentStep;
-            stepLabel.text = "STEP " + step + " / 3";
-
-            for (var i = 0; i < 3; i++)
-            {
-                var image = progressRoot.GetChild(i).GetComponent<Image>();
-                var element = progressRoot.GetChild(i).GetComponent<LayoutElement>();
-                var active = i + 1 == step;
-                image.color = active ? new Color(0.25f, 0.9f, 0.62f, 1f) : new Color(0.18f, 0.22f, 0.3f, 1f);
-                element.preferredWidth = active ? 44f : 18f;
-            }
+            var card = Card(title + "-metric", 64f);
+            card.style.flexGrow = 1f;
+            card.style.paddingTop = 6f;
+            card.style.paddingRight = 4f;
+            card.style.paddingBottom = 5f;
+            card.style.paddingLeft = 4f;
+            card.style.alignItems = Align.Center;
+            card.style.justifyContent = Justify.Center;
+            card.Add(Label(title, 9, ColorFromHex(0x7B879A), FontStyle.Bold));
+            var metric = Label(value, 17, ColorFromHex(0x34D399), FontStyle.Bold);
+            metric.style.marginTop = 3f;
+            card.Add(metric);
+            parent.Add(card);
+            return metric;
         }
 
         private void RefreshDynamicText()
         {
-            var now = workoutRunning ? Time.unscaledTime - sessionStartedAt + elapsedBeforePause : elapsedBeforePause;
+            var elapsed = workoutRunning ? Time.unscaledTime - sessionStartedAt + elapsedBeforePause : elapsedBeforePause;
             if (timerLabel != null)
             {
-                var seconds = Mathf.FloorToInt(Mathf.Max(0f, now));
+                var seconds = Mathf.FloorToInt(Mathf.Max(0f, elapsed));
                 timerLabel.text = (seconds / 60).ToString("00") + ":" + (seconds % 60).ToString("00");
             }
 
-            if (counterLabel != null && feedbackOrchestrator != null)
+            if (correctCountLabel != null)
             {
-                counterLabel.text = feedbackOrchestrator.CorrectRepCount.ToString();
+                correctCountLabel.text = feedbackOrchestrator == null ? "0" : feedbackOrchestrator.CorrectRepCount.ToString();
             }
 
-            if (targetLabel != null)
+            if (targetCountLabel != null)
             {
-                targetLabel.text = GetTargetCount().ToString();
+                targetCountLabel.text = currentStep == ScreenStep.Target
+                    ? "목표 정확 자세 카운트: " + GetTargetCount() + "개"
+                    : GetTargetCount().ToString();
+            }
+
+            if (poseFpsLabel != null)
+            {
+                poseFpsLabel.text = trackingController == null ? "0.0" : trackingController.PoseFps.ToString("0.0");
             }
 
             if (phaseLabel != null)
@@ -767,23 +993,15 @@ namespace Rag.Healthcare.UI
                 feedbackLabel.text = "최근 피드백: " + Trim(feedback, 62);
             }
 
-            if (poseFpsLabel != null)
+            if (cameraStateLabel != null)
             {
-                poseFpsLabel.text = trackingController == null ? "0.0" : trackingController.PoseFps.ToString("0.0");
+                cameraStateLabel.text = BuildCameraStateText();
             }
 
-            RefreshTargetSummary();
-        }
-
-        private void RefreshTargetSummary()
-        {
-            if (targetLabel == null || currentStep != ScreenStep.Target)
+            if (replayStateLabel != null)
             {
-                return;
+                replayStateLabel.text = BuildReplayStateText();
             }
-
-            var targetCount = Mathf.Max(1, repsPerSet) * Mathf.Max(1, sets);
-            targetLabel.text = "목표 정확 자세 카운트: " + targetCount + "개";
         }
 
         private void RefreshPreviewTexture()
@@ -805,22 +1023,12 @@ namespace Rag.Healthcare.UI
                 replayMode = true;
             }
 
-            previewImage.texture = texture;
-            previewImage.enabled = texture != null;
+            previewImage.image = texture;
+            previewImage.style.display = texture == null ? DisplayStyle.None : DisplayStyle.Flex;
 
             if (previewPlaceholder != null)
             {
-                previewPlaceholder.SetActive(texture == null);
-            }
-
-            if (cameraStateLabel != null)
-            {
-                cameraStateLabel.text = BuildCameraStateText();
-            }
-
-            if (replayStateLabel != null)
-            {
-                replayStateLabel.text = BuildReplayStateText();
+                previewPlaceholder.style.display = texture == null ? DisplayStyle.Flex : DisplayStyle.None;
             }
         }
 
@@ -831,6 +1039,11 @@ namespace Rag.Healthcare.UI
 
         private void StartWorkout()
         {
+            if (!Application.isPlaying)
+            {
+                return;
+            }
+
             ApplyTargetCount();
             replayMode = false;
             replayPlayer?.StopReplay();
@@ -848,6 +1061,11 @@ namespace Rag.Healthcare.UI
 
         private void StopWorkoutAndReplay()
         {
+            if (!Application.isPlaying)
+            {
+                return;
+            }
+
             StopWorkoutOnly();
             cameraSource?.StopCamera();
             replayPlayer?.PlayLatestSession();
@@ -857,6 +1075,11 @@ namespace Rag.Healthcare.UI
 
         private void StopWorkoutOnly()
         {
+            if (!Application.isPlaying)
+            {
+                return;
+            }
+
             if (workoutRunning)
             {
                 elapsedBeforePause += Time.unscaledTime - sessionStartedAt;
@@ -868,9 +1091,13 @@ namespace Rag.Healthcare.UI
 
         private void SwitchCamera()
         {
+            if (!Application.isPlaying)
+            {
+                return;
+            }
+
             replayMode = false;
             replayPlayer?.StopReplay();
-
             var shouldResumeTracking = workoutRunning || (trackingController != null && trackingController.IsTracking);
             trackingController?.StopTracking();
             cameraSource?.StopCamera();
@@ -887,6 +1114,11 @@ namespace Rag.Healthcare.UI
 
         private void ResetSession()
         {
+            if (!Application.isPlaying)
+            {
+                return;
+            }
+
             StopWorkoutOnly();
             cameraSource?.StopCamera();
             replayPlayer?.StopReplay();
@@ -896,91 +1128,23 @@ namespace Rag.Healthcare.UI
             RenderCurrentStep();
         }
 
-        private void ApplyTargetCountFromInputs()
+        private void ApplyTargetCountFromFields()
         {
-            repsPerSet = ReadInput(repsInput, repsPerSet);
-            sets = ReadInput(setsInput, sets);
+            repsPerSet = ReadIntField(repsField, repsPerSet);
+            sets = ReadIntField(setsField, sets);
             ApplyTargetCount();
             RefreshDynamicText();
         }
 
-        private void AdjustInput(string label, int delta)
+        private void ApplyTargetCount()
         {
-            var input = label.Contains("세트") ? setsInput : repsInput;
-            if (input == null)
+            if (!Application.isPlaying)
             {
                 return;
             }
 
-            var value = ReadInput(input, label.Contains("세트") ? sets : repsPerSet);
-            value = Mathf.Clamp(value + delta, 1, 999);
-            input.text = value.ToString();
-            ApplyTargetCountFromInputs();
-        }
-
-        private void ApplyTargetCount()
-        {
             feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
             feedbackOrchestrator?.SetCorrectRepTarget(GetTargetCount());
-        }
-
-        private int GetTargetCount()
-        {
-            return Mathf.Max(1, repsPerSet) * Mathf.Max(1, sets);
-        }
-
-        private ExerciseOption GetSelectedExercise()
-        {
-            foreach (var exercise in Exercises)
-            {
-                if (exercise.Id == selectedExerciseId)
-                {
-                    return exercise;
-                }
-            }
-
-            return Exercises[0];
-        }
-
-        private string BuildCameraStateText()
-        {
-            if (cameraSource == null)
-            {
-                return "카메라 소스가 없습니다.";
-            }
-
-            if (cameraSource.IsStarting)
-            {
-                return "카메라 시작 중입니다.";
-            }
-
-            if (cameraSource.IsRunning)
-            {
-                return "카메라 추적 중입니다.";
-            }
-
-            if (replayMode)
-            {
-                return "3D 리플레이 준비 중입니다.";
-            }
-
-            return "Start를 누르면 카메라 추적이 시작됩니다.";
-        }
-
-        private string BuildReplayStateText()
-        {
-            if (replayPlayer == null)
-            {
-                return "리플레이 플레이어가 없습니다.";
-            }
-
-            if (replayPlayer.LoadedFrameCount > 0)
-            {
-                return "Replay: " + (replayPlayer.IsPlaying ? "Playing" : replayPlayer.LastReplayStatus) +
-                       " / frames: " + replayPlayer.LoadedFrameCount;
-            }
-
-            return "Stop을 누르면 저장 JSON 기반 3D 리플레이가 표시됩니다.";
         }
 
         private void ApplyCompatibilityVisibility()
@@ -1002,28 +1166,217 @@ namespace Rag.Healthcare.UI
             var canvases = FindObjectsByType<Canvas>(FindObjectsSortMode.None);
             foreach (var candidate in canvases)
             {
-                if (candidate == canvas || candidate.gameObject.name != "Coach Canvas")
+                if (candidate.gameObject.name == "Coach Canvas")
                 {
-                    continue;
-                }
-
-                candidate.enabled = false;
-                var raycaster = candidate.GetComponent<GraphicRaycaster>();
-                if (raycaster != null)
-                {
-                    raycaster.enabled = false;
+                    candidate.enabled = false;
                 }
             }
         }
 
-        private static int ReadInput(InputField input, int fallback)
+        private int GetTargetCount()
         {
-            if (input == null || string.IsNullOrWhiteSpace(input.text))
+            return Mathf.Max(1, repsPerSet) * Mathf.Max(1, sets);
+        }
+
+        private ExerciseOption GetSelectedExercise()
+        {
+            foreach (var exercise in Exercises)
+            {
+                if (exercise.Id == selectedExerciseId)
+                {
+                    return exercise;
+                }
+            }
+
+            return Exercises[0];
+        }
+
+        private ExerciseOption[] GetVisibleExercises()
+        {
+            return Array.FindAll(Exercises, exercise => exercise.Category == selectedCategory);
+        }
+
+        private static string BuildCategoryLabel(string category)
+        {
+            return category switch
+            {
+                "상체" => "상체 💪",
+                "하체" => "하체 🦵",
+                "맨몸" => "맨몸 🧘",
+                _ => category
+            };
+        }
+
+        private static string GetExerciseIcon(string id)
+        {
+            return id switch
+            {
+                "squat" => "🦵",
+                "lunge" => "🏃",
+                "legpress" => "🦿",
+                "deadlift" => "🏋",
+                "pushup" => "💪",
+                "pullup" => "↕",
+                "plank" => "▰",
+                "burpee" => "⚡",
+                _ => "•"
+            };
+        }
+
+        private void UpdateProgress()
+        {
+            var step = (int)currentStep;
+            if (stepLabel != null)
+            {
+                stepLabel.text = "STEP " + step + " / 3";
+            }
+
+            if (progressPips == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < progressPips.Length; i++)
+            {
+                var active = i + 1 == step;
+                progressPips[i].style.width = active ? 42f : 18f;
+                progressPips[i].style.backgroundColor = active ? ColorFromHex(0x34D399) : ColorFromHex(0x334155);
+            }
+        }
+
+        private void ResetStepReferences()
+        {
+            previewImage = null;
+            previewPlaceholder = null;
+            timerLabel = null;
+            correctCountLabel = null;
+            targetCountLabel = null;
+            poseFpsLabel = null;
+            phaseLabel = null;
+            feedbackLabel = null;
+            cameraStateLabel = null;
+            replayStateLabel = null;
+            repsField = null;
+            setsField = null;
+        }
+
+        private string BuildCameraStateText()
+        {
+            if (cameraSource == null)
+            {
+                return "카메라 소스가 없습니다.";
+            }
+
+            if (cameraSource.IsStarting)
+            {
+                return "카메라 시작 중입니다.";
+            }
+
+            if (cameraSource.IsRunning)
+            {
+                return "카메라 추적 중입니다.";
+            }
+
+            return replayMode ? "3D 리플레이 준비 중입니다." : "Start를 누르면 카메라 추적이 시작됩니다.";
+        }
+
+        private string BuildReplayStateText()
+        {
+            if (replayPlayer == null)
+            {
+                return "리플레이 플레이어가 없습니다.";
+            }
+
+            if (replayPlayer.LoadedFrameCount > 0)
+            {
+                return "Replay: " + (replayPlayer.IsPlaying ? "Playing" : replayPlayer.LastReplayStatus) +
+                       " / frames: " + replayPlayer.LoadedFrameCount;
+            }
+
+            return "Stop을 누르면 저장 JSON 기반 3D 리플레이가 표시됩니다.";
+        }
+
+        private Button ActionButton(string text, Color background, Color textColor, float height, Action action, float width = -1f)
+        {
+            var button = new Button(action) { text = text };
+            button.style.height = height;
+            button.style.flexGrow = width < 0f ? 1f : 0f;
+            if (width > 0f)
+            {
+                button.style.width = width;
+            }
+
+            button.style.backgroundColor = background;
+            button.style.color = textColor;
+            button.style.unityFontStyleAndWeight = FontStyle.Bold;
+            button.style.fontSize = 12f;
+            button.style.borderTopLeftRadius = 12f;
+            button.style.borderTopRightRadius = 12f;
+            button.style.borderBottomLeftRadius = 12f;
+            button.style.borderBottomRightRadius = 12f;
+            button.style.borderTopWidth = 0f;
+            button.style.borderRightWidth = 0f;
+            button.style.borderBottomWidth = 0f;
+            button.style.borderLeftWidth = 0f;
+            return button;
+        }
+
+        private VisualElement Card(string name, float height)
+        {
+            var card = new VisualElement { name = name };
+            card.style.height = height;
+            card.style.backgroundColor = ColorFromHex(0x111827);
+            card.style.borderTopLeftRadius = 12f;
+            card.style.borderTopRightRadius = 12f;
+            card.style.borderBottomLeftRadius = 12f;
+            card.style.borderBottomRightRadius = 12f;
+            return card;
+        }
+
+        private VisualElement Row(string name, float height, float gap)
+        {
+            var row = new VisualElement { name = name };
+            row.style.height = height;
+            row.style.flexDirection = FlexDirection.Row;
+            row.style.alignItems = Align.Center;
+            return row;
+        }
+
+        private static Label Label(string text, int size, Color color, FontStyle style = FontStyle.Normal)
+        {
+            var label = new Label(text);
+            label.style.fontSize = size;
+            label.style.color = color;
+            label.style.unityFontStyleAndWeight = style;
+            label.style.whiteSpace = WhiteSpace.Normal;
+            return label;
+        }
+
+        private static VisualElement Spacer(float height)
+        {
+            var spacer = new VisualElement();
+            spacer.style.height = height;
+            return spacer;
+        }
+
+        private static int ReadIntField(TextField field, int fallback)
+        {
+            if (field == null)
             {
                 return Mathf.Max(1, fallback);
             }
 
-            return int.TryParse(input.text.Trim(), out var value) ? Mathf.Clamp(value, 1, 999) : Mathf.Max(1, fallback);
+            return ParsePositiveInt(field.value, fallback);
+        }
+
+        private static int ParsePositiveInt(string value, int fallback)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return Mathf.Max(1, fallback);
+            }
+
+            return int.TryParse(value.Trim(), out var parsed) ? Mathf.Clamp(parsed, 1, 999) : Mathf.Max(1, fallback);
         }
 
         private static string Trim(string value, int maxLength)
@@ -1036,29 +1389,27 @@ namespace Rag.Healthcare.UI
             return value.Length <= maxLength ? value : value.Substring(0, maxLength - 3) + "...";
         }
 
-        private static void Stretch(RectTransform rect)
+        private static Color ColorFromHex(int rgb)
         {
-            rect.anchorMin = Vector2.zero;
-            rect.anchorMax = Vector2.one;
-            rect.offsetMin = Vector2.zero;
-            rect.offsetMax = Vector2.zero;
-            rect.pivot = new Vector2(0.5f, 0.5f);
+            return new Color(
+                ((rgb >> 16) & 0xFF) / 255f,
+                ((rgb >> 8) & 0xFF) / 255f,
+                (rgb & 0xFF) / 255f,
+                1f);
         }
 
-        private static void EnsureEventSystem()
+        private void DestroyPanelSettings()
         {
-            if (FindFirstObjectByType<EventSystem>() != null)
+            if (Application.isPlaying)
             {
-                return;
+                Destroy(runtimePanelSettings);
+            }
+            else
+            {
+                DestroyImmediate(runtimePanelSettings);
             }
 
-            var eventSystem = new GameObject("EventSystem");
-            eventSystem.AddComponent<EventSystem>();
-#if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
-            eventSystem.AddComponent<InputSystemUIInputModule>();
-#else
-            eventSystem.AddComponent<StandaloneInputModule>();
-#endif
+            runtimePanelSettings = null;
         }
     }
 }
