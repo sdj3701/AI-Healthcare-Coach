@@ -12,6 +12,10 @@ using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.EventSystems;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem.UI;
+#endif
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
@@ -70,6 +74,7 @@ namespace Rag.Healthcare.Editor
 
             CreateCamera();
             CreateLight();
+            EnsureEventSystem();
 
             var runtime = new GameObject("RAG Squat Coach Runtime");
             var cameraSource = runtime.AddComponent<CameraCaptureSource>();
@@ -102,7 +107,7 @@ namespace Rag.Healthcare.Editor
             SetObject(debugView, "trackingController", trackingController);
             SetObject(debugView, "feedbackReceiver", feedbackReceiver);
 
-            CreateUi(cameraSource, trackingController, feedbackReceiver);
+            CreateUi(cameraSource, trackingController, feedbackReceiver, orchestrator);
 
             EditorSceneManager.SaveScene(scene, ScenePath);
 
@@ -134,10 +139,27 @@ namespace Rag.Healthcare.Editor
             light.intensity = 1f;
         }
 
+        private static void EnsureEventSystem()
+        {
+            if (Object.FindFirstObjectByType<EventSystem>() != null)
+            {
+                return;
+            }
+
+            var eventSystem = new GameObject("EventSystem");
+            eventSystem.AddComponent<EventSystem>();
+#if ENABLE_INPUT_SYSTEM && !ENABLE_LEGACY_INPUT_MANAGER
+            eventSystem.AddComponent<InputSystemUIInputModule>();
+#else
+            eventSystem.AddComponent<StandaloneInputModule>();
+#endif
+        }
+
         private static void CreateUi(
             CameraCaptureSource cameraSource,
             JointTrackingController trackingController,
-            PoseFeedbackJsonReceiver feedbackReceiver)
+            PoseFeedbackJsonReceiver feedbackReceiver,
+            RealtimeFeedbackOrchestrator orchestrator)
         {
             var canvasObject = new GameObject("Coach Canvas", typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             var canvas = canvasObject.GetComponent<Canvas>();
@@ -208,6 +230,7 @@ namespace Rag.Healthcare.Editor
             SetObject(statusView, "trackingController", trackingController);
             SetObject(statusView, "cameraSource", cameraSource);
             SetObject(statusView, "feedbackReceiver", feedbackReceiver);
+            SetObject(statusView, "feedbackOrchestrator", orchestrator);
             SetObject(statusView, "statusText", statusText);
         }
 

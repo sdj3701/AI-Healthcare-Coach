@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Rag.Healthcare.Pose;
 using Rag.Healthcare.Rag.Composition;
 using Rag.Healthcare.Rag.Knowledge;
@@ -22,6 +23,9 @@ namespace Rag.Healthcare.Rag.Runtime
         [SerializeField, Min(0f)] private float duplicateCooldownSeconds = 3f;
         [SerializeField, Min(0f)] private float minimumGlobalFeedbackIntervalSeconds = 1.5f;
         [SerializeField, Range(20, 140)] private int maxSpokenTextLength = 70;
+        [SerializeField] private bool speakCorrectRepCount = true;
+        [SerializeField] private string correctRepFeedbackFormat = "정확합니다. {0}개.";
+        [SerializeField, Min(0)] private int targetCorrectRepCount;
         [SerializeField] private RealtimePoseRuleSettings ruleSettings = new RealtimePoseRuleSettings();
 
         private readonly PoseFrameNormalizer normalizer = new PoseFrameNormalizer();
@@ -32,9 +36,17 @@ namespace Rag.Healthcare.Rag.Runtime
         private readonly FeedbackComposer composer = new FeedbackComposer();
 
         private PoseWindowBuffer windowBuffer;
+        private bool currentRepInProgress;
+        private bool currentRepHasViolation;
 
         public ExercisePhaseState PhaseState => phaseDetector.State;
         public PoseWindowStats LatestStats { get; private set; }
+        public int CorrectRepCount { get; private set; }
+        public int TargetCorrectRepCount => targetCorrectRepCount;
+        public bool HasCorrectRepTarget => targetCorrectRepCount > 0;
+        public bool IsCorrectRepTargetComplete => HasCorrectRepTarget && CorrectRepCount >= targetCorrectRepCount;
+        public bool CurrentRepHasViolation => currentRepHasViolation;
+        public bool LastCompletedRepWasCorrect { get; private set; }
 
         private void Awake()
         {
@@ -87,6 +99,16 @@ namespace Rag.Healthcare.Rag.Runtime
             phaseDetector.Reset();
             prioritizer.Reset();
             LatestStats = null;
+            CorrectRepCount = 0;
+            currentRepInProgress = false;
+            currentRepHasViolation = false;
+            LastCompletedRepWasCorrect = false;
+        }
+
+        public void SetCorrectRepTarget(int targetCount)
+        {
+            targetCorrectRepCount = Mathf.Max(0, targetCount);
+            ResetRuntimeState();
         }
 
         private void HandleTrackingFrame(JointTrackingFrame frame)
@@ -103,6 +125,7 @@ namespace Rag.Healthcare.Rag.Runtime
             windowBuffer.Add(feature);
 
             var previousPhase = phaseDetector.State.CurrentPhase;
+            var previousRepCount = phaseDetector.State.RepCount;
             var phaseState = phaseDetector.Update(feature, ruleSettings);
             if (previousPhase != phaseState.CurrentPhase)
             {
@@ -111,6 +134,7 @@ namespace Rag.Healthcare.Rag.Runtime
 
             LatestStats = PoseWindowStats.Calculate(windowBuffer, ruleSettings);
             var candidates = ruleEngine.Evaluate(feature, LatestStats, phaseState, ruleSettings);
+            UpdateCorrectRepCount(previousPhase, previousRepCount, phaseState, candidates);
             if (!prioritizer.TrySelect(candidates, duplicateCooldownSeconds, minimumGlobalFeedbackIntervalSeconds, out var selected))
             {
                 return;
@@ -126,6 +150,93 @@ namespace Rag.Healthcare.Rag.Runtime
             sessionLogger?.LogFeedback(selected, message);
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
             feedbackReceiver?.ReceiveFeedback(message);
+        }
+
+        private void UpdateCorrectRepCount(
+            ExercisePhase previousPhase,
+            int previousRepCount,
+            ExercisePhaseState phaseState,
+            IReadOnlyList<FeedbackEvent> candidates)
+        {
+            if (phaseState == null)
+            {
+                return;
+            }
+
+            if (!currentRepInProgress && IsRepActive(phaseState.CurrentPhase))
+            {
+                currentRepInProgress = true;
+                currentRepHasViolation = false;
+                LastCompletedRepWasCorrect = false;
+            }
+
+            if (currentRepInProgress && HasPoseViolation(candidates))
+            {
+                currentRepHasViolation = true;
+            }
+
+            if (phaseState.RepCount > previousRepCount)
+            {
+            LastCompletedRepWasCorrect = !currentRepHasViolation;
+            if (LastCompletedRepWasCorrect && CanIncrementCorrectRepCount())
+            {
+                CorrectRepCount++;
+                SpeakCorrectRepCount();
+            }
+
+            currentRepInProgress = false;
+            currentRepHasViolation = false;
+            return;
+            }
+
+            if (currentRepInProgress &&
+                previousPhase != ExercisePhase.Standing &&
+                phaseState.CurrentPhase == ExercisePhase.Standing)
+            {
+                currentRepInProgress = false;
+                currentRepHasViolation = false;
+                LastCompletedRepWasCorrect = false;
+            }
+        }
+
+        private bool CanIncrementCorrectRepCount()
+        {
+            return !HasCorrectRepTarget || CorrectRepCount < targetCorrectRepCount;
+        }
+
+        private void SpeakCorrectRepCount()
+        {
+            if (!speakCorrectRepCount || CorrectRepCount <= 0)
+            {
+                return;
+            }
+
+            var countText = CorrectRepCount.ToString();
+            var text = string.IsNullOrWhiteSpace(correctRepFeedbackFormat)
+                ? $"정확합니다. {countText}개."
+                : correctRepFeedbackFormat.Replace("{0}", countText);
+
+            feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
+            feedbackReceiver?.ReceiveFeedback(new PoseFeedbackMessage
+            {
+                id = "correct_rep_" + CorrectRepCount,
+                text = text,
+                joint = string.Empty,
+                confidence = 1f,
+                severity = FeedbackSeverity.Info
+            });
+        }
+
+        private static bool IsRepActive(ExercisePhase phase)
+        {
+            return phase == ExercisePhase.Descent ||
+                   phase == ExercisePhase.Bottom ||
+                   phase == ExercisePhase.Ascent;
+        }
+
+        private static bool HasPoseViolation(IReadOnlyList<FeedbackEvent> candidates)
+        {
+            return candidates != null && candidates.Count > 0;
         }
 
         private void CreateWindowBuffer()
