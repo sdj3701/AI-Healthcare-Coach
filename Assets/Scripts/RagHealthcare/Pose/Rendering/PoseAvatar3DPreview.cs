@@ -20,6 +20,15 @@ namespace Rag.Healthcare.Pose.Rendering
         private PoseAvatar3DRenderer avatarRenderer;
         private bool subscribed;
 
+        public Texture PreviewTexture
+        {
+            get
+            {
+                EnsurePreviewObjects();
+                return renderTexture;
+            }
+        }
+
         public void Initialize(JointTrackingController controller)
         {
             trackingController = controller;

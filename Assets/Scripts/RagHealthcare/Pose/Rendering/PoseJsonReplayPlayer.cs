@@ -26,6 +26,15 @@ namespace Rag.Healthcare.Pose.Rendering
         public string LastReplayStatus { get; private set; } = "Replay idle";
         public int LoadedFrameCount { get; private set; }
 
+        public Texture PreviewTexture
+        {
+            get
+            {
+                EnsureAvatarPreview();
+                return avatarPreview == null ? null : avatarPreview.PreviewTexture;
+            }
+        }
+
         private void Awake()
         {
             sessionLogger ??= FindFirstObjectByType<SessionJsonlLogger>();
@@ -55,6 +64,8 @@ namespace Rag.Healthcare.Pose.Rendering
 
             LastReplayPath = path;
             LoadedFrameCount = frames.Count;
+            EnsureAvatarPreview();
+            avatarPreview?.RenderFrame(frames[0]);
             replayCoroutine = StartCoroutine(ReplayRoutine(frames));
         }
 

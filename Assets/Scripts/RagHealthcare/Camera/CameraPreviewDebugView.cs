@@ -93,6 +93,7 @@ namespace Rag.Healthcare.Camera
             {
                 trackingController?.StopTracking();
                 cameraSource.StopCamera();
+                showPreview = true;
                 replayPlayer?.PlayLatestSession();
             }
 
@@ -118,7 +119,17 @@ namespace Rag.Healthcare.Camera
         private void DrawPreview()
         {
             var rect = CalculatePreviewRect();
-            var texture = cameraSource == null ? null : cameraSource.PreviewTexture;
+
+            if (TryGetReplayTexture(out var replayTexture))
+            {
+                GUI.DrawTexture(rect, replayTexture, ScaleMode.ScaleToFit, false);
+                DrawReplayStatusOverlay(rect);
+                return;
+            }
+
+            var texture = cameraSource != null && (cameraSource.IsRunning || cameraSource.IsStarting)
+                ? cameraSource.PreviewTexture
+                : null;
             if (texture == null)
             {
                 GUI.Box(rect, "Camera preview");
@@ -209,6 +220,35 @@ namespace Rag.Healthcare.Camera
 
             var state = replayPlayer.IsPlaying ? "Playing" : replayPlayer.LastReplayStatus;
             return $"{state} / frames: {replayPlayer.LoadedFrameCount}";
+        }
+
+        private bool TryGetReplayTexture(out Texture texture)
+        {
+            texture = null;
+            if (replayPlayer == null || replayPlayer.LoadedFrameCount <= 0)
+            {
+                return false;
+            }
+
+            var cameraActive = cameraSource != null && (cameraSource.IsRunning || cameraSource.IsStarting);
+            if (cameraActive && !replayPlayer.IsPlaying)
+            {
+                return false;
+            }
+
+            texture = replayPlayer.PreviewTexture;
+            return texture != null;
+        }
+
+        private void DrawReplayStatusOverlay(Rect previewRect)
+        {
+            var statusRect = new Rect(previewRect.x + 12f, previewRect.y + 12f, 360f, 28f);
+            var previousColor = GUI.color;
+            GUI.color = new Color(0f, 0f, 0f, 0.62f);
+            GUI.DrawTexture(statusRect, Texture2D.whiteTexture);
+            GUI.color = Color.white;
+            GUI.Label(new Rect(statusRect.x + 8f, statusRect.y + 4f, statusRect.width - 16f, 20f), "Replay: " + BuildReplayStatus());
+            GUI.color = previousColor;
         }
 
         private void DrawPoseOverlay(Rect previewRect)

@@ -208,6 +208,8 @@ TTS 문구는 `RealtimeFeedbackOrchestrator.correctRepFeedbackFormat`에서 바�
 5. `"type":"frame"` 라인만 파싱해 `JointTrackingFrame`으로 변환한다.
 6. timestamp 간격에 맞춰 `PoseAvatar3DPreview.RenderFrame()`으로 3D 캐릭터를 재생한다.
 
+Stop 이후에는 `CameraPreviewDebugView`가 카메라 프리뷰 대신 `PoseJsonReplayPlayer.PreviewTexture`를 메인 프리뷰 영역에 표시한다. 따라서 별도 씬을 새로 만들 필요 없이 현재 테스트 씬에서 Stop Camera를 누르면 저장 JSON 기반 3D 리플레이를 확인할 수 있다.
+
 카메라를 다시 시작하면 현재 리플레이는 중지되고 라이브 추적 미리보기로 돌아간다.
 
 ## 현재 씬에서 쓰지 않는 분석기
