@@ -8,11 +8,13 @@ namespace Rag.Healthcare.Rag.Runtime
         public int ValidCoreFrameCount;
         public float ValidCoreFrameRatio;
         public float AverageKneeAngle;
+        public float MinimumKneeAngle = 180f;
         public float AverageTorsoTiltDegrees;
         public float AverageCenterBalanceOffset;
         public float AverageLeftKneeValgusOffset;
         public float AverageRightKneeValgusOffset;
         public float AverageKneeSymmetryDelta;
+        public float KneeSymmetryViolationRatio;
         public float KneeAlignmentViolationRatio;
         public float TorsoTiltViolationRatio;
         public float CenterBalanceViolationRatio;
@@ -33,6 +35,7 @@ namespace Rag.Healthcare.Rag.Runtime
             var leftValgusCount = 0;
             var rightValgusCount = 0;
             var symmetryCount = 0;
+            var symmetryViolations = 0;
             var kneeAlignmentViolations = 0;
             var torsoViolations = 0;
             var balanceViolations = 0;
@@ -51,6 +54,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 if (frame.HasLeftKneeAngle || frame.HasRightKneeAngle)
                 {
                     stats.AverageKneeAngle += frame.AverageKneeAngle;
+                    stats.MinimumKneeAngle = Mathf.Min(stats.MinimumKneeAngle, frame.AverageKneeAngle);
                     kneeAngleCount++;
                 }
 
@@ -96,8 +100,13 @@ namespace Rag.Healthcare.Rag.Runtime
 
                 if (frame.HasLeftKneeAngle && frame.HasRightKneeAngle)
                 {
-                    stats.AverageKneeSymmetryDelta += Mathf.Abs(frame.LeftKneeAngle - frame.RightKneeAngle);
+                    var symmetryDelta = Mathf.Abs(frame.LeftKneeAngle - frame.RightKneeAngle);
+                    stats.AverageKneeSymmetryDelta += symmetryDelta;
                     symmetryCount++;
+                    if (symmetryDelta > settings.MaximumLeftRightKneeAngleDelta)
+                    {
+                        symmetryViolations++;
+                    }
                 }
             }
 
@@ -110,6 +119,10 @@ namespace Rag.Healthcare.Rag.Runtime
             if (kneeAngleCount > 0)
             {
                 stats.AverageKneeAngle /= kneeAngleCount;
+            }
+            else
+            {
+                stats.MinimumKneeAngle = 0f;
             }
 
             if (torsoCount > 0)
@@ -143,6 +156,7 @@ namespace Rag.Healthcare.Rag.Runtime
             if (symmetryCount > 0)
             {
                 stats.AverageKneeSymmetryDelta /= symmetryCount;
+                stats.KneeSymmetryViolationRatio = symmetryViolations / (float)symmetryCount;
             }
 
             return stats;

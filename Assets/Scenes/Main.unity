@@ -379,7 +379,7 @@ MonoBehaviour:
   sessionLogger: {fileID: 1954474670}
   startTrackingOnStart: 0
   exercise: squat
-  analysisWindowSeconds: 1.2
+  analysisWindowSeconds: 0.8
   expectedPoseFps: 15
   duplicateCooldownSeconds: 3
   minimumGlobalFeedbackIntervalSeconds: 1.5
@@ -388,18 +388,31 @@ MonoBehaviour:
   correctRepFeedbackFormat: "\uC815\uD655\uD569\uB2C8\uB2E4 {0}\uAC1C"
   targetCorrectRepCount: 0
   ruleSettings:
-    minimumVisibility: 0.5
-    minimumValidCoreFrameRatio: 0.55
-    minimumViolationRatio: 0.45
+    minimumVisibility: 0.45
+    landmarkSmoothingAlpha: 0.35
+    maximumNormalizedJointJump: 0.08
+    lowConfidenceGraceSeconds: 0.2
+    maximumConsecutiveOutlierFrames: 1
+    minimumValidCoreFrameRatio: 0.45
+    minimumViolationRatio: 0.35
+    minimumRuleEvaluationFrames: 6
+    minimumValidRepFrames: 6
+    minimumRepViolationRatio: 0.35
+    immediateViolationPersistenceRatio: 0.75
+    minimumCriticalFrames: 2
     maximumKneeValgusOffset: 0.08
     standingKneeAngle: 160
-    bottomKneeAngle: 110
+    standingExitKneeAngle: 150
+    bottomKneeAngle: 125
+    bottomExitKneeAngle: 135
+    maximumRecognizableBottomKneeAngle: 145
     maximumBottomKneeAngle: 135
     minimumBottomKneeAngle: 55
     maximumLeftRightKneeAngleDelta: 18
     maximumTorsoTiltDegrees: 35
     maximumCenterBalanceOffset: 0.12
-    phaseVelocityDeadZoneDegreesPerSecond: 8
+    phaseVelocityDeadZoneDegreesPerSecond: 12
+    minimumBottomDwellSeconds: 0.15
 --- !u!114 &1954474672
 MonoBehaviour:
   m_ObjectHideFlags: 0

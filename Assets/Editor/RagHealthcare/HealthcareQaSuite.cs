@@ -4,10 +4,12 @@ using AIHealthcareCoach.MediaPipe;
 using Rag.Healthcare.Camera;
 using Rag.Healthcare.Monetization;
 using Rag.Healthcare.Performance;
+using Rag.Healthcare.Pose;
 using Rag.Healthcare.Pose.Calibration;
 using Rag.Healthcare.Pose.Providers;
 using Rag.Healthcare.Privacy;
 using Rag.Healthcare.Qa;
+using Rag.Healthcare.Rag.Runtime;
 using Rag.Healthcare.Rag.Rules;
 using Rag.Healthcare.Replay;
 using Rag.Healthcare.Tts;
@@ -43,6 +45,11 @@ namespace Rag.Healthcare.Editor
             Check(profile.valid, "Calibration profile should be valid after 20 frames.", failures);
             Check(PoseCoordinateNormalizer.Normalize(SyntheticPoseFixtures.Standing(), profile).Length == 33, "Normalized pose must contain 33 landmarks.", failures);
             Check(FloorReferenceEstimator.Estimate(SyntheticPoseFixtures.Standing()).valid, "Floor reference should be valid.", failures);
+
+            VerifyLandmarkStability(failures);
+            VerifyPhaseReversalRecognition(failures);
+            VerifyDepthUsesMinimumAngle(failures);
+            VerifyTemporalRepQuality(failures);
 
             var darkPixels = new Color32[100];
             var cameraReport = new CameraSetupAdvisor().Evaluate(SyntheticPoseFixtures.Standing(), darkPixels, 10, 10);
@@ -82,6 +89,162 @@ namespace Rag.Healthcare.Editor
         private static void Check(bool condition, string failure, ICollection<string> failures)
         {
             if (!condition) failures.Add(failure);
+        }
+
+        private static void VerifyLandmarkStability(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var stabilizer = new PoseLandmarkStabilizer();
+            var baseline = CloneWithJointOffset(SyntheticPoseFixtures.Standing(), PoseJointNames.LeftKnee, 0f, 1000L);
+            var first = stabilizer.Stabilize(baseline, settings);
+            var jittered = CloneWithJointOffset(baseline, PoseJointNames.LeftKnee, 0.02f, 1100L);
+            var second = stabilizer.Stabilize(jittered, settings);
+            var outlier = CloneWithJointOffset(baseline, PoseJointNames.LeftKnee, 0.3f, 1200L);
+            var third = stabilizer.Stabilize(outlier, settings);
+
+            first.TryGetJoint(PoseJointNames.LeftKnee, out var firstKnee);
+            second.TryGetJoint(PoseJointNames.LeftKnee, out var secondKnee);
+            third.TryGetJoint(PoseJointNames.LeftKnee, out var thirdKnee);
+            Check(firstKnee != null && secondKnee != null && thirdKnee != null,
+                "Landmark stabilizer must preserve tracked knees.", failures);
+            Check(firstKnee != null && secondKnee != null &&
+                  Mathf.Abs(secondKnee.x - firstKnee.x) < 0.02f,
+                "Median plus EMA smoothing must reduce small landmark jitter.", failures);
+            Check(secondKnee != null && thirdKnee != null &&
+                  Mathf.Abs(thirdKnee.x - secondKnee.x) < 0.01f,
+                "A single large landmark jump must be rejected as an outlier.", failures);
+        }
+
+        private static void VerifyPhaseReversalRecognition(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var detector = new ExercisePhaseDetector();
+            detector.Update(PhaseFeature(170f, 0f, 1000L), settings);
+            detector.Update(PhaseFeature(145f, -100f, 1100L), settings);
+            detector.Update(PhaseFeature(130f, -100f, 1200L), settings);
+            var bottomPhase = detector.Update(PhaseFeature(128f, 10f, 1300L), settings).CurrentPhase;
+            detector.Update(PhaseFeature(140f, 80f, 1400L), settings);
+            var completed = detector.Update(PhaseFeature(165f, 80f, 1500L), settings);
+
+            Check(bottomPhase == ExercisePhase.Bottom,
+                "Descent-to-ascent reversal must recognize the squat bottom without a full stop.", failures);
+            Check(completed.RepCount == 1,
+                "A stabilized standing-descent-bottom-ascent-standing sequence must count one rep.", failures);
+        }
+
+        private static void VerifyTemporalRepQuality(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var accumulator = new RepQualityAccumulator();
+            var info = new[]
+            {
+                new FeedbackEvent { Severity = FeedbackSeverity.Info, PersistenceRatio = 1f }
+            };
+            for (var i = 0; i < 8; i++) accumulator.Observe(true, info, settings);
+            Check(accumulator.IsCorrect(settings),
+                "Info and camera guidance must not invalidate a stable rep.", failures);
+
+            accumulator.Reset();
+            var transientWarning = new[]
+            {
+                new FeedbackEvent { Severity = FeedbackSeverity.Warning, PersistenceRatio = 0.2f }
+            };
+            for (var i = 0; i < 10; i++)
+            {
+                accumulator.Observe(true, i == 3 ? transientWarning : Array.Empty<FeedbackEvent>(), settings);
+            }
+            Check(accumulator.IsCorrect(settings),
+                "One transient warning frame must not invalidate an otherwise stable rep.", failures);
+
+            accumulator.Reset();
+            var persistentWarning = new[]
+            {
+                new FeedbackEvent { Severity = FeedbackSeverity.Warning, PersistenceRatio = 0.8f }
+            };
+            accumulator.Observe(true, persistentWarning, settings);
+            for (var i = 1; i < 8; i++) accumulator.Observe(true, Array.Empty<FeedbackEvent>(), settings);
+            Check(!accumulator.IsCorrect(settings),
+                "A high-persistence warning must still invalidate the rep.", failures);
+        }
+
+        private static void VerifyDepthUsesMinimumAngle(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var buffer = new PoseWindowBuffer(6);
+            for (var i = 0; i < 5; i++) buffer.Add(ReliableFeature(170f, 1000L + i * 50L));
+            var bottomFeature = ReliableFeature(130f, 1300L);
+            buffer.Add(bottomFeature);
+            var stats = PoseWindowStats.Calculate(buffer, settings);
+            var phase = new ExercisePhaseState { CurrentPhase = ExercisePhase.Bottom, Exercise = "squat" };
+            var candidates = new RealtimePoseRuleEngine().Evaluate(bottomFeature, stats, phase, settings);
+            var hasShallowError = false;
+            foreach (var candidate in candidates)
+            {
+                if (candidate.RuleId == "squat_depth_shallow") hasShallowError = true;
+            }
+
+            Check(Mathf.Approximately(stats.MinimumKneeAngle, 130f),
+                "Depth evaluation must retain the minimum knee angle in the analysis window.", failures);
+            Check(!hasShallowError,
+                "Standing frames in the analysis window must not make a sufficiently deep squat look shallow.", failures);
+        }
+
+        private static PoseFeatureFrame PhaseFeature(float kneeAngle, float velocity, long timestamp)
+        {
+            return new PoseFeatureFrame
+            {
+                Exercise = "squat",
+                TimestampUnixMilliseconds = timestamp,
+                HasLeftKneeAngle = true,
+                HasRightKneeAngle = true,
+                AverageKneeAngle = kneeAngle,
+                KneeAngleVelocityDegreesPerSecond = velocity
+            };
+        }
+
+        private static PoseFeatureFrame ReliableFeature(float kneeAngle, long timestamp)
+        {
+            return new PoseFeatureFrame
+            {
+                Exercise = "squat",
+                TimestampUnixMilliseconds = timestamp,
+                HasLeftKneeAngle = true,
+                HasRightKneeAngle = true,
+                HasTorsoTilt = true,
+                HasCenterBalance = true,
+                AverageKneeAngle = kneeAngle
+            };
+        }
+
+        private static JointTrackingFrame CloneWithJointOffset(
+            JointTrackingFrame source,
+            string jointName,
+            float offsetX,
+            long timestamp)
+        {
+            var joints = new TrackedJoint[source.joints.Length];
+            for (var i = 0; i < source.joints.Length; i++)
+            {
+                var joint = source.joints[i];
+                joints[i] = new TrackedJoint
+                {
+                    name = joint.name,
+                    x = joint.x + (joint.name == jointName ? offsetX : 0f),
+                    y = joint.y,
+                    z = joint.z,
+                    visibility = joint.visibility,
+                    confidence = joint.confidence
+                };
+            }
+
+            return new JointTrackingFrame
+            {
+                id = source.id,
+                sessionId = source.sessionId,
+                timestampUnixMilliseconds = timestamp,
+                joints = joints,
+                feedback = source.feedback
+            };
         }
     }
 }

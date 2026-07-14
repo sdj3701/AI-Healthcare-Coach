@@ -29,11 +29,13 @@ namespace Rag.Healthcare.Rag.Runtime
         [SerializeField] private RealtimePoseRuleSettings ruleSettings = new RealtimePoseRuleSettings();
 
         private readonly PoseFrameNormalizer normalizer = new PoseFrameNormalizer();
+        private readonly PoseLandmarkStabilizer landmarkStabilizer = new PoseLandmarkStabilizer();
         private readonly PoseFeatureExtractor featureExtractor = new PoseFeatureExtractor();
         private readonly ExercisePhaseDetector phaseDetector = new ExercisePhaseDetector();
         private readonly RealtimePoseRuleEngine ruleEngine = new RealtimePoseRuleEngine();
         private readonly FeedbackPrioritizer prioritizer = new FeedbackPrioritizer();
         private readonly FeedbackComposer composer = new FeedbackComposer();
+        private readonly RepQualityAccumulator repQuality = new RepQualityAccumulator();
 
         private PoseWindowBuffer windowBuffer;
         private bool currentRepInProgress;
@@ -95,9 +97,11 @@ namespace Rag.Healthcare.Rag.Runtime
         public void ResetRuntimeState()
         {
             windowBuffer?.Clear();
+            landmarkStabilizer.Reset();
             featureExtractor.Reset();
             phaseDetector.Reset();
             prioritizer.Reset();
+            repQuality.Reset();
             LatestStats = null;
             CorrectRepCount = 0;
             currentRepInProgress = false;
@@ -118,9 +122,10 @@ namespace Rag.Healthcare.Rag.Runtime
                 return;
             }
 
-            sessionLogger?.LogFrame(frame);
+            var stabilizedFrame = landmarkStabilizer.Stabilize(frame, ruleSettings);
+            sessionLogger?.LogFrame(stabilizedFrame);
 
-            var view = normalizer.Normalize(frame, ruleSettings.minimumVisibility);
+            var view = normalizer.Normalize(stabilizedFrame, ruleSettings.minimumVisibility);
             var feature = featureExtractor.Extract(view, exercise, ruleSettings.minimumVisibility);
             windowBuffer.Add(feature);
 
@@ -134,7 +139,7 @@ namespace Rag.Healthcare.Rag.Runtime
 
             LatestStats = PoseWindowStats.Calculate(windowBuffer, ruleSettings);
             var candidates = ruleEngine.Evaluate(feature, LatestStats, phaseState, ruleSettings);
-            UpdateCorrectRepCount(previousPhase, previousRepCount, phaseState, candidates);
+            UpdateCorrectRepCount(previousPhase, previousRepCount, phaseState, feature, candidates);
             if (!prioritizer.TrySelect(candidates, duplicateCooldownSeconds, minimumGlobalFeedbackIntervalSeconds, out var selected))
             {
                 return;
@@ -156,6 +161,7 @@ namespace Rag.Healthcare.Rag.Runtime
             ExercisePhase previousPhase,
             int previousRepCount,
             ExercisePhaseState phaseState,
+            PoseFeatureFrame feature,
             IReadOnlyList<FeedbackEvent> candidates)
         {
             if (phaseState == null)
@@ -168,25 +174,33 @@ namespace Rag.Healthcare.Rag.Runtime
                 currentRepInProgress = true;
                 currentRepHasViolation = false;
                 LastCompletedRepWasCorrect = false;
+                repQuality.Reset();
             }
 
-            if (currentRepInProgress && HasPoseViolation(candidates))
+            if (currentRepInProgress && IsRepActive(phaseState.CurrentPhase))
             {
-                currentRepHasViolation = true;
+                repQuality.Observe(feature != null && feature.HasReliableSquatCore, candidates, ruleSettings);
+                currentRepHasViolation = repQuality.HasConfirmedViolation(ruleSettings);
             }
 
             if (phaseState.RepCount > previousRepCount)
             {
-            LastCompletedRepWasCorrect = !currentRepHasViolation;
-            if (LastCompletedRepWasCorrect && CanIncrementCorrectRepCount())
-            {
-                CorrectRepCount++;
-                SpeakCorrectRepCount();
-            }
+                var hasEnoughEvidence = repQuality.HasEnoughEvidence(ruleSettings);
+                LastCompletedRepWasCorrect = repQuality.IsCorrect(ruleSettings);
+                if (LastCompletedRepWasCorrect && CanIncrementCorrectRepCount())
+                {
+                    CorrectRepCount++;
+                    SpeakCorrectRepCount();
+                }
+                else if (!hasEnoughEvidence)
+                {
+                    SpeakUncertainRep();
+                }
 
-            currentRepInProgress = false;
-            currentRepHasViolation = false;
-            return;
+                currentRepInProgress = false;
+                currentRepHasViolation = false;
+                repQuality.Reset();
+                return;
             }
 
             if (currentRepInProgress &&
@@ -196,6 +210,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 currentRepInProgress = false;
                 currentRepHasViolation = false;
                 LastCompletedRepWasCorrect = false;
+                repQuality.Reset();
             }
         }
 
@@ -227,16 +242,24 @@ namespace Rag.Healthcare.Rag.Runtime
             });
         }
 
+        private void SpeakUncertainRep()
+        {
+            feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
+            feedbackReceiver?.ReceiveFeedback(new PoseFeedbackMessage
+            {
+                id = "rep_tracking_uncertain",
+                text = "관절 인식이 불안정해 이번 동작은 횟수에 포함하지 않았습니다.",
+                joint = string.Empty,
+                confidence = 1f,
+                severity = FeedbackSeverity.Info
+            });
+        }
+
         private static bool IsRepActive(ExercisePhase phase)
         {
             return phase == ExercisePhase.Descent ||
                    phase == ExercisePhase.Bottom ||
                    phase == ExercisePhase.Ascent;
-        }
-
-        private static bool HasPoseViolation(IReadOnlyList<FeedbackEvent> candidates)
-        {
-            return candidates != null && candidates.Count > 0;
         }
 
         private void CreateWindowBuffer()

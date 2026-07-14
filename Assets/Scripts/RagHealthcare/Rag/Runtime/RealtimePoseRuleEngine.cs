@@ -21,6 +21,11 @@ namespace Rag.Healthcare.Rag.Runtime
                 return results;
             }
 
+            if (stats.FrameCount < settings.minimumRuleEvaluationFrames)
+            {
+                return results;
+            }
+
             if (stats.ValidCoreFrameRatio < settings.minimumValidCoreFrameRatio)
             {
                 AddEvent(
@@ -145,6 +150,7 @@ namespace Rag.Healthcare.Rag.Runtime
         {
             if (!feature.HasLeftKneeAngle ||
                 !feature.HasRightKneeAngle ||
+                stats.KneeSymmetryViolationRatio < settings.minimumViolationRatio ||
                 stats.AverageKneeSymmetryDelta <= settings.MaximumLeftRightKneeAngleDelta)
             {
                 return;
@@ -157,7 +163,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 string.Empty,
                 FeedbackSeverity.Info,
                 ConfidenceFromOffset(stats.AverageKneeSymmetryDelta, settings.MaximumLeftRightKneeAngleDelta),
-                Mathf.Clamp01(stats.AverageKneeSymmetryDelta / Mathf.Max(1f, settings.MaximumLeftRightKneeAngleDelta * 2f)),
+                stats.KneeSymmetryViolationRatio,
                 feature.TimestampUnixMilliseconds,
                 "좌우 무릎 굽힘이 다릅니다. 양쪽 다리에 체중을 고르게 실어 주세요.",
                 phaseState,
@@ -176,23 +182,24 @@ namespace Rag.Healthcare.Rag.Runtime
                 return;
             }
 
-            if (stats.AverageKneeAngle > settings.MaximumBottomKneeAngle)
+            var depthAngle = stats.MinimumKneeAngle;
+            if (depthAngle > settings.MaximumBottomKneeAngle)
             {
                 AddEvent(
                     "squat_depth_shallow",
                     "squat_depth_shallow",
                     PoseJointNames.LeftKnee,
                     string.Empty,
-                    FeedbackSeverity.Info,
-                    ConfidenceFromOffset(stats.AverageKneeAngle, settings.MaximumBottomKneeAngle),
+                    FeedbackSeverity.Warning,
+                    ConfidenceFromOffset(depthAngle, settings.MaximumBottomKneeAngle),
                     0.8f,
                     feature.TimestampUnixMilliseconds,
                     "가능한 범위 안에서 엉덩이를 조금 더 낮춰 주세요.",
                     phaseState,
                     "averageKneeAngle",
-                    stats.AverageKneeAngle);
+                    depthAngle);
             }
-            else if (stats.AverageKneeAngle < settings.MinimumBottomKneeAngle)
+            else if (depthAngle < settings.MinimumBottomKneeAngle)
             {
                 AddEvent(
                     "squat_depth_deep",
@@ -200,13 +207,13 @@ namespace Rag.Healthcare.Rag.Runtime
                     PoseJointNames.LeftKnee,
                     string.Empty,
                     FeedbackSeverity.Warning,
-                    ConfidenceFromOffset(settings.MinimumBottomKneeAngle, stats.AverageKneeAngle),
+                    ConfidenceFromOffset(settings.MinimumBottomKneeAngle, depthAngle),
                     0.8f,
                     feature.TimestampUnixMilliseconds,
                     "너무 깊게 내려갔습니다. 무릎과 허리에 부담이 없도록 깊이를 조금 줄여 주세요.",
                     phaseState,
                     "averageKneeAngle",
-                    stats.AverageKneeAngle);
+                    depthAngle);
             }
         }
 

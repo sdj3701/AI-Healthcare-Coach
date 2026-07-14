@@ -990,10 +990,11 @@ namespace Rag.Healthcare.UI
 
             if (phaseLabel != null)
             {
-                var phase = feedbackOrchestrator == null || feedbackOrchestrator.PhaseState == null
-                    ? "Unknown"
-                    : feedbackOrchestrator.PhaseState.CurrentPhase.ToString();
-                var status = feedbackOrchestrator != null && feedbackOrchestrator.CurrentRepHasViolation ? "교정 필요" : "정상";
+                var currentPhase = feedbackOrchestrator == null || feedbackOrchestrator.PhaseState == null
+                    ? ExercisePhase.Unknown
+                    : feedbackOrchestrator.PhaseState.CurrentPhase;
+                var phase = currentPhase.ToString();
+                var status = BuildPoseDecisionStatus(currentPhase);
                 phaseLabel.text = GetSelectedExercise().Name + "\nPhase: " + phase + " / " + status;
             }
 
@@ -1284,12 +1285,49 @@ namespace Rag.Healthcare.UI
                 return "카메라 시작 중입니다.";
             }
 
+            if (!string.IsNullOrWhiteSpace(trackingController?.LastTrackingError))
+            {
+                return "인식 오류: " + Trim(trackingController.LastTrackingError, 58);
+            }
+
+            if (cameraSource.IsRunning && trackingController != null && trackingController.IsTracking)
+            {
+                return "관절 인식 중 · " + trackingController.PoseFps.ToString("0.0") + " FPS";
+            }
+
             if (cameraSource.IsRunning)
             {
-                return "카메라 추적 중입니다.";
+                return "카메라 준비 완료 · 관절 추적 대기 중입니다.";
             }
 
             return replayMode ? "3D 리플레이 준비 중입니다." : "Start를 누르면 카메라 추적이 시작됩니다.";
+        }
+
+        private string BuildPoseDecisionStatus(ExercisePhase phase)
+        {
+            if (trackingController == null || !trackingController.IsTracking || trackingController.PoseFps < 1f)
+            {
+                return "추적 대기";
+            }
+
+            if (phase == ExercisePhase.Unknown)
+            {
+                return "인식 불안정";
+            }
+
+            if (feedbackOrchestrator != null && feedbackOrchestrator.CurrentRepHasViolation)
+            {
+                return "교정 필요";
+            }
+
+            return phase switch
+            {
+                ExercisePhase.Standing => "준비",
+                ExercisePhase.Bottom => "깊이 확인",
+                ExercisePhase.Descent => "동작 중",
+                ExercisePhase.Ascent => "동작 중",
+                _ => "인식 불안정"
+            };
         }
 
         private string BuildReplayStateText()

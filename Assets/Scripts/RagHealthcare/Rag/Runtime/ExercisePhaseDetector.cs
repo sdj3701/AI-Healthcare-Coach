@@ -5,6 +5,10 @@ namespace Rag.Healthcare.Rag.Runtime
     public sealed class ExercisePhaseDetector
     {
         private readonly ExercisePhaseState state = new ExercisePhaseState();
+        private float minimumKneeAngleInCurrentRep = 180f;
+        private float previousKneeVelocity;
+        private long bottomCandidateStartedAt;
+        private bool repMotionStarted;
 
         public ExercisePhaseState State => state;
 
@@ -13,6 +17,8 @@ namespace Rag.Healthcare.Rag.Runtime
             if (feature == null || !feature.HasLeftKneeAngle && !feature.HasRightKneeAngle)
             {
                 SetPhase(ExercisePhase.Unknown, feature == null ? 0L : feature.TimestampUnixMilliseconds);
+                state.HasReachedBottomInCurrentRep = false;
+                ResetRepMotion();
                 return state;
             }
 
@@ -22,7 +28,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 state.HasReachedBottomInCurrentRep = true;
             }
 
-            if (state.CurrentPhase == ExercisePhase.Ascent &&
+            if ((state.CurrentPhase == ExercisePhase.Ascent || state.CurrentPhase == ExercisePhase.Bottom) &&
                 nextPhase == ExercisePhase.Standing &&
                 state.HasReachedBottomInCurrentRep)
             {
@@ -37,6 +43,16 @@ namespace Rag.Healthcare.Rag.Runtime
 
             SetPhase(nextPhase, feature.TimestampUnixMilliseconds);
             state.Exercise = string.IsNullOrWhiteSpace(feature.Exercise) ? "squat" : feature.Exercise;
+
+            if (nextPhase == ExercisePhase.Standing)
+            {
+                ResetRepMotion();
+            }
+            else
+            {
+                previousKneeVelocity = feature.KneeAngleVelocityDegreesPerSecond;
+            }
+
             return state;
         }
 
@@ -47,35 +63,91 @@ namespace Rag.Healthcare.Rag.Runtime
             state.RepCount = 0;
             state.PhaseStartedAtUnixMilliseconds = 0L;
             state.HasReachedBottomInCurrentRep = false;
+            ResetRepMotion();
         }
 
-        private static ExercisePhase ResolvePhase(PoseFeatureFrame feature, RealtimePoseRuleSettings settings)
+        private ExercisePhase ResolvePhase(PoseFeatureFrame feature, RealtimePoseRuleSettings settings)
         {
             if (feature.AverageKneeAngle >= settings.StandingKneeAngle)
             {
                 return ExercisePhase.Standing;
             }
 
-            if (feature.AverageKneeAngle <= settings.BottomKneeAngle)
+            if (state.CurrentPhase == ExercisePhase.Standing &&
+                feature.AverageKneeAngle >= settings.standingExitKneeAngle)
             {
-                return Mathf.Abs(feature.KneeAngleVelocityDegreesPerSecond) <= settings.PhaseVelocityDeadZoneDegreesPerSecond
-                    ? ExercisePhase.Bottom
-                    : feature.KneeAngleVelocityDegreesPerSecond < 0f
-                        ? ExercisePhase.Descent
-                        : ExercisePhase.Ascent;
+                return ExercisePhase.Standing;
             }
 
-            if (feature.KneeAngleVelocityDegreesPerSecond < -settings.PhaseVelocityDeadZoneDegreesPerSecond)
+            if (!repMotionStarted)
+            {
+                repMotionStarted = true;
+                minimumKneeAngleInCurrentRep = feature.AverageKneeAngle;
+            }
+            else
+            {
+                minimumKneeAngleInCurrentRep = Mathf.Min(minimumKneeAngleInCurrentRep, feature.AverageKneeAngle);
+            }
+
+            var velocity = feature.KneeAngleVelocityDegreesPerSecond;
+            var deadZone = settings.PhaseVelocityDeadZoneDegreesPerSecond;
+            var reversedUpward = previousKneeVelocity < -deadZone && velocity >= 0f;
+            var reachedRecognizableDepth =
+                minimumKneeAngleInCurrentRep <= settings.maximumRecognizableBottomKneeAngle;
+            var isWithinBottomZone = feature.AverageKneeAngle <= settings.BottomKneeAngle;
+
+            if (isWithinBottomZone)
+            {
+                if (bottomCandidateStartedAt <= 0L)
+                {
+                    bottomCandidateStartedAt = feature.TimestampUnixMilliseconds;
+                }
+            }
+            else if (state.CurrentPhase != ExercisePhase.Bottom)
+            {
+                bottomCandidateStartedAt = 0L;
+            }
+
+            var bottomDwellMilliseconds = Mathf.RoundToInt(settings.minimumBottomDwellSeconds * 1000f);
+            var heldAtBottom = bottomCandidateStartedAt > 0L &&
+                               feature.TimestampUnixMilliseconds - bottomCandidateStartedAt >= bottomDwellMilliseconds;
+
+            if ((reversedUpward && reachedRecognizableDepth) || heldAtBottom)
+            {
+                return ExercisePhase.Bottom;
+            }
+
+            if (state.CurrentPhase == ExercisePhase.Bottom)
+            {
+                return velocity > deadZone || feature.AverageKneeAngle >= settings.bottomExitKneeAngle
+                    ? ExercisePhase.Ascent
+                    : ExercisePhase.Bottom;
+            }
+
+            if (velocity < -deadZone)
             {
                 return ExercisePhase.Descent;
             }
 
-            if (feature.KneeAngleVelocityDegreesPerSecond > settings.PhaseVelocityDeadZoneDegreesPerSecond)
+            if (velocity > deadZone)
             {
                 return ExercisePhase.Ascent;
             }
 
+            if (state.CurrentPhase == ExercisePhase.Descent || state.CurrentPhase == ExercisePhase.Ascent)
+            {
+                return state.CurrentPhase;
+            }
+
             return ExercisePhase.Unknown;
+        }
+
+        private void ResetRepMotion()
+        {
+            minimumKneeAngleInCurrentRep = 180f;
+            previousKneeVelocity = 0f;
+            bottomCandidateStartedAt = 0L;
+            repMotionStarted = false;
         }
 
         private void SetPhase(ExercisePhase nextPhase, long timestampUnixMilliseconds)
