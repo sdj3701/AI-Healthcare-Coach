@@ -256,15 +256,18 @@ namespace Rag.Healthcare.Pose.Rendering
         [SerializeField] private Color rightColor = new Color(0.95f, 0.42f, 0.2f, 1f);
         [SerializeField] private Color centerColor = new Color(0.95f, 0.95f, 0.95f, 1f);
         [SerializeField] private Color boneColor = new Color(0.1f, 0.9f, 0.6f, 1f);
+        [SerializeField] private Color redColor = new Color(0.95f, 0.15f, 0.15f, 1f);
 
         private readonly Dictionary<string, Transform> jointViews = new Dictionary<string, Transform>();
         private readonly Dictionary<string, Vector3> jointPositions = new Dictionary<string, Vector3>();
         private readonly List<Transform> boneViews = new List<Transform>();
+        private readonly HashSet<string> badJoints = new HashSet<string>();
 
         private Material leftMaterial;
         private Material rightMaterial;
         private Material centerMaterial;
         private Material boneMaterial;
+        private Material redMaterial;
 
         private void Awake()
         {
@@ -279,6 +282,18 @@ namespace Rag.Healthcare.Pose.Rendering
             {
                 HideAll();
                 return;
+            }
+
+            badJoints.Clear();
+            if (frame.feedback != null)
+            {
+                foreach (var msg in frame.feedback)
+                {
+                    if (msg != null && !string.IsNullOrEmpty(msg.joint))
+                    {
+                        badJoints.Add(msg.joint.Trim());
+                    }
+                }
             }
 
             jointPositions.Clear();
@@ -312,7 +327,20 @@ namespace Rag.Healthcare.Pose.Rendering
 
                 var view = GetOrCreateJointView(jointName);
                 view.localPosition = position;
-                view.localScale = Vector3.one * GetJointDiameter(jointName);
+                
+                var diameter = GetJointDiameter(jointName);
+                if (badJoints.Contains(jointName))
+                {
+                    diameter *= 1.4f;
+                }
+                view.localScale = Vector3.one * diameter;
+
+                var renderer = view.GetComponent<Renderer>();
+                if (renderer != null)
+                {
+                    renderer.sharedMaterial = GetJointMaterial(jointName);
+                }
+
                 view.gameObject.SetActive(true);
             }
         }
@@ -333,6 +361,19 @@ namespace Rag.Healthcare.Pose.Rendering
                 }
 
                 SetCapsuleBetween(bone, from, to);
+
+                var renderer = bone.GetComponent<Renderer>();
+                if (renderer != null)
+                {
+                    if (badJoints.Contains(segment.From) || badJoints.Contains(segment.To))
+                    {
+                        renderer.sharedMaterial = redMaterial;
+                    }
+                    else
+                    {
+                        renderer.sharedMaterial = boneMaterial;
+                    }
+                }
             }
         }
 
@@ -418,6 +459,11 @@ namespace Rag.Healthcare.Pose.Rendering
 
         private Material GetJointMaterial(string jointName)
         {
+            if (badJoints.Contains(jointName))
+            {
+                return redMaterial;
+            }
+
             if (jointName.StartsWith("left_"))
             {
                 return leftMaterial;
@@ -458,6 +504,7 @@ namespace Rag.Healthcare.Pose.Rendering
             rightMaterial = CreateMaterial("3D Avatar Right", rightColor);
             centerMaterial = CreateMaterial("3D Avatar Center", centerColor);
             boneMaterial = CreateMaterial("3D Avatar Bone", boneColor);
+            redMaterial = CreateMaterial("3D Avatar Error", redColor);
         }
 
         private static Material CreateMaterial(string name, Color color)

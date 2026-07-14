@@ -128,9 +128,16 @@ namespace Rag.Healthcare.UI
             QueueEditorRebuild();
 #endif
 
-            if (Application.isPlaying && cameraSource != null)
+            if (Application.isPlaying)
             {
-                cameraSource.PreviewTextureChanged += HandlePreviewTextureChanged;
+                if (cameraSource != null)
+                {
+                    cameraSource.PreviewTextureChanged += HandlePreviewTextureChanged;
+                }
+                if (trackingController != null)
+                {
+                    trackingController.TrackingFrameReceived += HandleTrackingFrameReceived;
+                }
             }
         }
 
@@ -139,6 +146,10 @@ namespace Rag.Healthcare.UI
             if (cameraSource != null)
             {
                 cameraSource.PreviewTextureChanged -= HandlePreviewTextureChanged;
+            }
+            if (trackingController != null)
+            {
+                trackingController.TrackingFrameReceived -= HandleTrackingFrameReceived;
             }
 
             if (!Application.isPlaying && document != null)
@@ -767,6 +778,7 @@ namespace Rag.Healthcare.UI
             previewImage.style.right = 0f;
             previewImage.style.top = 0f;
             previewImage.style.bottom = 0f;
+            previewImage.generateVisualContent += OnGenerateVisualContent;
             frame.Add(previewImage);
 
             previewPlaceholder = new VisualElement { name = "preview-placeholder" };
@@ -1396,6 +1408,174 @@ namespace Rag.Healthcare.UI
                 ((rgb >> 8) & 0xFF) / 255f,
                 (rgb & 0xFF) / 255f,
                 1f);
+        }
+
+        private readonly struct BoneSegment
+        {
+            public BoneSegment(string from, string to)
+            {
+                From = from;
+                To = to;
+            }
+            public string From { get; }
+            public string To { get; }
+        }
+
+        private static readonly BoneSegment[] BoneSegments =
+        {
+            new BoneSegment(PoseJointNames.LeftShoulder, PoseJointNames.RightShoulder),
+            new BoneSegment(PoseJointNames.LeftHip, PoseJointNames.RightHip),
+            new BoneSegment(PoseJointNames.LeftShoulder, PoseJointNames.LeftElbow),
+            new BoneSegment(PoseJointNames.LeftElbow, PoseJointNames.LeftWrist),
+            new BoneSegment(PoseJointNames.RightShoulder, PoseJointNames.RightElbow),
+            new BoneSegment(PoseJointNames.RightElbow, PoseJointNames.RightWrist),
+            new BoneSegment(PoseJointNames.LeftHip, PoseJointNames.LeftKnee),
+            new BoneSegment(PoseJointNames.LeftKnee, PoseJointNames.LeftAnkle),
+            new BoneSegment(PoseJointNames.LeftAnkle, PoseJointNames.LeftHeel),
+            new BoneSegment(PoseJointNames.LeftHeel, PoseJointNames.LeftFootIndex),
+            new BoneSegment(PoseJointNames.RightHip, PoseJointNames.RightKnee),
+            new BoneSegment(PoseJointNames.RightKnee, PoseJointNames.RightAnkle),
+            new BoneSegment(PoseJointNames.RightAnkle, PoseJointNames.RightHeel),
+            new BoneSegment(PoseJointNames.RightHeel, PoseJointNames.RightFootIndex),
+            new BoneSegment(PoseJointNames.LeftShoulder, PoseJointNames.LeftHip),
+            new BoneSegment(PoseJointNames.RightShoulder, PoseJointNames.RightHip)
+        };
+
+        private void HandleTrackingFrameReceived(JointTrackingFrame frame)
+        {
+            if (previewImage != null)
+            {
+                previewImage.MarkDirtyRepaint();
+            }
+        }
+
+        private void OnGenerateVisualContent(MeshGenerationContext mgc)
+        {
+            if (replayMode || previewImage == null)
+            {
+                return;
+            }
+
+            var texture = previewImage.image;
+            var width = previewImage.layout.width;
+            var height = previewImage.layout.height;
+
+            if (float.IsNaN(width) || float.IsNaN(height) || width <= 0f || height <= 0f)
+            {
+                return;
+            }
+
+            var frame = trackingController == null ? null : trackingController.LatestFrame;
+            if (frame == null || frame.joints == null || frame.joints.Length == 0)
+            {
+                return;
+            }
+
+            var rect = GetTextureRect(texture, width, height);
+            var painter = mgc.painter2D;
+
+            // Draw bones
+            painter.strokeColor = new Color(0.1f, 0.9f, 0.6f, 0.85f);
+            painter.lineWidth = 4f;
+            foreach (var segment in BoneSegments)
+            {
+                if (frame.TryGetJoint(segment.From, out var fromJoint) &&
+                    frame.TryGetJoint(segment.To, out var toJoint) &&
+                    CanRender(fromJoint) && CanRender(toJoint))
+                {
+                    var p1 = ToPreviewPoint(fromJoint, rect);
+                    var p2 = ToPreviewPoint(toJoint, rect);
+                    painter.BeginPath();
+                    painter.MoveTo(p1);
+                    painter.LineTo(p2);
+                    painter.Stroke();
+                }
+            }
+
+            // Draw joints
+            float jointSize = 8f;
+            float half = jointSize * 0.5f;
+            foreach (var joint in frame.joints)
+            {
+                if (CanRender(joint))
+                {
+                    var p = ToPreviewPoint(joint, rect);
+                    painter.fillColor = GetJointColor(joint.name);
+                    painter.BeginPath();
+                    painter.MoveTo(new Vector2(p.x - half, p.y - half));
+                    painter.LineTo(new Vector2(p.x + half, p.y - half));
+                    painter.LineTo(new Vector2(p.x + half, p.y + half));
+                    painter.LineTo(new Vector2(p.x - half, p.y + half));
+                    painter.ClosePath();
+                    painter.Fill();
+                }
+            }
+        }
+
+        private Rect GetTextureRect(Texture texture, float elementWidth, float elementHeight)
+        {
+            if (texture == null || elementWidth <= 0f || elementHeight <= 0f)
+            {
+                return new Rect(0f, 0f, elementWidth, elementHeight);
+            }
+
+            float textureAspect = (float)texture.width / texture.height;
+            float elementAspect = elementWidth / elementHeight;
+
+            float drawWidth, drawHeight;
+            float drawX, drawY;
+
+            if (textureAspect > elementAspect)
+            {
+                // Letterbox
+                drawWidth = elementWidth;
+                drawHeight = elementWidth / textureAspect;
+                drawX = 0f;
+                drawY = (elementHeight - drawHeight) * 0.5f;
+            }
+            else
+            {
+                // Pillarbox
+                drawHeight = elementHeight;
+                drawWidth = elementHeight * textureAspect;
+                drawX = (elementWidth - drawWidth) * 0.5f;
+                drawY = 0f;
+            }
+
+            return new Rect(drawX, drawY, drawWidth, drawHeight);
+        }
+
+        private bool CanRender(TrackedJoint joint)
+        {
+            if (joint == null || string.IsNullOrWhiteSpace(joint.name))
+            {
+                return false;
+            }
+            var score = Mathf.Max(joint.confidence, joint.visibility);
+            return score >= 0.45f &&
+                   joint.x >= -0.2f && joint.x <= 1.2f &&
+                   joint.y >= -0.2f && joint.y <= 1.2f;
+        }
+
+        private Color GetJointColor(string jointName)
+        {
+            if (jointName.StartsWith("left_"))
+            {
+                return new Color(0.14f, 0.58f, 0.95f, 0.95f);
+            }
+            if (jointName.StartsWith("right_"))
+            {
+                return new Color(0.95f, 0.42f, 0.2f, 0.95f);
+            }
+            return new Color(0.95f, 0.95f, 0.95f, 0.9f);
+        }
+
+        private Vector2 ToPreviewPoint(TrackedJoint joint, Rect rect)
+        {
+            return new Vector2(
+                rect.x + Mathf.Clamp01(joint.x) * rect.width,
+                rect.y + Mathf.Clamp01(joint.y) * rect.height
+            );
         }
 
         private void DestroyPanelSettings()

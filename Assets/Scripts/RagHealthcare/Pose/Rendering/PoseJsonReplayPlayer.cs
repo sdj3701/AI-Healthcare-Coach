@@ -156,37 +156,88 @@ namespace Rag.Healthcare.Pose.Rendering
                 return false;
             }
 
+            var feedbackEvents = new List<LoggedFeedbackRecord>();
+
             foreach (var line in File.ReadLines(path))
             {
-                if (string.IsNullOrWhiteSpace(line) || !line.Contains("\"type\":\"frame\""))
+                if (string.IsNullOrWhiteSpace(line))
                 {
                     continue;
                 }
 
-                try
+                if (line.Contains("\"type\":\"frame\""))
                 {
-                    var record = JsonUtility.FromJson<LoggedFrameRecord>(line);
-                    if (record == null || record.joints == null || record.joints.Length == 0)
+                    try
                     {
-                        continue;
-                    }
+                        var record = JsonUtility.FromJson<LoggedFrameRecord>(line);
+                        if (record == null || record.joints == null || record.joints.Length == 0)
+                        {
+                            continue;
+                        }
 
-                    frames.Add(new JointTrackingFrame
+                        frames.Add(new JointTrackingFrame
+                        {
+                            id = string.IsNullOrWhiteSpace(record.frameId) ? Guid.NewGuid().ToString("N") : record.frameId,
+                            sessionId = record.sessionId,
+                            timestampUnixMilliseconds = record.timestampUnixMilliseconds,
+                            joints = record.joints,
+                            feedback = null
+                        });
+                    }
+                    catch (ArgumentException exception)
                     {
-                        id = string.IsNullOrWhiteSpace(record.frameId) ? Guid.NewGuid().ToString("N") : record.frameId,
-                        sessionId = record.sessionId,
-                        timestampUnixMilliseconds = record.timestampUnixMilliseconds,
-                        joints = record.joints,
-                        feedback = Array.Empty<PoseFeedbackMessage>()
-                    });
+                        Debug.LogWarning("[PoseJsonReplayPlayer] Skipped invalid frame JSON: " + exception.Message);
+                    }
                 }
-                catch (ArgumentException exception)
+                else if (line.Contains("\"type\":\"feedback\""))
                 {
-                    Debug.LogWarning("[PoseJsonReplayPlayer] Skipped invalid frame JSON: " + exception.Message);
+                    try
+                    {
+                        var record = JsonUtility.FromJson<LoggedFeedbackRecord>(line);
+                        if (record != null && !string.IsNullOrWhiteSpace(record.joint))
+                        {
+                            feedbackEvents.Add(record);
+                        }
+                    }
+                    catch (ArgumentException exception)
+                    {
+                        Debug.LogWarning("[PoseJsonReplayPlayer] Skipped invalid feedback JSON: " + exception.Message);
+                    }
                 }
             }
 
+            if (frames.Count == 0)
+            {
+                return false;
+            }
+
             frames.Sort((left, right) => left.timestampUnixMilliseconds.CompareTo(right.timestampUnixMilliseconds));
+
+            // Map feedback to active frames for 2.5 seconds (2500ms) after feedback timestamp
+            foreach (var frame in frames)
+            {
+                var frameFeedback = new List<PoseFeedbackMessage>();
+                foreach (var fb in feedbackEvents)
+                {
+                    var diff = frame.timestampUnixMilliseconds - fb.timestampUnixMilliseconds;
+                    if (diff >= 0 && diff <= 2500)
+                    {
+                        if (Enum.TryParse<FeedbackSeverity>(fb.severity, true, out var severityEnum))
+                        {
+                            frameFeedback.Add(new PoseFeedbackMessage
+                            {
+                                id = fb.id,
+                                text = fb.text,
+                                joint = fb.joint,
+                                confidence = fb.confidence,
+                                severity = severityEnum
+                            });
+                        }
+                    }
+                }
+                frame.feedback = frameFeedback.ToArray();
+            }
+
             return frames.Count > 0;
         }
 
@@ -219,6 +270,21 @@ namespace Rag.Healthcare.Pose.Rendering
             public string frameId;
             public long timestampUnixMilliseconds;
             public TrackedJoint[] joints;
+        }
+
+        [Serializable]
+        private sealed class LoggedFeedbackRecord
+        {
+            public string type;
+            public string sessionId;
+            public long timestampUnixMilliseconds;
+            public string id;
+            public string ruleId;
+            public string exercise;
+            public string joint;
+            public string severity;
+            public float confidence;
+            public string text;
         }
     }
 }
