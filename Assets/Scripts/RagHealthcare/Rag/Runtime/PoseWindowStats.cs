@@ -23,7 +23,16 @@ namespace Rag.Healthcare.Rag.Runtime
 
         public static PoseWindowStats Calculate(PoseWindowBuffer buffer, RealtimePoseRuleSettings settings)
         {
-            var stats = new PoseWindowStats();
+            return Calculate(buffer, settings, new PoseWindowStats());
+        }
+
+        public static PoseWindowStats Calculate(
+            PoseWindowBuffer buffer,
+            RealtimePoseRuleSettings settings,
+            PoseWindowStats stats)
+        {
+            stats ??= new PoseWindowStats();
+            stats.Reset();
             if (buffer == null)
             {
                 return stats;
@@ -40,8 +49,14 @@ namespace Rag.Healthcare.Rag.Runtime
             var torsoViolations = 0;
             var balanceViolations = 0;
 
-            foreach (var frame in buffer.RecentFrames())
+            for (var i = 0; i < buffer.Count; i++)
             {
+                var frame = buffer.GetChronological(i);
+                if (frame == null)
+                {
+                    continue;
+                }
+
                 stats.FrameCount++;
                 stats.LatestFrame = frame;
                 stats.AverageValidityScore += frame.ValidityScore;
@@ -160,6 +175,26 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             return stats;
+        }
+
+        public void Reset()
+        {
+            FrameCount = 0;
+            ValidCoreFrameCount = 0;
+            ValidCoreFrameRatio = 0f;
+            AverageKneeAngle = 0f;
+            MinimumKneeAngle = 180f;
+            AverageTorsoTiltDegrees = 0f;
+            AverageCenterBalanceOffset = 0f;
+            AverageLeftKneeValgusOffset = 0f;
+            AverageRightKneeValgusOffset = 0f;
+            AverageKneeSymmetryDelta = 0f;
+            KneeSymmetryViolationRatio = 0f;
+            KneeAlignmentViolationRatio = 0f;
+            TorsoTiltViolationRatio = 0f;
+            CenterBalanceViolationRatio = 0f;
+            AverageValidityScore = 0f;
+            LatestFrame = null;
         }
     }
 }

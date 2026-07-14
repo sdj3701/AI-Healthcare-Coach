@@ -95,17 +95,17 @@ namespace Rag.Healthcare.Rag.Logging
                     writtenJointCount++;
                     builder.Append("{\"name\":\"")
                         .Append(Escape(joint.name))
-                        .Append("\",\"x\":")
-                        .Append(Float(joint.x))
-                        .Append(",\"y\":")
-                        .Append(Float(joint.y))
-                        .Append(",\"z\":")
-                        .Append(Float(joint.z))
-                        .Append(",\"visibility\":")
-                        .Append(Float(joint.visibility))
-                        .Append(",\"confidence\":")
-                        .Append(Float(joint.confidence))
-                        .Append('}');
+                        .Append("\",\"x\":");
+                    AppendFloat(builder, joint.x);
+                    builder.Append(",\"y\":");
+                    AppendFloat(builder, joint.y);
+                    builder.Append(",\"z\":");
+                    AppendFloat(builder, joint.z);
+                    builder.Append(",\"visibility\":");
+                    AppendFloat(builder, joint.visibility);
+                    builder.Append(",\"confidence\":");
+                    AppendFloat(builder, joint.confidence);
+                    builder.Append('}');
                 }
             }
 
@@ -135,9 +135,9 @@ namespace Rag.Healthcare.Rag.Logging
                 .Append(Escape(message.joint))
                 .Append("\",\"severity\":\"")
                 .Append(feedbackEvent.Severity)
-                .Append("\",\"confidence\":")
-                .Append(Float(message.confidence))
-                .Append(",\"text\":\"")
+                .Append("\",\"confidence\":");
+            AppendFloat(builder, message.confidence);
+            builder.Append(",\"text\":\"")
                 .Append(Escape(message.text))
                 .Append("\"}");
 
@@ -190,9 +190,16 @@ namespace Rag.Healthcare.Rag.Logging
             return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
 
-        private static string Float(float value)
+        private static void AppendFloat(StringBuilder target, float value)
         {
-            return value.ToString("0.######", CultureInfo.InvariantCulture);
+            Span<char> characters = stackalloc char[48];
+            if (value.TryFormat(characters, out var written, "0.######", CultureInfo.InvariantCulture))
+            {
+                target.Append(characters.Slice(0, written));
+                return;
+            }
+
+            target.Append(value.ToString("0.######", CultureInfo.InvariantCulture));
         }
 
         private static string Escape(string value)

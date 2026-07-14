@@ -6,15 +6,19 @@ namespace Rag.Healthcare.Rag.Runtime
 {
     public sealed class PoseFeatureExtractor
     {
-        private PoseFeatureFrame previousFrame;
+        private readonly PoseFeatureFrame workingFeature = new PoseFeatureFrame();
+        private bool hasPreviousFrame;
+        private long previousTimestampUnixMilliseconds;
+        private float previousHipCenterY;
+        private float previousAverageKneeAngle;
 
+        // The returned feature is a reusable view and is valid until the next Extract call.
         public PoseFeatureFrame Extract(PoseFrameView frameView, string exercise, float minimumVisibility)
         {
-            var feature = new PoseFeatureFrame
-            {
-                TimestampUnixMilliseconds = frameView == null ? 0L : frameView.TimestampUnixMilliseconds,
-                Exercise = string.IsNullOrWhiteSpace(exercise) ? "squat" : exercise
-            };
+            var feature = workingFeature;
+            feature.Reset();
+            feature.TimestampUnixMilliseconds = frameView == null ? 0L : frameView.TimestampUnixMilliseconds;
+            feature.Exercise = string.IsNullOrWhiteSpace(exercise) ? "squat" : exercise;
 
             if (frameView == null)
             {
@@ -109,13 +113,20 @@ namespace Rag.Healthcare.Rag.Runtime
 
             feature.ValidityScore = totalFeatureCount <= 0 ? 0f : validFeatureCount / (float)totalFeatureCount;
             ApplyVelocity(feature);
-            previousFrame = feature;
+            hasPreviousFrame = true;
+            previousTimestampUnixMilliseconds = feature.TimestampUnixMilliseconds;
+            previousHipCenterY = feature.HipCenterY;
+            previousAverageKneeAngle = feature.AverageKneeAngle;
             return feature;
         }
 
         public void Reset()
         {
-            previousFrame = null;
+            workingFeature.Reset();
+            hasPreviousFrame = false;
+            previousTimestampUnixMilliseconds = 0L;
+            previousHipCenterY = 0f;
+            previousAverageKneeAngle = 0f;
         }
 
         private static bool TryCalculateKnee(
@@ -221,19 +232,19 @@ namespace Rag.Healthcare.Rag.Runtime
 
         private void ApplyVelocity(PoseFeatureFrame feature)
         {
-            if (previousFrame == null || feature.TimestampUnixMilliseconds <= previousFrame.TimestampUnixMilliseconds)
+            if (!hasPreviousFrame || feature.TimestampUnixMilliseconds <= previousTimestampUnixMilliseconds)
             {
                 return;
             }
 
-            var deltaSeconds = (feature.TimestampUnixMilliseconds - previousFrame.TimestampUnixMilliseconds) / 1000f;
+            var deltaSeconds = (feature.TimestampUnixMilliseconds - previousTimestampUnixMilliseconds) / 1000f;
             if (deltaSeconds <= Mathf.Epsilon)
             {
                 return;
             }
 
-            feature.HipCenterYVelocityPerSecond = (feature.HipCenterY - previousFrame.HipCenterY) / deltaSeconds;
-            feature.KneeAngleVelocityDegreesPerSecond = (feature.AverageKneeAngle - previousFrame.AverageKneeAngle) / deltaSeconds;
+            feature.HipCenterYVelocityPerSecond = (feature.HipCenterY - previousHipCenterY) / deltaSeconds;
+            feature.KneeAngleVelocityDegreesPerSecond = (feature.AverageKneeAngle - previousAverageKneeAngle) / deltaSeconds;
         }
     }
 }

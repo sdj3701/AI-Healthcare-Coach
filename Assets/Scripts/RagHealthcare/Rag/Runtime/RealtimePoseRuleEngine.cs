@@ -7,6 +7,8 @@ namespace Rag.Healthcare.Rag.Runtime
     public sealed class RealtimePoseRuleEngine
     {
         private readonly List<FeedbackEvent> results = new List<FeedbackEvent>(8);
+        private readonly List<FeedbackEvent> eventPool = new List<FeedbackEvent>(8);
+        private int usedEventCount;
 
         public IReadOnlyList<FeedbackEvent> Evaluate(
             PoseFeatureFrame feature,
@@ -15,6 +17,7 @@ namespace Rag.Healthcare.Rag.Runtime
             RealtimePoseRuleSettings settings)
         {
             results.Clear();
+            usedEventCount = 0;
 
             if (feature == null || stats == null || settings == null)
             {
@@ -67,12 +70,11 @@ namespace Rag.Healthcare.Rag.Runtime
             var right = feature.HasRightKneeValgus ? feature.RightKneeValgusOffset : 0f;
             var useLeft = left >= right;
             var side = useLeft ? "left" : "right";
-            var sideKo = useLeft ? "왼쪽" : "오른쪽";
             var joint = useLeft ? PoseJointNames.LeftKnee : PoseJointNames.RightKnee;
             var offset = useLeft ? left : right;
 
             AddEvent(
-                $"squat_{side}_knee_alignment",
+                useLeft ? "squat_left_knee_alignment" : "squat_right_knee_alignment",
                 "squat_knee_alignment",
                 joint,
                 side,
@@ -80,7 +82,9 @@ namespace Rag.Healthcare.Rag.Runtime
                 ConfidenceFromOffset(offset, settings.MaximumKneeValgusOffset),
                 stats.KneeAlignmentViolationRatio,
                 feature.TimestampUnixMilliseconds,
-                $"{sideKo} 무릎이 발끝 방향에서 벗어납니다. 무릎과 발끝을 같은 방향으로 맞춰 주세요.",
+                useLeft
+                    ? "왼쪽 무릎이 발끝 방향에서 벗어납니다. 무릎과 발끝을 같은 방향으로 맞춰 주세요."
+                    : "오른쪽 무릎이 발끝 방향에서 벗어납니다. 무릎과 발끝을 같은 방향으로 맞춰 주세요.",
                 phaseState,
                 "kneeValgusOffset",
                 offset);
@@ -231,24 +235,37 @@ namespace Rag.Healthcare.Rag.Runtime
             string evidenceKey,
             float evidenceValue)
         {
-            results.Add(new FeedbackEvent
+            var feedbackEvent = RentEvent();
+            feedbackEvent.Id = id;
+            feedbackEvent.RuleId = ruleId;
+            feedbackEvent.Exercise = phaseState == null || string.IsNullOrWhiteSpace(phaseState.Exercise) ? "squat" : phaseState.Exercise;
+            feedbackEvent.Joint = joint;
+            feedbackEvent.Side = side;
+            feedbackEvent.Severity = severity;
+            feedbackEvent.Confidence = Mathf.Clamp01(confidence);
+            feedbackEvent.PersistenceRatio = Mathf.Clamp01(persistenceRatio);
+            feedbackEvent.TimestampUnixMilliseconds = timestampUnixMilliseconds;
+            feedbackEvent.TemplateText = text;
+            feedbackEvent.Phase = phaseState == null ? ExercisePhase.Unknown : phaseState.CurrentPhase;
+            feedbackEvent.Evidence.Clear();
+            feedbackEvent.Evidence[evidenceKey] = evidenceValue;
+            results.Add(feedbackEvent);
+        }
+
+        private FeedbackEvent RentEvent()
+        {
+            if (usedEventCount < eventPool.Count)
             {
-                Id = id,
-                RuleId = ruleId,
-                Exercise = phaseState == null || string.IsNullOrWhiteSpace(phaseState.Exercise) ? "squat" : phaseState.Exercise,
-                Joint = joint,
-                Side = side,
-                Severity = severity,
-                Confidence = Mathf.Clamp01(confidence),
-                PersistenceRatio = Mathf.Clamp01(persistenceRatio),
-                TimestampUnixMilliseconds = timestampUnixMilliseconds,
-                TemplateText = text,
-                Phase = phaseState == null ? ExercisePhase.Unknown : phaseState.CurrentPhase,
-                Evidence = new Dictionary<string, float>
-                {
-                    [evidenceKey] = evidenceValue
-                }
-            });
+                return eventPool[usedEventCount++];
+            }
+
+            var feedbackEvent = new FeedbackEvent
+            {
+                Evidence = new Dictionary<string, float>(1)
+            };
+            eventPool.Add(feedbackEvent);
+            usedEventCount++;
+            return feedbackEvent;
         }
 
         private static float ConfidenceFromOffset(float value, float threshold)

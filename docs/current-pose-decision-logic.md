@@ -2,6 +2,8 @@
 
 이 문서는 현재 `TestRagSysten` 씬 기준으로 관절 추적 결과를 어떻게 자세 피드백으로 판별하는지 정리한다.
 
+프레임당 객체 재사용, 중앙값/통계/JSONL 최적화의 구현과 Profiler 측정 방법은 `docs/pose-runtime-optimization.md`를 참고한다.
+
 ## 결론
 
 현재 구현은 올바른 자세를 별도 점수로 판정하지 않는다.

@@ -47,6 +47,7 @@ namespace Rag.Healthcare.Editor
             Check(FloorReferenceEstimator.Estimate(SyntheticPoseFixtures.Standing()).valid, "Floor reference should be valid.", failures);
 
             VerifyLandmarkStability(failures);
+            VerifyHotPathObjectReuse(failures);
             VerifyPhaseReversalRecognition(failures);
             VerifyDepthUsesMinimumAngle(failures);
             VerifyTemporalRepQuality(failures);
@@ -97,22 +98,71 @@ namespace Rag.Healthcare.Editor
             var stabilizer = new PoseLandmarkStabilizer();
             var baseline = CloneWithJointOffset(SyntheticPoseFixtures.Standing(), PoseJointNames.LeftKnee, 0f, 1000L);
             var first = stabilizer.Stabilize(baseline, settings);
+            first.TryGetJoint(PoseJointNames.LeftKnee, out var firstKnee);
+            var firstKneeX = firstKnee == null ? 0f : firstKnee.x;
             var jittered = CloneWithJointOffset(baseline, PoseJointNames.LeftKnee, 0.02f, 1100L);
             var second = stabilizer.Stabilize(jittered, settings);
+            second.TryGetJoint(PoseJointNames.LeftKnee, out var secondKnee);
+            var secondKneeX = secondKnee == null ? 0f : secondKnee.x;
             var outlier = CloneWithJointOffset(baseline, PoseJointNames.LeftKnee, 0.3f, 1200L);
             var third = stabilizer.Stabilize(outlier, settings);
-
-            first.TryGetJoint(PoseJointNames.LeftKnee, out var firstKnee);
-            second.TryGetJoint(PoseJointNames.LeftKnee, out var secondKnee);
             third.TryGetJoint(PoseJointNames.LeftKnee, out var thirdKnee);
+            var thirdKneeX = thirdKnee == null ? 0f : thirdKnee.x;
+
             Check(firstKnee != null && secondKnee != null && thirdKnee != null,
                 "Landmark stabilizer must preserve tracked knees.", failures);
             Check(firstKnee != null && secondKnee != null &&
-                  Mathf.Abs(secondKnee.x - firstKnee.x) < 0.02f,
+                  Mathf.Abs(secondKneeX - firstKneeX) < 0.02f,
                 "Median plus EMA smoothing must reduce small landmark jitter.", failures);
             Check(secondKnee != null && thirdKnee != null &&
-                  Mathf.Abs(thirdKnee.x - secondKnee.x) < 0.01f,
+                  Mathf.Abs(thirdKneeX - secondKneeX) < 0.01f,
                 "A single large landmark jump must be rejected as an outlier.", failures);
+        }
+
+        private static void VerifyHotPathObjectReuse(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var stabilizer = new PoseLandmarkStabilizer();
+            var firstFrame = stabilizer.Stabilize(
+                CloneWithJointOffset(SyntheticPoseFixtures.Standing(), PoseJointNames.LeftKnee, 0f, 1000L),
+                settings);
+            var firstJointArray = firstFrame.joints;
+            var secondFrame = stabilizer.Stabilize(
+                CloneWithJointOffset(SyntheticPoseFixtures.Standing(), PoseJointNames.LeftKnee, 0.01f, 1100L),
+                settings);
+            Check(ReferenceEquals(firstFrame, secondFrame) && ReferenceEquals(firstJointArray, secondFrame.joints),
+                "Landmark stabilization must reuse its frame and joint array after warm-up.", failures);
+
+            var buffer = new PoseWindowBuffer(2);
+            var source = ReliableFeature(150f, 1000L);
+            buffer.Add(source);
+            source.AverageKneeAngle = 90f;
+            Check(!ReferenceEquals(source, buffer.GetChronological(0)) &&
+                  Mathf.Approximately(buffer.GetChronological(0).AverageKneeAngle, 150f),
+                "Pose window slots must own reusable copies instead of retaining mutable feature views.", failures);
+
+            var reusableStats = new PoseWindowStats();
+            var calculatedStats = PoseWindowStats.Calculate(buffer, settings, reusableStats);
+            Check(ReferenceEquals(reusableStats, calculatedStats),
+                "Window statistics must support caller-owned result reuse.", failures);
+
+            var ruleFeature = ReliableFeature(130f, 1200L);
+            ruleFeature.TorsoTiltDegrees = settings.MaximumTorsoTiltDegrees + 10f;
+            var ruleStats = new PoseWindowStats
+            {
+                FrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameRatio = 1f,
+                AverageTorsoTiltDegrees = ruleFeature.TorsoTiltDegrees,
+                TorsoTiltViolationRatio = 1f
+            };
+            var phase = new ExercisePhaseState { CurrentPhase = ExercisePhase.Descent, Exercise = "squat" };
+            var ruleEngine = new RealtimePoseRuleEngine();
+            var firstEvents = ruleEngine.Evaluate(ruleFeature, ruleStats, phase, settings);
+            var firstEvent = firstEvents.Count == 0 ? null : firstEvents[0];
+            var secondEvents = ruleEngine.Evaluate(ruleFeature, ruleStats, phase, settings);
+            Check(firstEvent != null && secondEvents.Count > 0 && ReferenceEquals(firstEvent, secondEvents[0]),
+                "Rule evaluation must reuse feedback events after pool warm-up.", failures);
         }
 
         private static void VerifyPhaseReversalRecognition(ICollection<string> failures)

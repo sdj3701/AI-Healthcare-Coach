@@ -36,6 +36,7 @@ namespace Rag.Healthcare.Rag.Runtime
         private readonly FeedbackPrioritizer prioritizer = new FeedbackPrioritizer();
         private readonly FeedbackComposer composer = new FeedbackComposer();
         private readonly RepQualityAccumulator repQuality = new RepQualityAccumulator();
+        private readonly PoseWindowStats reusableStats = new PoseWindowStats();
 
         private PoseWindowBuffer windowBuffer;
         private bool currentRepInProgress;
@@ -102,6 +103,7 @@ namespace Rag.Healthcare.Rag.Runtime
             phaseDetector.Reset();
             prioritizer.Reset();
             repQuality.Reset();
+            reusableStats.Reset();
             LatestStats = null;
             CorrectRepCount = 0;
             currentRepInProgress = false;
@@ -137,7 +139,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 sessionLogger?.LogPhase(phaseState);
             }
 
-            LatestStats = PoseWindowStats.Calculate(windowBuffer, ruleSettings);
+            LatestStats = PoseWindowStats.Calculate(windowBuffer, ruleSettings, reusableStats);
             var candidates = ruleEngine.Evaluate(feature, LatestStats, phaseState, ruleSettings);
             UpdateCorrectRepCount(previousPhase, previousRepCount, phaseState, feature, candidates);
             if (!prioritizer.TrySelect(candidates, duplicateCooldownSeconds, minimumGlobalFeedbackIntervalSeconds, out var selected))

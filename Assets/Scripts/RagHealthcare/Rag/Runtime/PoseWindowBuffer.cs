@@ -11,6 +11,10 @@ namespace Rag.Healthcare.Rag.Runtime
         public PoseWindowBuffer(int capacity)
         {
             frames = new PoseFeatureFrame[capacity < 1 ? 1 : capacity];
+            for (var i = 0; i < frames.Length; i++)
+            {
+                frames[i] = new PoseFeatureFrame();
+            }
         }
 
         public int Count => count;
@@ -23,7 +27,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 return;
             }
 
-            frames[nextIndex] = frame;
+            frames[nextIndex].CopyFrom(frame);
             nextIndex = (nextIndex + 1) % frames.Length;
             if (count < frames.Length)
             {
@@ -35,24 +39,34 @@ namespace Rag.Healthcare.Rag.Runtime
         {
             for (var i = 0; i < frames.Length; i++)
             {
-                frames[i] = null;
+                frames[i].Reset();
             }
 
             nextIndex = 0;
             count = 0;
         }
 
+        public PoseFeatureFrame GetChronological(int index)
+        {
+            if (index < 0 || index >= count)
+            {
+                return null;
+            }
+
+            var frameIndex = nextIndex - count + index;
+            if (frameIndex < 0)
+            {
+                frameIndex += frames.Length;
+            }
+
+            return frames[frameIndex];
+        }
+
         public IEnumerable<PoseFeatureFrame> RecentFrames()
         {
             for (var i = 0; i < count; i++)
             {
-                var index = nextIndex - count + i;
-                if (index < 0)
-                {
-                    index += frames.Length;
-                }
-
-                var frame = frames[index];
+                var frame = GetChronological(i);
                 if (frame != null)
                 {
                     yield return frame;
