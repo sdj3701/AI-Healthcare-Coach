@@ -7,6 +7,7 @@ namespace Rag.Healthcare.Pose.Analysis
     {
         [Range(0f, 1f)] public float minimumVisibility = 0.5f;
         [Range(0f, 0.5f)] public float maximumKneeValgusOffset = 0.08f;
+        [Range(0f, 0.5f)] public float maximumKneeForwardOffset = 0.06f;
         [Range(0f, 180f)] public float minimumSquatKneeAngle = 70f;
         [Range(0f, 180f)] public float maximumSquatKneeAngle = 165f;
         [Range(0f, 90f)] public float maximumLeftRightKneeAngleDelta = 18f;

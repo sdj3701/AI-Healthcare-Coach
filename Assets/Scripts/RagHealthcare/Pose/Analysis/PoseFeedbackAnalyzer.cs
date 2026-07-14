@@ -10,6 +10,7 @@ namespace Rag.Healthcare.Pose.Analysis
         [Header("Fallback Rules")]
         [SerializeField, Range(0f, 1f)] private float minimumVisibility = 0.5f;
         [SerializeField, Range(0f, 0.5f)] private float maximumKneeValgusOffset = 0.08f;
+        [SerializeField, Range(0f, 0.5f)] private float maximumKneeForwardOffset = 0.06f;
         [SerializeField, Range(0f, 180f)] private float minimumSquatKneeAngle = 70f;
         [SerializeField, Range(0f, 180f)] private float maximumSquatKneeAngle = 165f;
         [SerializeField, Range(0f, 90f)] private float maximumLeftRightKneeAngleDelta = 18f;
@@ -23,6 +24,7 @@ namespace Rag.Healthcare.Pose.Analysis
 
         private float MinimumVisibility => config != null ? config.minimumVisibility : minimumVisibility;
         private float MaximumKneeValgusOffset => config != null ? config.maximumKneeValgusOffset : maximumKneeValgusOffset;
+        private float MaximumKneeForwardOffset => config != null ? config.maximumKneeForwardOffset : maximumKneeForwardOffset;
         private float MinimumSquatKneeAngle => config != null ? config.minimumSquatKneeAngle : minimumSquatKneeAngle;
         private float MaximumSquatKneeAngle => config != null ? config.maximumSquatKneeAngle : maximumSquatKneeAngle;
         private float MaximumLeftRightKneeAngleDelta => config != null ? config.maximumLeftRightKneeAngleDelta : maximumLeftRightKneeAngleDelta;
@@ -40,8 +42,8 @@ namespace Rag.Healthcare.Pose.Analysis
             }
 
             var initialCount = results.Count;
-            AnalyzeKnee(frame, "left", PoseJointNames.LeftHip, PoseJointNames.LeftKnee, PoseJointNames.LeftAnkle, results);
-            AnalyzeKnee(frame, "right", PoseJointNames.RightHip, PoseJointNames.RightKnee, PoseJointNames.RightAnkle, results);
+            AnalyzeKnee(frame, "left", PoseJointNames.LeftHip, PoseJointNames.LeftKnee, PoseJointNames.LeftAnkle, PoseJointNames.LeftFootIndex, results);
+            AnalyzeKnee(frame, "right", PoseJointNames.RightHip, PoseJointNames.RightKnee, PoseJointNames.RightAnkle, PoseJointNames.RightFootIndex, results);
             AnalyzeKneeSymmetry(frame, results);
             AnalyzeTorsoTilt(frame, results);
             AnalyzeHipLevel(frame, results);
@@ -57,6 +59,7 @@ namespace Rag.Healthcare.Pose.Analysis
             string hipName,
             string kneeName,
             string ankleName,
+            string footIndexName,
             IList<PoseFeedbackMessage> results)
         {
             if (!TryGetTriplet(frame, hipName, kneeName, ankleName, out var hip, out var knee, out var ankle, out var confidence))
@@ -66,16 +69,34 @@ namespace Rag.Healthcare.Pose.Analysis
 
             var kneeAngle = PoseGeometry.Angle(hip, knee, ankle);
             var offset = PoseGeometry.DistancePointToLine(knee, hip, ankle);
+            var sideKo = side == "left" ? "왼쪽" : "오른쪽";
 
             if (offset > MaximumKneeValgusOffset)
             {
                 AddFeedback(
                     results,
                     $"{side}_knee_alignment",
-                    $"{side} knee is drifting away from the hip-ankle line.",
+                    $"{sideKo} 무릎이 발끝 방향에서 벗어납니다. 무릎과 발끝을 같은 방향으로 맞춰 주세요.",
                     kneeName,
                     FeedbackSeverity.Warning,
                     confidence);
+            }
+
+            // 무릎 전방 이동 감지 (Knee Forward Displacement)
+            if (PoseGeometry.TryGetJoint2D(frame, footIndexName, MinimumVisibility, out var footIndex, out var footIndexJoint))
+            {
+                bool facingRight = footIndex.x > ankle.x;
+                float kneeForwardOffset = facingRight ? (knee.x - footIndex.x) : (footIndex.x - knee.x);
+                if (kneeForwardOffset > MaximumKneeForwardOffset)
+                {
+                    AddFeedback(
+                        results,
+                        $"{side}_knee_forward",
+                        $"{sideKo} 무릎이 발끝보다 앞으로 많이 나갔습니다. 엉덩이를 조금 더 뒤로 빼 주세요.",
+                        kneeName,
+                        FeedbackSeverity.Warning,
+                        Mathf.Min(confidence, PoseGeometry.GetJointScore(footIndexJoint)));
+                }
             }
 
             if (kneeAngle > MaximumSquatKneeAngle)
@@ -118,7 +139,7 @@ namespace Rag.Healthcare.Pose.Analysis
             AddFeedback(
                 results,
                 "knee_symmetry",
-                "Left and right knee bend are uneven.",
+                "좌우 무릎 굽힘이 다릅니다. 양쪽 다리에 체중을 고르게 실어 주세요.",
                 PoseJointNames.LeftKnee,
                 FeedbackSeverity.Info,
                 Mathf.Min(leftConfidence, rightConfidence));
@@ -159,7 +180,7 @@ namespace Rag.Healthcare.Pose.Analysis
             AddFeedback(
                 results,
                 "torso_tilt",
-                "Torso is leaning too far. Keep shoulders stacked over the hips.",
+                "상체가 너무 앞으로 숙여집니다. 가슴을 열고 어깨를 골반 위에 올려 주세요.",
                 PoseJointNames.LeftShoulder,
                 FeedbackSeverity.Warning,
                 confidence);
