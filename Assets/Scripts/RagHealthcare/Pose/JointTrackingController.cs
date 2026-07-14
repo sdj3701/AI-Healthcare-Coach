@@ -115,6 +115,11 @@ namespace Rag.Healthcare.Pose
             StartCoroutine(RequestSingleTrackingFrameRoutine());
         }
 
+        public void ConfigureSamplingRate(float targetFps)
+        {
+            requestIntervalSeconds = 1f / Mathf.Clamp(targetFps, 1f, 60f);
+        }
+
         private IEnumerator StartTrackingRoutine()
         {
             if (!PrepareCameraAndProvider())

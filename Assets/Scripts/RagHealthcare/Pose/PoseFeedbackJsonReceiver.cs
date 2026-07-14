@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Rag.Healthcare.Tts;
 using UnityEngine;
@@ -11,6 +12,10 @@ namespace Rag.Healthcare.Pose
         [SerializeField, Min(0f)] private float duplicateCooldownSeconds = 2f;
 
         private readonly Dictionary<string, float> lastSpokenTimes = new Dictionary<string, float>();
+
+        public event Action<PoseFeedbackMessage> FeedbackAccepted;
+
+        public bool VoiceEnabled { get; set; } = true;
 
         public PoseFeedbackMessage LatestFeedback { get; private set; }
         public string LatestFeedbackText { get; private set; } = string.Empty;
@@ -56,8 +61,13 @@ namespace Rag.Healthcare.Pose
             LatestFeedbackText = feedback.text;
             LatestFeedbackTime = Time.unscaledTime;
 
-            coachTts ??= FindFirstObjectByType<CoachTtsController>();
-            coachTts?.SpeakPoseFeedback(feedback);
+            FeedbackAccepted?.Invoke(feedback);
+
+            if (VoiceEnabled)
+            {
+                coachTts ??= FindFirstObjectByType<CoachTtsController>();
+                coachTts?.SpeakPoseFeedback(feedback);
+            }
         }
 
         private bool IsDuplicateCoolingDown(PoseFeedbackMessage feedback)

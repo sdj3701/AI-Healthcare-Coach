@@ -75,6 +75,13 @@ namespace Rag.Healthcare.Camera
             preferFrontCamera = !preferFrontCamera;
         }
 
+        public void ConfigureCapture(int width, int height, int fps)
+        {
+            requestedWidth = Mathf.Max(16, width);
+            requestedHeight = Mathf.Max(16, height);
+            requestedFps = Mathf.Max(1, fps);
+        }
+
         private IEnumerator StartCameraRoutine()
         {
             if (!Application.HasUserAuthorization(UserAuthorization.WebCam))

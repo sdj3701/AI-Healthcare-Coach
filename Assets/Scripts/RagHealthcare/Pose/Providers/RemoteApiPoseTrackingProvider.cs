@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using Rag.Healthcare.Api;
+using Rag.Healthcare.Privacy;
 using UnityEngine;
 
 namespace Rag.Healthcare.Pose.Providers
@@ -21,6 +22,13 @@ namespace Rag.Healthcare.Pose.Providers
 
         public override IEnumerator Initialize()
         {
+            if (!WorkoutNetworkGuard.IsNetworkAllowed)
+            {
+                isReady = false;
+                SetFailure("Network pose tracking is disabled during an offline workout session.");
+                yield break;
+            }
+
             isReady = !string.IsNullOrWhiteSpace(apiEndpointUrl);
             if (!isReady)
             {
@@ -36,6 +44,12 @@ namespace Rag.Healthcare.Pose.Providers
             Action<JointTrackingFrame> onFrame,
             Action<string> onError)
         {
+            if (!WorkoutNetworkGuard.IsNetworkAllowed)
+            {
+                onError?.Invoke("Network pose tracking is disabled during an offline workout session.");
+                yield break;
+            }
+
             if (!IsReady)
             {
                 onError?.Invoke("Pose tracking API endpoint is missing.");

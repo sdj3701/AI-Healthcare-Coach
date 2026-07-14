@@ -1,0 +1,15 @@
+{
+  "version": "2026.07.14.1",
+  "challenges": [
+    {
+      "id": "squat_foundation_7d",
+      "title": "7일 스쿼트 기초 루틴",
+      "exerciseId": "squat",
+      "targetRepetitions": 8,
+      "days": 7,
+      "safetyText": "통증이나 어지럼증이 있으면 즉시 중단하고, 자신의 가능한 범위에서만 수행하세요.",
+      "reviewer": "",
+      "reviewStatus": "expert-review-required"
+    }
+  ]
+}

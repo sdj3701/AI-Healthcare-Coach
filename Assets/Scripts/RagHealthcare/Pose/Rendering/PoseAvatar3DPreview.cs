@@ -5,6 +5,8 @@ using UnityEngine.UI;
 
 namespace Rag.Healthcare.Pose.Rendering
 {
+    public enum ReplayViewpoint { Front, Side, ThreeQuarter }
+
     public sealed class PoseAvatar3DPreview : MonoBehaviour
     {
         [SerializeField] private JointTrackingController trackingController;
@@ -19,6 +21,7 @@ namespace Rag.Healthcare.Pose.Rendering
         private Light previewLight;
         private PoseAvatar3DRenderer avatarRenderer;
         private bool subscribed;
+        private ReplayViewpoint viewpoint = ReplayViewpoint.Front;
 
         public Texture PreviewTexture
         {
@@ -75,6 +78,24 @@ namespace Rag.Healthcare.Pose.Rendering
         {
             EnsurePreviewObjects();
             avatarRenderer?.RenderFrame(frame);
+        }
+
+        public void SetViewpoint(ReplayViewpoint value)
+        {
+            viewpoint = value;
+            EnsurePreviewObjects();
+            ApplyViewpoint();
+        }
+
+        public void SetViewport(Vector2 size, Vector2 offset)
+        {
+            viewportSize = size;
+            viewportOffset = offset;
+            if (viewportImage != null && viewportImage.transform is RectTransform rect)
+            {
+                rect.sizeDelta = size;
+                rect.anchoredPosition = offset;
+            }
         }
 
         private void Subscribe()
@@ -199,6 +220,7 @@ namespace Rag.Healthcare.Pose.Rendering
             previewCamera.farClipPlane = 20f;
             previewCamera.fieldOfView = 35f;
             previewCamera.targetTexture = renderTexture;
+            ApplyViewpoint();
 
             var lightObject = new GameObject("3D Pose Avatar Light");
             lightObject.transform.position = origin + new Vector3(0f, 3f, -2.5f);
@@ -206,6 +228,20 @@ namespace Rag.Healthcare.Pose.Rendering
             previewLight = lightObject.AddComponent<Light>();
             previewLight.type = LightType.Directional;
             previewLight.intensity = 1.4f;
+        }
+
+        private void ApplyViewpoint()
+        {
+            if (previewCamera == null || avatarRenderer == null) return;
+            var origin = avatarRenderer.transform.position;
+            var offset = viewpoint switch
+            {
+                ReplayViewpoint.Side => new Vector3(5.2f, 1.7f, 0f),
+                ReplayViewpoint.ThreeQuarter => new Vector3(3.7f, 1.7f, -3.7f),
+                _ => new Vector3(0f, 1.7f, -5.2f)
+            };
+            previewCamera.transform.position = origin + offset;
+            previewCamera.transform.LookAt(origin + new Vector3(0f, 1.55f, 0f));
         }
     }
 

@@ -5,6 +5,7 @@ namespace AIHealthcareCoach.MediaPipe
     [Serializable]
     public sealed class PoseSessionData
     {
+        public string schemaVersion = "1.0";
         public string sessionId;
         public string exercise;
         public string startedAtUtc;
@@ -19,6 +20,7 @@ namespace AIHealthcareCoach.MediaPipe
     [Serializable]
     public sealed class PoseFeedbackEvent
     {
+        public string schemaVersion = "1.0";
         public string sessionId;
         public string timestampUtc;
         public long tMs;
@@ -38,6 +40,7 @@ namespace AIHealthcareCoach.MediaPipe
     [Serializable]
     public sealed class PoseSessionSummary
     {
+        public string schemaVersion = "1.0";
         public string sessionId;
         public string exercise;
         public string startedAtUtc;
