@@ -264,7 +264,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: ec0e1650c18ea0c468b67c3d21a8695c, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Rag.Healthcare.Tts.CoachTtsController
-  backend: 1
+  backend: 3
   speakOnStart: 1
   startupMessage: "\uCF54\uCE6D \uC2DC\uC2A4\uD15C\uC774 \uC900\uBE44\uB418\uC5C8\uC2B5\uB2C8\uB2E4."
   windowsVoiceRate: 0

@@ -6,14 +6,16 @@ namespace Rag.Healthcare.Tts
     {
         public bool IsSpeaking => false;
 
-        public void Speak(string text)
+        public bool TrySpeak(string text, out string errorMessage)
         {
+            errorMessage = string.Empty;
             if (string.IsNullOrWhiteSpace(text))
             {
-                return;
+                return false;
             }
 
             Debug.Log($"[TTS] {text}");
+            return true;
         }
 
         public void Stop()

@@ -467,3 +467,46 @@ MacBook M1에서 Unity Editor로 `Assets/Scenes/TtsDemo.unity`를 열고 아래�
 
 - macOS `say`는 시스템에 설치된 음성을 사용한다. 한국어 음성이 없으면 macOS 시스템 설정에서 한국어 음성을 추가해야 한다.
 - `say` 백엔드는 Mac 테스트용 MVP 구현이며, iOS/Android 실기기에서는 별도 네이티브 TTS 백엔드가 필요하다.
+
+## 14. 2026-07-14 운동 화면 TTS 통합 수정 기록
+
+### 원인
+
+- TTS 데모는 오류 처리와 한국어 음성 선택이 보강된 `AIHealthcareCoach.Tts` 서비스를 사용했지만, 실제 운동 화면은 별도의 구형 `Rag.Healthcare.Tts` 서비스를 사용했다.
+- 구형 Windows 서비스는 `ko-KR` 음성을 선택하지 않고 기본 오디오 장치 지정과 프로세스 오류 수집도 하지 않아, 영어 기본 음성이나 실행 실패 상황에서 아무 소리 없이 종료될 수 있었다.
+- `Main.unity`가 `WindowsPowerShell`을 강제로 직렬화하고 있어 Android/iOS 빌드에서도 올바른 네이티브 백엔드를 선택할 수 없었다.
+
+### 선택한 구현
+
+- 운동 화면의 Windows/macOS 서비스는 새 구현을 복제하지 않고, 데모에서 검증된 `AIHealthcareCoach.Tts` 서비스를 감싸는 어댑터로 변경했다.
+- 기존 씬과 `Rag.Healthcare.Tts` 호출부는 유지하고 `TrySpeak` 성공 여부와 오류 문자열만 공통 계약으로 추가했다.
+- `Auto` 백엔드는 실행 플랫폼에 따라 Windows PowerShell, macOS `say`, Android `TextToSpeech`, iOS `AVSpeechSynthesizer`를 선택한다.
+- `Main.unity`의 백엔드는 강제 Windows 값에서 `Auto`로 변경했다.
+
+### 이 방식을 선택한 이유
+
+- 이미 한국어 음성 선택과 실패 진단이 검증된 코드를 재사용하므로 같은 버그를 두 구현에서 따로 수정할 위험이 낮다.
+- 기존 MonoBehaviour, 씬 참조, 피드백 수신 흐름을 바꾸지 않아 자세 분석과 UI에 미치는 회귀 범위가 작다.
+- 모바일에서는 클라우드 API나 음성 파일 없이 OS 기본 TTS를 사용하므로 운동 문장과 개인정보가 외부 서버로 전송되지 않는다.
+
+### 장점
+
+- Windows 한국어 음성, macOS, Android, iOS를 하나의 `TrySpeak` 계약으로 호출할 수 있다.
+- TTS 시작 실패가 `LastStatusMessage`, `PlaybackFailed`, Unity Console에 드러난다.
+- Android 엔진 초기화가 비동기여도 첫 문장을 보류했다가 준비 후 읽는다.
+- iOS는 음성 재생 동안 다른 오디오를 낮추고 종료 시 오디오 세션을 복원한다.
+- 기존 피드백 쿨다운과 `VoiceEnabled` 설정을 그대로 유지한다.
+
+### 단점과 후속 확인
+
+- OS 음성 품질과 설치 여부에 의존하며, Android에 한국어 음성 데이터가 없으면 시스템 기본 음성을 사용한다.
+- Windows PowerShell 프로세스 방식은 Editor/Standalone 검증에는 간단하지만 프로세스 시작 지연이 있어 매우 촘촘한 실시간 안내에는 적합하지 않다.
+- iOS Objective-C++ 브리지는 Windows CI에서 네이티브 링크까지 검증할 수 없으므로 Xcode 실기기 빌드 확인이 필요하다.
+- Android/iOS에서 여러 TTS 컨트롤러를 동시에 만들면 공유 OS 엔진의 종료 시점 관리가 필요하므로 씬당 컨트롤러 하나를 유지해야 한다.
+
+### 자동 검증 결과
+
+- Unity 6 C# 컴파일 성공.
+- 결정론 QA 통과: `AI_HEALTHCARE_QA_PASSED`.
+- Android Java 브리지 단독 컴파일 성공: `JAVAC_EXIT=0`.
+- Windows `Microsoft Heami Desktop`(`ko-KR`) WAV 합성 성공: 137,810 bytes.

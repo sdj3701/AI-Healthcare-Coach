@@ -119,13 +119,19 @@ namespace AIHealthcareCoach.Tts
                 TtsBackend.Auto => CreatePlatformDefaultService(),
                 TtsBackend.WindowsPowerShell => new WindowsPowerShellTtsService(windowsVoiceRate, windowsVoiceVolume),
                 TtsBackend.MacOsSay => new MacOsSayTtsService(macOsVoiceName, macOsVoiceRate),
+                TtsBackend.AndroidNative => new AndroidNativeTtsService(),
+                TtsBackend.IosNative => new IosNativeTtsService(),
                 _ => new LogTtsService()
             };
         }
 
         private ITtsService CreatePlatformDefaultService()
         {
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
+#if UNITY_ANDROID && !UNITY_EDITOR
+            return new AndroidNativeTtsService();
+#elif UNITY_IOS && !UNITY_EDITOR
+            return new IosNativeTtsService();
+#elif UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
             return new MacOsSayTtsService(macOsVoiceName, macOsVoiceRate);
 #elif UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
             return new WindowsPowerShellTtsService(windowsVoiceRate, windowsVoiceVolume);

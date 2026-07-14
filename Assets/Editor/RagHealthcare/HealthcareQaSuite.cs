@@ -10,6 +10,7 @@ using Rag.Healthcare.Privacy;
 using Rag.Healthcare.Qa;
 using Rag.Healthcare.Rag.Rules;
 using Rag.Healthcare.Replay;
+using Rag.Healthcare.Tts;
 using UnityEditor;
 using UnityEngine;
 
@@ -58,6 +59,13 @@ namespace Rag.Healthcare.Editor
 
             var entitlements = new EntitlementService();
             Check(entitlements.Has(ProductFeature.LiveSafetyFeedback), "Safety feedback must never require payment.", failures);
+
+            Check(TtsBackendResolver.ResolveAuto(RuntimePlatform.WindowsEditor) == TtsBackend.WindowsPowerShell,
+                "Windows Editor must resolve to the audible PowerShell TTS backend.", failures);
+            Check(TtsBackendResolver.ResolveAuto(RuntimePlatform.Android) == TtsBackend.AndroidNative,
+                "Android must resolve to the native Android TTS backend.", failures);
+            Check(TtsBackendResolver.ResolveAuto(RuntimePlatform.IPhonePlayer) == TtsBackend.IosNative,
+                "iOS must resolve to the native AVSpeechSynthesizer backend.", failures);
 
             var acceptance = PerformanceAcceptanceEvaluator.Evaluate(new PerformanceBenchmarkResult
             {

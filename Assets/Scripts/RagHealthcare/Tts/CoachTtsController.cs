@@ -16,11 +16,16 @@ namespace Rag.Healthcare.Tts
 
         private ITtsService ttsService;
 
+        public event Action<string> PlaybackFailed;
+
         public bool IsSpeaking => ttsService != null && ttsService.IsSpeaking;
+        public TtsBackend ActiveBackend { get; private set; } = TtsBackend.LogOnly;
+        public string LastStatusMessage { get; private set; } = string.Empty;
 
         private void Awake()
         {
             ttsService = CreateTtsService();
+            Debug.Log($"[TTS] Active backend: {ActiveBackend}");
         }
 
         private void Start()
@@ -41,13 +46,36 @@ namespace Rag.Healthcare.Tts
 
         public void Speak(string message)
         {
+            if (!TrySpeak(message, out var statusMessage) && !string.IsNullOrWhiteSpace(statusMessage))
+            {
+                Debug.LogWarning(statusMessage);
+            }
+        }
+
+        public bool TrySpeak(string message, out string statusMessage)
+        {
             if (string.IsNullOrWhiteSpace(message))
             {
-                return;
+                statusMessage = "TTS로 읽을 문장이 비어 있습니다.";
+                LastStatusMessage = statusMessage;
+                return false;
             }
 
+            var trimmedMessage = message.Trim();
             ttsService ??= CreateTtsService();
-            ttsService.Speak(message);
+            if (!ttsService.TrySpeak(trimmedMessage, out var errorMessage))
+            {
+                statusMessage = string.IsNullOrWhiteSpace(errorMessage)
+                    ? $"{ActiveBackend} TTS 재생을 시작하지 못했습니다."
+                    : $"{ActiveBackend} TTS 재생을 시작하지 못했습니다: {errorMessage}";
+                LastStatusMessage = statusMessage;
+                PlaybackFailed?.Invoke(statusMessage);
+                return false;
+            }
+
+            statusMessage = $"{ActiveBackend} TTS 재생 중";
+            LastStatusMessage = statusMessage;
+            return true;
         }
 
         public void SpeakPoseFeedback(PoseFeedbackMessage feedback)
@@ -73,10 +101,13 @@ namespace Rag.Healthcare.Tts
 
         private ITtsService CreateTtsService()
         {
-            return ResolveBackend() switch
+            ActiveBackend = ResolveBackend();
+            return ActiveBackend switch
             {
                 TtsBackend.WindowsPowerShell => new WindowsPowerShellTtsService(windowsVoiceRate, windowsVoiceVolume),
                 TtsBackend.MacOsSay => new MacOsSayTtsService(macOsVoice, macOsWordsPerMinute),
+                TtsBackend.AndroidNative => new AndroidNativeTtsService(),
+                TtsBackend.IosNative => new IosNativeTtsService(),
                 _ => new LogTtsService()
             };
         }
@@ -88,13 +119,7 @@ namespace Rag.Healthcare.Tts
                 return backend;
             }
 
-#if UNITY_EDITOR_OSX || UNITY_STANDALONE_OSX
-            return TtsBackend.MacOsSay;
-#elif UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
-            return TtsBackend.WindowsPowerShell;
-#else
-            return TtsBackend.LogOnly;
-#endif
+            return TtsBackendResolver.ResolveAuto(Application.platform);
         }
     }
 }
