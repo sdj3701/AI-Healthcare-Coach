@@ -106,7 +106,7 @@ analysis_dir = os.path.join(PROJECT_DIR, "Assets/Scripts/RagHealthcare/Pose/Anal
 if os.path.exists(analysis_dir):
     files = os.listdir(analysis_dir)
     if any("squat" in f.lower() or "state" in f.lower() for f in files) or check_file("Assets/Scripts/RagHealthcare/Pose/Analysis/PoseFeedbackAnalyzer.cs"):
-        completed_pbis.update(["PBI-032", "PBI-033", "PBI-034", "PBI-036", "PBI-013"])
+        completed_pbis.update(["PBI-032", "PBI-033", "PBI-034", "PBI-036", "PBI-013", "PBI-037", "PBI-038", "PBI-039"])
 
 # TTS 실시간 피드백
 tts_dir = os.path.join(PROJECT_DIR, "Assets/Scripts/RagHealthcare/Tts")
