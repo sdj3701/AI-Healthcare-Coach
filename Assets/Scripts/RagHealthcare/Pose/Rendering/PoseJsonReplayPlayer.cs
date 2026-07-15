@@ -80,6 +80,14 @@ namespace Rag.Healthcare.Pose.Rendering
             IsPlaying = false;
         }
 
+        public void ClearReplay()
+        {
+            StopReplay();
+            LoadedFrameCount = 0;
+            LastReplayPath = string.Empty;
+            LastReplayStatus = "Replay idle";
+        }
+
         private IEnumerator ReplayRoutine(IReadOnlyList<JointTrackingFrame> frames)
         {
             IsPlaying = true;

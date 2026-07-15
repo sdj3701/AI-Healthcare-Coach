@@ -45,6 +45,23 @@ namespace Rag.Healthcare.UI
             Session = 3
         }
 
+        private enum PreviewMode
+        {
+            None,
+            Camera,
+            Replay
+        }
+
+        private enum SessionTransitionKind
+        {
+            None,
+            Starting,
+            Stopping,
+            SwitchingCamera,
+            Resetting,
+            Leaving
+        }
+
         private sealed class ExerciseOption
         {
             public ExerciseOption(string id, string name, string category, float caloriesPerRep, bool supported)
@@ -93,6 +110,7 @@ namespace Rag.Healthcare.UI
         [SerializeField, Range(1, 60)] private int mobileCameraFps = 20;
         [SerializeField, Range(1, 30)] private int mobilePoseFps = 8;
         [SerializeField, Range(15, 120)] private int mobileTargetFrameRate = 30;
+        [SerializeField, Min(1f)] private float trackingStartupTimeoutSeconds = 15f;
 
         private UIDocument document;
         private PanelSettings runtimePanelSettings;
@@ -106,6 +124,7 @@ namespace Rag.Healthcare.UI
         private VisualElement[] progressPips;
         private VisualElement previewFrame;
         private Image previewImage;
+        private VisualElement poseOverlay;
         private VisualElement previewPlaceholder;
         private Label stepLabel;
         private Label timerLabel;
@@ -125,7 +144,7 @@ namespace Rag.Healthcare.UI
         private int repsPerSet = 15;
         private int sets = 3;
         private bool workoutRunning;
-        private bool replayMode;
+        private PreviewMode previewMode = PreviewMode.None;
         private float sessionStartedAt;
         private float elapsedBeforePause;
         private float nextRefreshAt;
@@ -133,11 +152,18 @@ namespace Rag.Healthcare.UI
         private int lastScreenWidth = -1;
         private int lastScreenHeight = -1;
         private Coroutine sessionTransitionCoroutine;
+        private SessionTransitionKind sessionTransitionKind;
+        private bool pendingWorkoutStart;
+        private bool pendingWorkoutStop;
+        private bool currentSessionReceivedPoseFrame;
+        private string cameraOperationError = string.Empty;
         private Texture lastPreviewLayoutTexture;
         private int lastPreviewLayoutWidth = -1;
         private int lastPreviewLayoutHeight = -1;
         private int lastPreviewRotation = int.MinValue;
-        private bool lastPreviewMirrored;
+        private bool lastPreviewVerticallyMirrored;
+        private bool lastPreviewSelfieMirrored;
+        private bool lastPreviewUsesCameraMetadata;
         private float lastPreviewFrameWidth = -1f;
         private float lastPreviewFrameHeight = -1f;
 #if UNITY_EDITOR
@@ -197,6 +223,10 @@ namespace Rag.Healthcare.UI
                 StopCoroutine(sessionTransitionCoroutine);
                 sessionTransitionCoroutine = null;
             }
+
+            pendingWorkoutStart = false;
+            pendingWorkoutStop = false;
+            sessionTransitionKind = SessionTransitionKind.None;
 
             if (cameraSource != null)
             {
@@ -697,6 +727,10 @@ namespace Rag.Healthcare.UI
                     break;
                 case ScreenStep.Session:
                     RenderSessionStep();
+                    if (Application.isPlaying && previewMode == PreviewMode.Camera)
+                    {
+                        cameraSource?.StartCamera();
+                    }
                     break;
             }
 
@@ -799,6 +833,8 @@ namespace Rag.Healthcare.UI
             contentRoot.Add(Spacer(24f));
             contentRoot.Add(ActionButton("개수 설정하러 가기 (다음)  ›", ColorFromHex(0x14B8A6), Color.black, 52f, () =>
             {
+                previewMode = PreviewMode.None;
+                replayPlayer?.StopReplay();
                 currentStep = ScreenStep.Target;
                 RenderCurrentStep();
             }));
@@ -839,12 +875,15 @@ namespace Rag.Healthcare.UI
             var row = Row("target-buttons", 52f, 8f);
             row.Add(ActionButton("이전", ColorFromHex(0x161B22), Color.white, 52f, () =>
             {
+                previewMode = PreviewMode.None;
+                replayPlayer?.StopReplay();
                 currentStep = ScreenStep.Exercise;
                 RenderCurrentStep();
             }));
             row.Add(ActionButton("운동 화면으로", ColorFromHex(0x22C55E), ColorFromHex(0x07110C), 52f, () =>
             {
                 ApplyTargetCountFromFields();
+                previewMode = PreviewMode.Camera;
                 currentStep = ScreenStep.Session;
                 RenderCurrentStep();
             }));
@@ -879,17 +918,12 @@ namespace Rag.Healthcare.UI
 
             var utilityRow = Row("utility-row", 38f, 7f);
             utilityRow.Add(ActionButton("카메라 전환", ColorFromHex(0x161B22), Color.white, 38f, SwitchCamera));
-            utilityRow.Add(ActionButton("목표 수정", ColorFromHex(0x161B22), Color.white, 38f, () =>
-            {
-                if (sessionTransitionCoroutine != null)
-                {
-                    return;
-                }
-
-                StopWorkoutOnly();
-                currentStep = ScreenStep.Target;
-                RenderCurrentStep();
-            }));
+            utilityRow.Add(ActionButton(
+                "목표 수정",
+                ColorFromHex(0x161B22),
+                Color.white,
+                38f,
+                () => LeaveSession(ScreenStep.Target)));
             contentRoot.Add(utilityRow);
 
             var controlRow = Row("control-row", 54f, 8f);
@@ -901,17 +935,12 @@ namespace Rag.Healthcare.UI
             var resetRow = Row("reset-row", 30f, 7f);
             resetRow.style.marginTop = 6f;
             resetRow.Add(ActionButton("리셋", ColorFromHex(0x101621), ColorFromHex(0x94A3B8), 30f, ResetSession));
-            resetRow.Add(ActionButton("운동 선택", ColorFromHex(0x101621), ColorFromHex(0x94A3B8), 30f, () =>
-            {
-                if (sessionTransitionCoroutine != null)
-                {
-                    return;
-                }
-
-                StopWorkoutOnly();
-                currentStep = ScreenStep.Exercise;
-                RenderCurrentStep();
-            }));
+            resetRow.Add(ActionButton(
+                "운동 선택",
+                ColorFromHex(0x101621),
+                ColorFromHex(0x94A3B8),
+                30f,
+                () => LeaveSession(ScreenStep.Exercise)));
             contentRoot.Add(resetRow);
         }
 
@@ -931,8 +960,24 @@ namespace Rag.Healthcare.UI
             previewImage.style.top = 0f;
             previewImage.style.width = Length.Percent(100f);
             previewImage.style.height = Length.Percent(100f);
-            previewImage.generateVisualContent += OnGenerateVisualContent;
             frame.Add(previewImage);
+
+            // Keep pose landmarks in the final upright display coordinate space.
+            // Camera memory orientation belongs only to the raw preview image and
+            // must not transform already-normalized MediaPipe output a second time.
+            poseOverlay = new VisualElement
+            {
+                name = "pose-overlay",
+                pickingMode = PickingMode.Ignore
+            };
+            poseOverlay.style.position = Position.Absolute;
+            poseOverlay.style.left = 0f;
+            poseOverlay.style.top = 0f;
+            poseOverlay.style.width = Length.Percent(100f);
+            poseOverlay.style.height = Length.Percent(100f);
+            poseOverlay.generateVisualContent += OnGeneratePoseOverlayContent;
+            frame.Add(poseOverlay);
+
             frame.RegisterCallback<GeometryChangedEvent>(_ =>
             {
                 if (previewFrame == frame)
@@ -1185,21 +1230,15 @@ namespace Rag.Healthcare.UI
                 return;
             }
 
-            Texture texture = null;
-            if (replayMode && replayPlayer != null && replayPlayer.LoadedFrameCount > 0)
+            Texture texture = previewMode switch
             {
-                texture = replayPlayer.PreviewTexture;
-            }
-            else if (cameraSource != null && (cameraSource.IsRunning || cameraSource.IsStarting))
-            {
-                texture = cameraSource.PreviewTexture;
-                replayMode = false;
-            }
-            else if (replayPlayer != null && replayPlayer.LoadedFrameCount > 0)
-            {
-                texture = replayPlayer.PreviewTexture;
-                replayMode = true;
-            }
+                PreviewMode.Camera when cameraSource != null &&
+                                            (cameraSource.IsRunning || cameraSource.IsStarting) =>
+                    cameraSource.PreviewTexture,
+                PreviewMode.Replay when replayPlayer != null && replayPlayer.LoadedFrameCount > 0 =>
+                    replayPlayer.PreviewTexture,
+                _ => null
+            };
 
             previewImage.image = texture;
             ApplyPreviewLayout(texture);
@@ -1226,6 +1265,7 @@ namespace Rag.Healthcare.UI
                 previewImage.style.height = Length.Percent(100f);
                 previewImage.style.rotate = new Rotate(new Angle(0f, AngleUnit.Degree));
                 previewImage.style.scale = new Scale(Vector3.one);
+                ResetPoseOverlayLayout();
                 InvalidatePreviewLayout();
                 return;
             }
@@ -1244,16 +1284,22 @@ namespace Rag.Healthcare.UI
             // WebCamTexture metadata becomes reliable a few frames after Play().
             // This method is called by the periodic refresh, frame callbacks, and
             // geometry changes so the correction updates without restarting UI.
-            var rotation = replayMode || cameraSource == null
-                ? 0
-                : NormalizeRotation(cameraSource.VideoRotationAngle);
-            var mirrored = !replayMode && cameraSource != null && cameraSource.VideoVerticallyMirrored;
+            var usesCameraMetadata = previewMode == PreviewMode.Camera &&
+                                     cameraSource != null &&
+                                     texture == cameraSource.PreviewTexture;
+            var rotation = usesCameraMetadata
+                ? NormalizeRotation(cameraSource.VideoRotationAngle)
+                : 0;
+            var verticallyMirrored = usesCameraMetadata && cameraSource.VideoVerticallyMirrored;
+            var selfieMirrored = usesCameraMetadata && cameraSource.ActiveCameraIsFrontFacing;
 
             if (lastPreviewLayoutTexture == texture &&
                 lastPreviewLayoutWidth == textureWidth &&
                 lastPreviewLayoutHeight == textureHeight &&
                 lastPreviewRotation == rotation &&
-                lastPreviewMirrored == mirrored &&
+                lastPreviewVerticallyMirrored == verticallyMirrored &&
+                lastPreviewSelfieMirrored == selfieMirrored &&
+                lastPreviewUsesCameraMetadata == usesCameraMetadata &&
                 Mathf.Abs(lastPreviewFrameWidth - frameWidth) < 0.1f &&
                 Mathf.Abs(lastPreviewFrameHeight - frameHeight) < 0.1f)
             {
@@ -1279,9 +1325,8 @@ namespace Rag.Healthcare.UI
                 fittedWidth = frameHeight * displayAspect;
             }
 
-            // Size the element in its unrotated coordinate system. Rotating this
-            // Image also rotates generateVisualContent, keeping the skeleton and
-            // camera pixels on the exact same transform.
+            // Size the raw camera element in its unrotated coordinate system. The
+            // separate pose overlay stays in the final upright fitted rectangle.
             var elementWidth = quarterTurn ? fittedHeight : fittedWidth;
             var elementHeight = quarterTurn ? fittedWidth : fittedHeight;
             previewImage.style.left = (frameWidth - elementWidth) * 0.5f;
@@ -1289,15 +1334,74 @@ namespace Rag.Healthcare.UI
             previewImage.style.width = elementWidth;
             previewImage.style.height = elementHeight;
             previewImage.style.rotate = new Rotate(new Angle(rotation, AngleUnit.Degree));
-            previewImage.style.scale = new Scale(new Vector3(1f, mirrored ? -1f : 1f, 1f));
+            previewImage.style.scale = new Scale(ResolvePreviewScale(
+                rotation,
+                verticallyMirrored,
+                selfieMirrored));
+
+            if (poseOverlay != null)
+            {
+                poseOverlay.style.left = (frameWidth - fittedWidth) * 0.5f;
+                poseOverlay.style.top = (frameHeight - fittedHeight) * 0.5f;
+                poseOverlay.style.width = fittedWidth;
+                poseOverlay.style.height = fittedHeight;
+                poseOverlay.style.rotate = new Rotate(new Angle(0f, AngleUnit.Degree));
+                poseOverlay.style.scale = new Scale(Vector3.one);
+                poseOverlay.style.display = usesCameraMetadata ? DisplayStyle.Flex : DisplayStyle.None;
+                poseOverlay.MarkDirtyRepaint();
+            }
 
             lastPreviewLayoutTexture = texture;
             lastPreviewLayoutWidth = textureWidth;
             lastPreviewLayoutHeight = textureHeight;
             lastPreviewRotation = rotation;
-            lastPreviewMirrored = mirrored;
+            lastPreviewVerticallyMirrored = verticallyMirrored;
+            lastPreviewSelfieMirrored = selfieMirrored;
+            lastPreviewUsesCameraMetadata = usesCameraMetadata;
             lastPreviewFrameWidth = frameWidth;
             lastPreviewFrameHeight = frameHeight;
+        }
+
+        private static Vector3 ResolvePreviewScale(
+            int rotation,
+            bool verticallyMirrored,
+            bool selfieMirrored)
+        {
+            var scaleX = 1f;
+            var scaleY = verticallyMirrored ? -1f : 1f;
+
+            // The selfie mirror is horizontal in the final upright display space.
+            // For a quarter-turn raw texture, that display X axis corresponds to
+            // the texture's local Y axis before the element rotation is applied.
+            if (selfieMirrored)
+            {
+                if (rotation == 90 || rotation == 270)
+                {
+                    scaleY *= -1f;
+                }
+                else
+                {
+                    scaleX = -1f;
+                }
+            }
+
+            return new Vector3(scaleX, scaleY, 1f);
+        }
+
+        private void ResetPoseOverlayLayout()
+        {
+            if (poseOverlay == null)
+            {
+                return;
+            }
+
+            poseOverlay.style.left = 0f;
+            poseOverlay.style.top = 0f;
+            poseOverlay.style.width = Length.Percent(100f);
+            poseOverlay.style.height = Length.Percent(100f);
+            poseOverlay.style.rotate = new Rotate(new Angle(0f, AngleUnit.Degree));
+            poseOverlay.style.scale = new Scale(Vector3.one);
+            poseOverlay.style.display = DisplayStyle.None;
         }
 
         private void InvalidatePreviewLayout()
@@ -1306,7 +1410,9 @@ namespace Rag.Healthcare.UI
             lastPreviewLayoutWidth = -1;
             lastPreviewLayoutHeight = -1;
             lastPreviewRotation = int.MinValue;
-            lastPreviewMirrored = false;
+            lastPreviewVerticallyMirrored = false;
+            lastPreviewSelfieMirrored = false;
+            lastPreviewUsesCameraMetadata = false;
             lastPreviewFrameWidth = -1f;
             lastPreviewFrameHeight = -1f;
         }
@@ -1324,35 +1430,147 @@ namespace Rag.Healthcare.UI
 
         private void StartWorkout()
         {
-            if (!Application.isPlaying || sessionTransitionCoroutine != null ||
-                (workoutRunning && trackingController != null && trackingController.IsTracking))
+            if (!Application.isPlaying)
             {
                 return;
             }
 
-            ApplyTargetCount();
-            replayMode = false;
-            replayPlayer?.StopReplay();
-            coachTts ??= FindFirstObjectByType<CoachTtsController>();
-            coachTts?.BeginSession();
-            trackingController?.StartTracking();
-
-            if (!workoutRunning)
+            if (sessionTransitionCoroutine != null)
             {
-                sessionStartedAt = Time.unscaledTime;
+                // STOP, reset, and camera switching are asynchronous on iOS. Keep
+                // the user's START intent and run it once that transition releases.
+                pendingWorkoutStart = true;
+                pendingWorkoutStop = false;
+                return;
             }
 
-            workoutRunning = true;
-            RefreshPreviewTexture();
+            pendingWorkoutStart = false;
+            if (workoutRunning)
+            {
+                previewMode = PreviewMode.Camera;
+                replayPlayer?.StopReplay();
+                trackingController?.StartTracking();
+                RefreshPreviewTexture();
+                return;
+            }
+
+            sessionTransitionKind = SessionTransitionKind.Starting;
+            sessionTransitionCoroutine = StartCoroutine(StartWorkoutRoutine());
+        }
+
+        private IEnumerator StartWorkoutRoutine()
+        {
+            // Keep the handle valid until camera readiness has completed.
+            yield return null;
+            try
+            {
+                ApplyTargetCount();
+                previewMode = PreviewMode.Camera;
+                replayPlayer?.StopReplay();
+                cameraOperationError = string.Empty;
+                RefreshPreviewTexture();
+
+                var cameraReady = false;
+                var cameraError = string.Empty;
+                if (cameraSource == null)
+                {
+                    cameraError = "카메라 소스가 없습니다.";
+                }
+                else
+                {
+                    yield return cameraSource.EnsureCameraReady((success, error) =>
+                    {
+                        cameraReady = success;
+                        cameraError = error;
+                    });
+                }
+
+                if (!cameraReady)
+                {
+                    cameraOperationError = string.IsNullOrWhiteSpace(cameraError)
+                        ? "카메라를 준비하지 못했습니다."
+                        : cameraError;
+                    workoutRunning = false;
+                    RefreshPreviewTexture();
+                    yield break;
+                }
+
+                if (trackingController == null)
+                {
+                    cameraOperationError = "관절 추적 컨트롤러가 없습니다.";
+                    workoutRunning = false;
+                    yield break;
+                }
+
+                currentSessionReceivedPoseFrame = false;
+                trackingController.StartTracking();
+                var trackingDeadline = Time.realtimeSinceStartup + Mathf.Max(1f, trackingStartupTimeoutSeconds);
+                while (trackingController.IsStartRequested &&
+                       !trackingController.IsTracking &&
+                       Time.realtimeSinceStartup < trackingDeadline)
+                {
+                    if (pendingWorkoutStop)
+                    {
+                        trackingController.StopTracking();
+                        yield break;
+                    }
+
+                    yield return null;
+                }
+
+                if (!trackingController.IsTracking)
+                {
+                    var trackingError = trackingController.LastTrackingError;
+                    trackingController.StopTracking();
+                    cameraOperationError = string.IsNullOrWhiteSpace(trackingError)
+                        ? "관절 추적을 제한 시간 안에 시작하지 못했습니다."
+                        : trackingError;
+                    workoutRunning = false;
+                    RefreshPreviewTexture();
+                    yield break;
+                }
+
+                if (pendingWorkoutStop)
+                {
+                    trackingController.StopTracking();
+                    yield break;
+                }
+
+                coachTts ??= FindFirstObjectByType<CoachTtsController>();
+                coachTts?.BeginSession();
+                sessionStartedAt = Time.unscaledTime;
+                workoutRunning = true;
+                RefreshPreviewTexture();
+            }
+            finally
+            {
+                CompleteSessionTransition();
+            }
         }
 
         private void StopWorkoutAndReplay()
         {
-            if (!Application.isPlaying || sessionTransitionCoroutine != null)
+            if (!Application.isPlaying)
             {
                 return;
             }
 
+            if (sessionTransitionCoroutine != null)
+            {
+                if (sessionTransitionKind != SessionTransitionKind.Stopping &&
+                    sessionTransitionKind != SessionTransitionKind.Resetting &&
+                    sessionTransitionKind != SessionTransitionKind.Leaving)
+                {
+                    pendingWorkoutStop = true;
+                    pendingWorkoutStart = false;
+                }
+
+                return;
+            }
+
+            pendingWorkoutStart = false;
+            pendingWorkoutStop = false;
+            sessionTransitionKind = SessionTransitionKind.Stopping;
             sessionTransitionCoroutine = StartCoroutine(StopWorkoutAndReplayRoutine());
         }
 
@@ -1362,6 +1580,8 @@ namespace Rag.Healthcare.UI
             yield return null;
             try
             {
+                var sessionHasPoseFrames = currentSessionReceivedPoseFrame;
+                currentSessionReceivedPoseFrame = false;
                 StopWorkoutOnly();
                 yield return WaitForTrackingRequestToFinish();
 
@@ -1369,13 +1589,26 @@ namespace Rag.Healthcare.UI
                 // resume without repeatedly tearing down AVFoundation and MediaPipe.
                 yield return null;
 
+                // Clear the previous load result first so a failed attempt cannot
+                // make stale replay frames look like a newly prepared replay.
+                replayPlayer?.ClearReplay();
+                if (!sessionHasPoseFrames)
+                {
+                    previewMode = PreviewMode.Camera;
+                    RefreshPreviewTexture();
+                    yield break;
+                }
+
                 replayPlayer?.PlayLatestSession();
-                replayMode = true;
+                var replayReady = replayPlayer != null &&
+                                  replayPlayer.LoadedFrameCount > 0 &&
+                                  replayPlayer.PreviewTexture != null;
+                previewMode = replayReady ? PreviewMode.Replay : PreviewMode.Camera;
                 RefreshPreviewTexture();
             }
             finally
             {
-                sessionTransitionCoroutine = null;
+                CompleteSessionTransition();
             }
         }
 
@@ -1395,6 +1628,7 @@ namespace Rag.Healthcare.UI
             coachTts ??= FindFirstObjectByType<CoachTtsController>();
             coachTts?.EndSession();
             trackingController?.StopTracking();
+            poseOverlay?.MarkDirtyRepaint();
         }
 
         private void SwitchCamera()
@@ -1404,6 +1638,8 @@ namespace Rag.Healthcare.UI
                 return;
             }
 
+            pendingWorkoutStop = false;
+            sessionTransitionKind = SessionTransitionKind.SwitchingCamera;
             sessionTransitionCoroutine = StartCoroutine(SwitchCameraRoutine());
         }
 
@@ -1413,9 +1649,26 @@ namespace Rag.Healthcare.UI
             yield return null;
             try
             {
-                replayMode = false;
+                previewMode = PreviewMode.Camera;
                 replayPlayer?.StopReplay();
                 var shouldResumeTracking = workoutRunning || (trackingController != null && trackingController.IsTracking);
+                if (cameraSource == null)
+                {
+                    cameraOperationError = "카메라 소스가 없습니다.";
+                    RefreshPreviewTexture();
+                    yield break;
+                }
+
+                var currentFacing = cameraSource.HasValidFrame
+                    ? cameraSource.ActiveCameraIsFrontFacing
+                    : cameraSource.PreferFrontCamera;
+                var targetFacing = !currentFacing;
+                if (!cameraSource.IsCameraFacingAvailable(targetFacing, out var availabilityError))
+                {
+                    cameraOperationError = availabilityError;
+                    RefreshPreviewTexture();
+                    yield break;
+                }
 
                 if (workoutRunning)
                 {
@@ -1426,43 +1679,135 @@ namespace Rag.Healthcare.UI
                 coachTts ??= FindFirstObjectByType<CoachTtsController>();
                 coachTts?.Suspend();
                 trackingController?.StopTracking();
-                yield return WaitForTrackingRequestToFinish();
-                cameraSource?.StopCamera();
-                cameraSource?.TogglePreferredCameraFacing();
+                poseOverlay?.MarkDirtyRepaint();
+                var trackingBecameIdle = false;
+                yield return WaitForTrackingRequestToFinish(value => trackingBecameIdle = value);
 
-                // AVFoundation can still be releasing the previous capture session
-                // for the remainder of this frame. Debounce camera switches and give
-                // it two player-loop turns before creating the replacement texture.
-                yield return null;
-                yield return null;
-
-                cameraSource?.StartCamera();
-
-                if (shouldResumeTracking)
+                if (!trackingBecameIdle)
                 {
-                    coachTts?.Resume();
+                    cameraOperationError = "관절 추적 정리가 끝나지 않아 카메라 전환을 취소했습니다.";
+                    coachTts?.EndSession();
+
+                    RefreshPreviewTexture();
+                    yield break;
+                }
+
+                var switchSucceeded = false;
+                var switchError = string.Empty;
+                cameraSource.SwitchCameraFacing(
+                    targetFacing,
+                    (success, error) =>
+                    {
+                        switchSucceeded = success;
+                        switchError = error;
+                    });
+                while (cameraSource.IsSwitchingCamera)
+                {
+                    yield return null;
+                }
+
+                cameraOperationError = switchSucceeded ? string.Empty : switchError;
+                var cameraRecovered = cameraSource != null && cameraSource.HasValidFrame;
+
+                if (shouldResumeTracking && cameraRecovered)
+                {
                     trackingController?.StartTracking();
-                    workoutRunning = true;
-                    sessionStartedAt = Time.unscaledTime;
+                    var trackingDeadline = Time.realtimeSinceStartup + Mathf.Max(1f, trackingStartupTimeoutSeconds);
+                    while (trackingController != null &&
+                           trackingController.IsStartRequested &&
+                           !trackingController.IsTracking &&
+                           Time.realtimeSinceStartup < trackingDeadline)
+                    {
+                        if (pendingWorkoutStop)
+                        {
+                            trackingController.StopTracking();
+                            break;
+                        }
+
+                        yield return null;
+                    }
+
+                    if (trackingController != null && trackingController.IsTracking && !pendingWorkoutStop)
+                    {
+                        coachTts?.Resume();
+                        workoutRunning = true;
+                        sessionStartedAt = Time.unscaledTime;
+                    }
+                    else
+                    {
+                        trackingController?.StopTracking();
+                        coachTts?.EndSession();
+                        if (!pendingWorkoutStop)
+                        {
+                            cameraOperationError = string.IsNullOrWhiteSpace(trackingController?.LastTrackingError)
+                                ? "카메라 전환 후 관절 추적을 다시 시작하지 못했습니다."
+                                : trackingController.LastTrackingError;
+                        }
+                    }
+                }
+                else if (shouldResumeTracking)
+                {
+                    coachTts?.EndSession();
                 }
 
                 RefreshPreviewTexture();
             }
             finally
             {
-                sessionTransitionCoroutine = null;
+                CompleteSessionTransition();
             }
         }
 
-        private IEnumerator WaitForTrackingRequestToFinish()
+        private IEnumerator WaitForTrackingRequestToFinish(Action<bool> onCompleted = null)
         {
-            const float timeoutSeconds = 1f;
+            // Native live-stream cancellation must drain its physical callback. If
+            // that callback never arrives, the provider performs timeout recovery at
+            // three seconds, so keep this non-blocking UI wait slightly longer.
+            const float timeoutSeconds = 4.5f;
             var timeoutAt = Time.realtimeSinceStartup + timeoutSeconds;
             while (trackingController != null &&
-                   trackingController.IsRequestInFlight &&
+                   !trackingController.IsIdle &&
                    Time.realtimeSinceStartup < timeoutAt)
             {
                 yield return null;
+            }
+
+            if (trackingController != null && !trackingController.IsIdle)
+            {
+                Debug.LogWarning("[MobileWorkoutPrototypeView] Pose tracking did not become idle before the UI transition timeout.");
+            }
+
+            onCompleted?.Invoke(trackingController == null || trackingController.IsIdle);
+        }
+
+        private void LeaveSession(ScreenStep targetStep)
+        {
+            if (!Application.isPlaying || sessionTransitionCoroutine != null)
+            {
+                return;
+            }
+
+            pendingWorkoutStart = false;
+            pendingWorkoutStop = false;
+            sessionTransitionKind = SessionTransitionKind.Leaving;
+            sessionTransitionCoroutine = StartCoroutine(LeaveSessionRoutine(targetStep));
+        }
+
+        private IEnumerator LeaveSessionRoutine(ScreenStep targetStep)
+        {
+            yield return null;
+            try
+            {
+                StopWorkoutOnly();
+                yield return WaitForTrackingRequestToFinish();
+                previewMode = PreviewMode.None;
+                replayPlayer?.StopReplay();
+                currentStep = targetStep;
+                RenderCurrentStep();
+            }
+            finally
+            {
+                CompleteSessionTransition();
             }
         }
 
@@ -1473,6 +1818,9 @@ namespace Rag.Healthcare.UI
                 return;
             }
 
+            pendingWorkoutStart = false;
+            pendingWorkoutStop = false;
+            sessionTransitionKind = SessionTransitionKind.Resetting;
             sessionTransitionCoroutine = StartCoroutine(ResetSessionRoutine());
         }
 
@@ -1484,19 +1832,46 @@ namespace Rag.Healthcare.UI
             {
                 StopWorkoutOnly();
                 yield return WaitForTrackingRequestToFinish();
-                cameraSource?.StopCamera();
-                yield return null;
-                yield return null;
-                replayPlayer?.StopReplay();
+                replayPlayer?.ClearReplay();
                 elapsedBeforePause = 0f;
-                replayMode = false;
+                currentSessionReceivedPoseFrame = false;
+                previewMode = PreviewMode.Camera;
+                cameraOperationError = string.Empty;
                 ApplyTargetCount();
                 RenderCurrentStep();
             }
             finally
             {
-                sessionTransitionCoroutine = null;
+                CompleteSessionTransition();
             }
+        }
+
+        private void CompleteSessionTransition()
+        {
+            sessionTransitionCoroutine = null;
+            sessionTransitionKind = SessionTransitionKind.None;
+            if (currentStep != ScreenStep.Session || !isActiveAndEnabled)
+            {
+                pendingWorkoutStart = false;
+                pendingWorkoutStop = false;
+                return;
+            }
+
+            if (pendingWorkoutStop)
+            {
+                pendingWorkoutStop = false;
+                pendingWorkoutStart = false;
+                StopWorkoutAndReplay();
+                return;
+            }
+
+            if (!pendingWorkoutStart)
+            {
+                return;
+            }
+
+            pendingWorkoutStart = false;
+            StartWorkout();
         }
 
         private void ApplyTargetCountFromFields()
@@ -1671,6 +2046,7 @@ namespace Rag.Healthcare.UI
         {
             previewFrame = null;
             previewImage = null;
+            poseOverlay = null;
             InvalidatePreviewLayout();
             previewPlaceholder = null;
             timerLabel = null;
@@ -1687,6 +2063,16 @@ namespace Rag.Healthcare.UI
 
         private string BuildCameraStateText()
         {
+            if (previewMode == PreviewMode.Replay)
+            {
+                return "3D 리플레이를 표시하고 있습니다.";
+            }
+
+            if (previewMode == PreviewMode.None)
+            {
+                return "미리보기가 숨겨져 있습니다.";
+            }
+
             if (cameraSource == null)
             {
                 return "카메라 소스가 없습니다.";
@@ -1695,6 +2081,16 @@ namespace Rag.Healthcare.UI
             if (cameraSource.IsStarting)
             {
                 return "카메라 시작 중입니다.";
+            }
+
+            if (cameraSource.IsSwitchingCamera)
+            {
+                return "카메라 전환 중입니다.";
+            }
+
+            if (!string.IsNullOrWhiteSpace(cameraOperationError))
+            {
+                return "세션 오류: " + Trim(cameraOperationError, 58);
             }
 
             if (!string.IsNullOrWhiteSpace(trackingController?.LastTrackingError))
@@ -1712,7 +2108,7 @@ namespace Rag.Healthcare.UI
                 return "카메라 준비 완료 · 관절 추적 대기 중입니다.";
             }
 
-            return replayMode ? "3D 리플레이 준비 중입니다." : "Start를 누르면 카메라 추적이 시작됩니다.";
+            return "Start를 누르면 카메라 추적이 시작됩니다.";
         }
 
         private string BuildPoseDecisionStatus(ExercisePhase phase)
@@ -1895,23 +2291,32 @@ namespace Rag.Healthcare.UI
 
         private void HandleTrackingFrameReceived(JointTrackingFrame frame)
         {
-            if (previewImage != null)
+            if (workoutRunning && frame != null)
+            {
+                currentSessionReceivedPoseFrame = true;
+            }
+
+            if (previewImage != null && poseOverlay != null)
             {
                 ApplyPreviewLayout(previewImage.image);
-                previewImage.MarkDirtyRepaint();
+                poseOverlay.MarkDirtyRepaint();
             }
         }
 
-        private void OnGenerateVisualContent(MeshGenerationContext mgc)
+        private void OnGeneratePoseOverlayContent(MeshGenerationContext mgc)
         {
-            if (replayMode || previewImage == null)
+            if (previewMode != PreviewMode.Camera ||
+                previewImage == null ||
+                poseOverlay == null ||
+                trackingController == null ||
+                !trackingController.IsTracking ||
+                (cameraSource != null && cameraSource.IsSwitchingCamera))
             {
                 return;
             }
 
-            var texture = previewImage.image;
-            var width = previewImage.layout.width;
-            var height = previewImage.layout.height;
+            var width = poseOverlay.layout.width;
+            var height = poseOverlay.layout.height;
 
             if (float.IsNaN(width) || float.IsNaN(height) || width <= 0f || height <= 0f)
             {
@@ -1924,7 +2329,8 @@ namespace Rag.Healthcare.UI
                 return;
             }
 
-            var rect = GetTextureRect(texture, width, height);
+            var rect = new Rect(0f, 0f, width, height);
+            var mirrorX = cameraSource != null && cameraSource.ActiveCameraIsFrontFacing;
             var painter = mgc.painter2D;
 
             // Draw bones
@@ -1936,8 +2342,8 @@ namespace Rag.Healthcare.UI
                     frame.TryGetJoint(segment.To, out var toJoint) &&
                     CanRender(fromJoint) && CanRender(toJoint))
                 {
-                    var p1 = ToPreviewPoint(fromJoint, rect);
-                    var p2 = ToPreviewPoint(toJoint, rect);
+                    var p1 = ToPreviewPoint(fromJoint, rect, mirrorX);
+                    var p2 = ToPreviewPoint(toJoint, rect, mirrorX);
                     painter.BeginPath();
                     painter.MoveTo(p1);
                     painter.LineTo(p2);
@@ -1952,7 +2358,7 @@ namespace Rag.Healthcare.UI
             {
                 if (CanRender(joint))
                 {
-                    var p = ToPreviewPoint(joint, rect);
+                    var p = ToPreviewPoint(joint, rect, mirrorX);
                     painter.fillColor = GetJointColor(joint.name);
                     painter.BeginPath();
                     painter.MoveTo(new Vector2(p.x - half, p.y - half));
@@ -1963,39 +2369,6 @@ namespace Rag.Healthcare.UI
                     painter.Fill();
                 }
             }
-        }
-
-        private Rect GetTextureRect(Texture texture, float elementWidth, float elementHeight)
-        {
-            if (texture == null || elementWidth <= 0f || elementHeight <= 0f)
-            {
-                return new Rect(0f, 0f, elementWidth, elementHeight);
-            }
-
-            float textureAspect = (float)texture.width / texture.height;
-            float elementAspect = elementWidth / elementHeight;
-
-            float drawWidth, drawHeight;
-            float drawX, drawY;
-
-            if (textureAspect > elementAspect)
-            {
-                // Letterbox
-                drawWidth = elementWidth;
-                drawHeight = elementWidth / textureAspect;
-                drawX = 0f;
-                drawY = (elementHeight - drawHeight) * 0.5f;
-            }
-            else
-            {
-                // Pillarbox
-                drawHeight = elementHeight;
-                drawWidth = elementHeight * textureAspect;
-                drawX = (elementWidth - drawWidth) * 0.5f;
-                drawY = 0f;
-            }
-
-            return new Rect(drawX, drawY, drawWidth, drawHeight);
         }
 
         private bool CanRender(TrackedJoint joint)
@@ -2023,10 +2396,11 @@ namespace Rag.Healthcare.UI
             return new Color(0.95f, 0.95f, 0.95f, 0.9f);
         }
 
-        private Vector2 ToPreviewPoint(TrackedJoint joint, Rect rect)
+        private static Vector2 ToPreviewPoint(TrackedJoint joint, Rect rect, bool mirrorX)
         {
+            var normalizedX = mirrorX ? 1f - joint.x : joint.x;
             return new Vector2(
-                rect.x + Mathf.Clamp01(joint.x) * rect.width,
+                rect.x + Mathf.Clamp01(normalizedX) * rect.width,
                 rect.y + Mathf.Clamp01(joint.y) * rect.height
             );
         }

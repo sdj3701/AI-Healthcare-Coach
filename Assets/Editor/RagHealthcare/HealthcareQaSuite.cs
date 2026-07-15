@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using AIHealthcareCoach.MediaPipe;
 using AIHealthcareCoach.Editor;
 using Rag.Healthcare.Camera;
@@ -81,6 +82,7 @@ namespace Rag.Healthcare.Editor
 
             VerifyBundledKoreanFont(failures);
             VerifyMobileUiStructure(failures);
+            VerifyPosePreviewCoordinateMapping(failures);
 
             var acceptance = PerformanceAcceptanceEvaluator.Evaluate(new PerformanceBenchmarkResult
             {
@@ -245,7 +247,7 @@ namespace Rag.Healthcare.Editor
             var host = new GameObject("Mobile UI QA Host");
             try
             {
-                host.AddComponent<MobileWorkoutPrototypeView>();
+                var view = host.AddComponent<MobileWorkoutPrototypeView>();
                 var document = host.GetComponent<UIDocument>();
                 var documentRoot = document == null ? null : document.rootVisualElement;
                 var fullScreen = documentRoot?.Q<VisualElement>("full-screen-content");
@@ -259,10 +261,86 @@ namespace Rag.Healthcare.Editor
                 Check(documentRoot?.Q<VisualElement>("phone-notch") == null &&
                       documentRoot?.Q<VisualElement>("phone-home-indicator") == null,
                     "The app UI must not draw a second phone frame inside the physical screen.", failures);
+
+                var stepField = typeof(MobileWorkoutPrototypeView).GetField(
+                    "currentStep",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                var renderMethod = typeof(MobileWorkoutPrototypeView).GetMethod(
+                    "RenderCurrentStep",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                if (stepField != null && renderMethod != null)
+                {
+                    stepField.SetValue(view, Enum.ToObject(stepField.FieldType, 3));
+                    renderMethod.Invoke(view, null);
+                }
+
+                var preview = documentRoot?.Q<Image>("camera-or-replay-preview");
+                var overlay = documentRoot?.Q<VisualElement>("pose-overlay");
+                Check(preview != null && overlay != null,
+                    "The session UI must create separate camera preview and pose overlay elements.", failures);
+                Check(preview != null && overlay != null && ReferenceEquals(preview.parent, overlay.parent),
+                    "The pose overlay must be a sibling of the raw camera preview.", failures);
             }
             finally
             {
                 UnityEngine.Object.DestroyImmediate(host);
+            }
+        }
+
+        private static void VerifyPosePreviewCoordinateMapping(ICollection<string> failures)
+        {
+            var mapMethod = typeof(MobileWorkoutPrototypeView).GetMethod(
+                "ToPreviewPoint",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            var scaleMethod = typeof(MobileWorkoutPrototypeView).GetMethod(
+                "ResolvePreviewScale",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Check(mapMethod != null, "The mobile pose coordinate mapper must exist.", failures);
+            Check(scaleMethod != null, "The raw camera preview transform mapper must exist.", failures);
+            if (mapMethod == null || scaleMethod == null)
+            {
+                return;
+            }
+
+            var rect = new Rect(0f, 0f, 100f, 200f);
+            var asymmetricJoint = new TrackedJoint { x = 0.2f, y = 0.3f };
+            var centerJoint = new TrackedJoint { x = 0.5f, y = 0.5f };
+            var rearPoint = (Vector2)mapMethod.Invoke(null, new object[] { asymmetricJoint, rect, false });
+            var frontPoint = (Vector2)mapMethod.Invoke(null, new object[] { asymmetricJoint, rect, true });
+            var frontCenter = (Vector2)mapMethod.Invoke(null, new object[] { centerJoint, rect, true });
+
+            Check(Mathf.Abs(rearPoint.x - 20f) < 0.01f && Mathf.Abs(rearPoint.y - 60f) < 0.01f,
+                "Rear-camera landmarks must preserve upright normalized coordinates.", failures);
+            Check(Mathf.Abs(frontPoint.x - 80f) < 0.01f && Mathf.Abs(frontPoint.y - 60f) < 0.01f,
+                "Front-camera landmarks must mirror only the display X coordinate.", failures);
+            Check(Mathf.Abs(frontCenter.x - 50f) < 0.01f && Mathf.Abs(frontCenter.y - 100f) < 0.01f,
+                "Front-camera mirroring must keep the center landmark fixed.", failures);
+
+            foreach (var rotation in new[] { 0, 90, 180, 270 })
+            {
+                foreach (var verticallyMirrored in new[] { false, true })
+                {
+                    foreach (var selfieMirrored in new[] { false, true })
+                    {
+                        var actual = (Vector3)scaleMethod.Invoke(
+                            null,
+                            new object[] { rotation, verticallyMirrored, selfieMirrored });
+                        var quarterTurn = rotation == 90 || rotation == 270;
+                        var expectedX = selfieMirrored && !quarterTurn ? -1f : 1f;
+                        var expectedY = verticallyMirrored ? -1f : 1f;
+                        if (selfieMirrored && quarterTurn)
+                        {
+                            expectedY *= -1f;
+                        }
+
+                        Check(Mathf.Approximately(actual.x, expectedX) &&
+                              Mathf.Approximately(actual.y, expectedY),
+                            "Camera preview transform mismatch for rotation " + rotation +
+                            ", verticalMirror=" + verticallyMirrored +
+                            ", selfieMirror=" + selfieMirrored + ".",
+                            failures);
+                    }
+                }
             }
         }
 

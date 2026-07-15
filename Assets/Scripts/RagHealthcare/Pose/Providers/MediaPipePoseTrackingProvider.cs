@@ -382,6 +382,12 @@ namespace Rag.Healthcare.Pose.Providers
         public override void CancelPendingEstimate()
         {
 #if !AHC_USE_HOMULER_MEDIAPIPE
+            // A Stop/Start pair starts a new lifecycle budget. A transient busy
+            // period from the request being drained must not inherit the previous
+            // session's timeout window or consume its only recovery attempt.
+            asyncBusyStartedAt = -1f;
+            consecutiveAsyncRecoveryCount = 0;
+
             // Initialization and timeout recovery may be creating a GPU graph on a
             // worker thread. Calling into the bridge here would wait on its state lock
             // and freeze Unity, so let that operation finish naturally.

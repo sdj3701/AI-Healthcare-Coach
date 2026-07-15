@@ -78,6 +78,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
     private var preparingGeneration: Int64?
     private var preparingLegacyWaiter: AHCLegacyPoseWaiter?
     private var inFlightSubmission: AHCPoseSubmission?
+    private var cancelRequested = false
     private var lastSubmittedTimestamp = -1
 
     private let maximumImageDimension = 8_192
@@ -168,6 +169,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             preparingGeneration = nil
             preparingLegacyWaiter = nil
             inFlightSubmission = nil
+            cancelRequested = false
             resultStatus = 0
             lastError = ""
             latestJson = "{}"
@@ -258,23 +260,24 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
     func cancelPending() {
         stateLock.lock()
         let hadPendingWork = preparingGeneration != nil || inFlightSubmission != nil
-        advanceGenerationLocked()
 
         // MediaPipe does not expose cancellation for a submitted live-stream
-        // frame. Keep the physical request as the sole in-flight frame until its
-        // callback arrives, but make its generation stale immediately.
+        // frame. Keep the managed request waiting until preparation or the callback
+        // has physically drained the one-frame slot. Publishing cancellation here
+        // would let a new Start race the still-busy native graph.
         preparingLegacyWaiter?.complete(with: -16)
         inFlightSubmission?.legacyWaiter?.complete(with: -16)
         if hadPendingWork {
-            publishErrorLocked(
-                status: -16,
-                code: "PROCESS_CANCELLED",
-                message: "Pose inference was cancelled."
-            )
-        } else {
+            cancelRequested = true
             resultStatus = 0
             latestJson = "{}"
             lastError = ""
+        } else {
+            cancelRequested = false
+            // The native callback may have published Ready just before Stop while
+            // Unity has not consumed it yet. Replace any terminal result with
+            // cancellation so the managed request always wakes and discards it.
+            publishCancellationLocked()
         }
         stateLock.unlock()
     }
@@ -290,6 +293,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         inFlightSubmission = nil
         preparingGeneration = nil
         preparingLegacyWaiter = nil
+        cancelRequested = false
         lastSubmittedTimestamp = -1
         resultStatus = 0
         latestJson = "{}"
@@ -379,6 +383,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         let landmarkerIdentifier = ObjectIdentifier(landmarker)
         preparingGeneration = submissionGeneration
         preparingLegacyWaiter = legacyWaiter
+        cancelRequested = false
         resultStatus = 0
         lastError = ""
         stateLock.unlock()
@@ -431,15 +436,20 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
 
         guard let image = image else {
             stateLock.lock()
-            if preparingGeneration == submissionGeneration {
+            let isCurrentPreparation = preparingGeneration == submissionGeneration
+            if isCurrentPreparation {
                 preparingGeneration = nil
                 preparingLegacyWaiter = nil
             }
 
             let status: Int32
-            if generation == submissionGeneration,
-               let currentLandmarker = poseLandmarker,
-               ObjectIdentifier(currentLandmarker) == landmarkerIdentifier {
+            let isCurrentGraph = generation == submissionGeneration &&
+                poseLandmarker.map { ObjectIdentifier($0) == landmarkerIdentifier } == true
+            if isCurrentPreparation && cancelRequested && isCurrentGraph {
+                status = -16
+                cancelRequested = false
+                publishCancellationLocked()
+            } else if isCurrentGraph {
                 status = -12
                 publishErrorLocked(
                     status: status,
@@ -456,15 +466,25 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         }
 
         stateLock.lock()
-        guard preparingGeneration == submissionGeneration,
-              generation == submissionGeneration,
-              let currentLandmarker = poseLandmarker,
-              ObjectIdentifier(currentLandmarker) == landmarkerIdentifier else {
-            if preparingGeneration == submissionGeneration {
+        let isCurrentPreparation = preparingGeneration == submissionGeneration
+        let isCurrentGraph = generation == submissionGeneration &&
+            poseLandmarker.map { ObjectIdentifier($0) == landmarkerIdentifier } == true
+        guard isCurrentPreparation, isCurrentGraph, !cancelRequested else {
+            if isCurrentPreparation {
                 preparingGeneration = nil
                 preparingLegacyWaiter = nil
             }
-            legacyWaiter?.complete(with: -16)
+
+            let status: Int32
+            if isCurrentPreparation && cancelRequested && isCurrentGraph {
+                status = -16
+                cancelRequested = false
+                publishCancellationLocked()
+            } else {
+                status = -16
+            }
+
+            legacyWaiter?.complete(with: status)
             stateLock.unlock()
             return
         }
@@ -516,9 +536,13 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             let status: Int32
             if isCurrentSubmission {
                 inFlightSubmission = nil
-                if generation == submissionGeneration,
-                   let currentLandmarker = poseLandmarker,
-                   ObjectIdentifier(currentLandmarker) == landmarkerIdentifier {
+                let isCurrentGraph = generation == submissionGeneration &&
+                    poseLandmarker.map { ObjectIdentifier($0) == landmarkerIdentifier } == true
+                if cancelRequested && isCurrentGraph {
+                    status = -16
+                    cancelRequested = false
+                    publishCancellationLocked()
+                } else if isCurrentGraph {
                     status = -13
                     publishErrorLocked(
                         status: status,
@@ -559,6 +583,15 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             stateLock.unlock()
             return
         }
+
+        if cancelRequested {
+            inFlightSubmission = nil
+            cancelRequested = false
+            publishCancellationLocked()
+            submission.legacyWaiter?.complete(with: -16)
+            stateLock.unlock()
+            return
+        }
         stateLock.unlock()
 
         let completionStatus: Int32
@@ -592,9 +625,13 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         }
 
         inFlightSubmission = nil
-        if generation == submission.generation,
-           let currentLandmarker = poseLandmarker,
-           ObjectIdentifier(currentLandmarker) == submission.landmarkerIdentifier {
+        let isCurrentGraph = generation == submission.generation &&
+            poseLandmarker.map { ObjectIdentifier($0) == submission.landmarkerIdentifier } == true
+        if cancelRequested && isCurrentGraph {
+            cancelRequested = false
+            publishCancellationLocked()
+            submission.legacyWaiter?.complete(with: -16)
+        } else if isCurrentGraph {
             latestJson = generatedJson
             lastError = generatedError
             resultStatus = completionStatus == 0 ? 1 : completionStatus
@@ -623,10 +660,9 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             return waiter.status ?? -15
         }
 
-        // Invalidate queued preparation or the eventual callback, but keep the
-        // physical work marked active until its queue task/callback drains. This
-        // prevents MediaPipe from silently dropping a replacement frame.
-        advanceGenerationLocked()
+        // Keep the lifecycle generation intact so the physical work can drain its
+        // slot. Disposal/recovery remain the only operations that replace a graph.
+        cancelRequested = true
         publishErrorLocked(
             status: -15,
             code: "PROCESS_TIMEOUT",
@@ -876,6 +912,14 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         lastError = message
         latestJson = errorJson(code: code, message: message)
         resultStatus = status
+    }
+
+    private func publishCancellationLocked() {
+        publishErrorLocked(
+            status: -16,
+            code: "PROCESS_CANCELLED",
+            message: "Pose inference was cancelled."
+        )
     }
 
     private func advanceGenerationLocked() {

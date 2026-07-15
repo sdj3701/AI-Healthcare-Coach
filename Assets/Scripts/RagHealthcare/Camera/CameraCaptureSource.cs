@@ -29,11 +29,19 @@ namespace Rag.Healthcare.Camera
         private bool isQuitting;
         private int lifecycleVersion;
         private float nextAllowedStartTime;
+        private Coroutine switchCameraCoroutine;
+        private Action<bool, string> switchCameraCompletion;
+        private bool isSwitchingCamera;
+        private int switchOperationVersion;
+        private bool hasExplicitCameraSelection;
+        private bool explicitCameraIsFrontFacing;
+        private string explicitCameraDeviceName = string.Empty;
 
         public event Action<Texture> PreviewTextureChanged;
 
         public bool IsRunning => webCamTexture != null && webCamTexture.isPlaying;
         public bool IsStarting => isStarting;
+        public bool IsSwitchingCamera => isSwitchingCamera;
         public string ActiveDeviceName => activeDeviceName;
         public bool ActiveCameraIsFrontFacing => activeCameraIsFrontFacing;
         public bool PreferFrontCamera => preferFrontCamera;
@@ -58,6 +66,7 @@ namespace Rag.Healthcare.Camera
 
         private void OnDestroy()
         {
+            CancelActiveCameraSwitch("Camera source was destroyed.");
             resumeCameraAfterPause = false;
             StopCameraInternal(false);
 
@@ -68,11 +77,19 @@ namespace Rag.Healthcare.Camera
             }
         }
 
+        private void OnDisable()
+        {
+            CancelActiveCameraSwitch("Camera source was disabled.");
+            resumeCameraAfterPause = false;
+            StopCameraInternal(false);
+        }
+
         private void OnApplicationPause(bool pauseStatus)
         {
             if (pauseStatus)
             {
                 resumeCameraAfterPause = IsRunning || isStarting;
+                CancelActiveCameraSwitch("Camera switch was cancelled while the app paused.");
                 if (resumeCameraAfterPause)
                 {
                     StopCameraInternal(true);
@@ -92,6 +109,7 @@ namespace Rag.Healthcare.Camera
 
         private void OnApplicationQuit()
         {
+            CancelActiveCameraSwitch("Camera switch was cancelled while the app was quitting.");
             isQuitting = true;
             resumeCameraAfterPause = false;
         }
@@ -144,6 +162,140 @@ namespace Rag.Healthcare.Camera
             preferFrontCamera = !preferFrontCamera;
         }
 
+        public bool IsCameraFacingAvailable(bool frontFacing, out string error)
+        {
+            error = string.Empty;
+
+            WebCamDevice[] devices;
+            try
+            {
+                devices = WebCamTexture.devices;
+            }
+            catch (Exception exception)
+            {
+                error = "Camera devices could not be queried: " + exception.Message;
+                return false;
+            }
+
+            if (devices == null || devices.Length == 0)
+            {
+                error = "No camera device was found.";
+                return false;
+            }
+
+            if (TryResolveCameraForFacing(devices, frontFacing, out _))
+            {
+                return true;
+            }
+
+            error = frontFacing
+                ? "A front-facing camera is not available."
+                : "A rear-facing camera is not available.";
+            return false;
+        }
+
+        /// <summary>
+        /// Starts the camera when necessary and waits until a valid frame is available,
+        /// startup fails, the request is superseded, or the startup timeout expires.
+        /// </summary>
+        public IEnumerator EnsureCameraReady(Action<bool, string> onCompleted)
+        {
+            if (HasValidFrame)
+            {
+                InvokeCameraOperationCompleted(onCompleted, true, string.Empty);
+                yield break;
+            }
+
+            if (isQuitting || !isActiveAndEnabled)
+            {
+                const string inactiveError = "Camera source is not active.";
+                LastError = inactiveError;
+                InvokeCameraOperationCompleted(onCompleted, false, inactiveError);
+                yield break;
+            }
+
+            if (!isStarting && !IsRunning && !StartCamera())
+            {
+                var startError = string.IsNullOrWhiteSpace(LastError)
+                    ? "Camera could not be started."
+                    : LastError;
+                InvokeCameraOperationCompleted(onCompleted, false, startError);
+                yield break;
+            }
+
+            var readyLifecycleVersion = lifecycleVersion;
+            while (true)
+            {
+                if (HasValidFrame)
+                {
+                    InvokeCameraOperationCompleted(onCompleted, true, string.Empty);
+                    yield break;
+                }
+
+                if (lifecycleVersion != readyLifecycleVersion)
+                {
+                    InvokeCameraOperationCompleted(onCompleted, false, "Camera startup was cancelled.");
+                    yield break;
+                }
+
+                if (!isStarting)
+                {
+                    var failedError = string.IsNullOrWhiteSpace(LastError)
+                        ? "Camera stopped before a valid frame was received."
+                        : LastError;
+                    InvokeCameraOperationCompleted(onCompleted, false, failedError);
+                    yield break;
+                }
+
+                yield return null;
+            }
+        }
+
+        /// <summary>
+        /// Owns the complete camera-facing transition. The returned coroutine can be
+        /// yielded by callers; completion is reported after the replacement camera has
+        /// delivered a valid frame or after recovery has finished.
+        /// </summary>
+        public Coroutine SwitchCameraFacing(bool targetFront, Action<bool, string> onCompleted)
+        {
+            if (isQuitting || !isActiveAndEnabled)
+            {
+                InvokeCameraOperationCompleted(onCompleted, false, "Camera source is not active.");
+                return null;
+            }
+
+            if (isSwitchingCamera)
+            {
+                InvokeCameraOperationCompleted(onCompleted, false, "A camera switch is already in progress.");
+                return null;
+            }
+
+            isSwitchingCamera = true;
+            switchCameraCompletion = onCompleted;
+            var operationVersion = ++switchOperationVersion;
+
+            try
+            {
+                var coroutine = StartCoroutine(SwitchCameraFacingRoutine(targetFront, operationVersion, onCompleted));
+                switchCameraCoroutine = isSwitchingCamera && operationVersion == switchOperationVersion
+                    ? coroutine
+                    : null;
+                return coroutine;
+            }
+            catch (Exception exception)
+            {
+                isSwitchingCamera = false;
+                switchCameraCoroutine = null;
+                switchCameraCompletion = null;
+                ClearExplicitCameraSelection();
+                var error = "Camera switch could not be started: " + exception.Message;
+                LastError = error;
+                Debug.LogWarning("[CameraCaptureSource] " + error);
+                InvokeCameraOperationCompleted(onCompleted, false, error);
+                return null;
+            }
+        }
+
         public void ConfigureCapture(int width, int height, int fps)
         {
             requestedWidth = Mathf.Max(16, width);
@@ -153,94 +305,129 @@ namespace Rag.Healthcare.Camera
 
         private IEnumerator StartCameraRoutine(int startVersion)
         {
-            while (IsCurrentStart(startVersion) && Time.realtimeSinceStartup < nextAllowedStartTime)
-            {
-                yield return null;
-            }
-
-            if (!IsCurrentStart(startVersion))
-            {
-                yield break;
-            }
-
-            if (!Application.HasUserAuthorization(UserAuthorization.WebCam))
-            {
-                yield return Application.RequestUserAuthorization(UserAuthorization.WebCam);
-            }
-
-            if (!IsCurrentStart(startVersion))
-            {
-                yield break;
-            }
-
-            if (!Application.HasUserAuthorization(UserAuthorization.WebCam))
-            {
-                FailStart(startVersion, "Camera permission was denied.", null);
-                yield break;
-            }
-
-            var devices = WebCamTexture.devices;
-            if (devices == null || devices.Length == 0)
-            {
-                FailStart(startVersion, "No camera device was found.", null);
-                yield break;
-            }
-
-            WebCamTexture candidateTexture = null;
             try
             {
-                var selectedDevice = ResolveCameraDevice(devices);
-                activeCameraIsFrontFacing = selectedDevice.isFrontFacing;
-                activeDeviceName = selectedDevice.name;
-                candidateTexture = string.IsNullOrWhiteSpace(activeDeviceName)
-                    ? new WebCamTexture(Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps))
-                    : new WebCamTexture(activeDeviceName, Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps));
+                while (IsCurrentStart(startVersion) && Time.realtimeSinceStartup < nextAllowedStartTime)
+                {
+                    yield return null;
+                }
 
                 if (!IsCurrentStart(startVersion))
                 {
-                    ReleaseCameraTexture(candidateTexture);
                     yield break;
                 }
 
-                webCamTexture = candidateTexture;
-                candidateTexture.Play();
-            }
-            catch (Exception exception)
-            {
-                FailStart(startVersion, "Camera failed to start: " + exception.Message, candidateTexture);
-                yield break;
-            }
-
-            var firstFrameDeadline = Time.realtimeSinceStartup + Mathf.Max(1f, firstFrameTimeoutSeconds);
-            while (IsCurrentStart(startVersion) && Time.realtimeSinceStartup < firstFrameDeadline)
-            {
-                if (candidateTexture != null &&
-                    candidateTexture.isPlaying &&
-                    candidateTexture.didUpdateThisFrame &&
-                    candidateTexture.width > 16 &&
-                    candidateTexture.height > 16)
+                if (!Application.HasUserAuthorization(UserAuthorization.WebCam))
                 {
-                    hasReceivedFirstFrame = true;
-                    CompleteStart(startVersion);
-                    NotifyPreviewTextureChanged(candidateTexture);
+                    yield return Application.RequestUserAuthorization(UserAuthorization.WebCam);
+                }
+
+                if (!IsCurrentStart(startVersion))
+                {
                     yield break;
                 }
 
-                yield return null;
-            }
+                if (!Application.HasUserAuthorization(UserAuthorization.WebCam))
+                {
+                    FailStart(startVersion, "Camera permission was denied.", null);
+                    yield break;
+                }
 
-            if (IsCurrentStart(startVersion))
+                WebCamDevice[] devices;
+                try
+                {
+                    devices = WebCamTexture.devices;
+                }
+                catch (Exception exception)
+                {
+                    FailStart(startVersion, "Camera devices could not be queried: " + exception.Message, null);
+                    yield break;
+                }
+
+                if (devices == null || devices.Length == 0)
+                {
+                    FailStart(startVersion, "No camera device was found.", null);
+                    yield break;
+                }
+
+                WebCamTexture candidateTexture = null;
+                try
+                {
+                    var selectedDevice = ResolveCameraDevice(devices);
+                    activeCameraIsFrontFacing = selectedDevice.isFrontFacing;
+                    activeDeviceName = selectedDevice.name;
+                    candidateTexture = string.IsNullOrWhiteSpace(activeDeviceName)
+                        ? new WebCamTexture(Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps))
+                        : new WebCamTexture(activeDeviceName, Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps));
+
+                    if (!IsCurrentStart(startVersion))
+                    {
+                        ReleaseCameraTexture(candidateTexture);
+                        yield break;
+                    }
+
+                    webCamTexture = candidateTexture;
+                    candidateTexture.Play();
+                }
+                catch (Exception exception)
+                {
+                    FailStart(startVersion, "Camera failed to start: " + exception.Message, candidateTexture);
+                    yield break;
+                }
+
+                var firstFrameDeadline = Time.realtimeSinceStartup + Mathf.Max(1f, firstFrameTimeoutSeconds);
+                while (IsCurrentStart(startVersion) && Time.realtimeSinceStartup < firstFrameDeadline)
+                {
+                    bool hasValidCandidateFrame;
+                    try
+                    {
+                        hasValidCandidateFrame = candidateTexture != null &&
+                                                 candidateTexture.isPlaying &&
+                                                 candidateTexture.didUpdateThisFrame &&
+                                                 candidateTexture.width > 16 &&
+                                                 candidateTexture.height > 16;
+                    }
+                    catch (Exception exception)
+                    {
+                        FailStart(startVersion, "Camera frame access failed: " + exception.Message, candidateTexture);
+                        yield break;
+                    }
+
+                    if (hasValidCandidateFrame)
+                    {
+                        hasReceivedFirstFrame = true;
+                        CompleteStart(startVersion);
+                        NotifyPreviewTextureChanged(candidateTexture);
+                        yield break;
+                    }
+
+                    yield return null;
+                }
+
+                if (IsCurrentStart(startVersion))
+                {
+                    FailStart(
+                        startVersion,
+                        "Camera did not provide a valid frame within " +
+                        Mathf.Max(1f, firstFrameTimeoutSeconds).ToString("0.#") + " seconds.",
+                        candidateTexture);
+                }
+            }
+            finally
             {
-                FailStart(
-                    startVersion,
-                    "Camera did not provide a valid frame within " +
-                    Mathf.Max(1f, firstFrameTimeoutSeconds).ToString("0.#") + " seconds.",
-                    candidateTexture);
+                // Unity exceptions raised after a yield do not return through the
+                // StartCamera call-site. Always release the starting flag so a later
+                // START or screen re-entry can retry instead of remaining wedged.
+                if (IsCurrentStart(startVersion))
+                {
+                    FailStart(startVersion, "Camera startup ended unexpectedly.", webCamTexture);
+                }
             }
         }
 
         public void StopCamera()
         {
+            CancelActiveCameraSwitch("Camera switch was cancelled because the camera stopped.");
             resumeCameraAfterPause = false;
             StopCameraInternal(false);
         }
@@ -309,6 +496,29 @@ namespace Rag.Healthcare.Camera
 
         private WebCamDevice ResolveCameraDevice(WebCamDevice[] devices)
         {
+            // An explicit user-facing switch must win over an Inspector-pinned device.
+            // The exact device chosen during preflight is preferred so multi-lens rear
+            // cameras do not silently resolve to a different device during restart.
+            if (hasExplicitCameraSelection)
+            {
+                if (!string.IsNullOrWhiteSpace(explicitCameraDeviceName))
+                {
+                    foreach (var device in devices)
+                    {
+                        if (device.isFrontFacing == explicitCameraIsFrontFacing &&
+                            string.Equals(device.name, explicitCameraDeviceName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return device;
+                        }
+                    }
+                }
+
+                if (TryResolveCameraForFacing(devices, explicitCameraIsFrontFacing, out var explicitDevice))
+                {
+                    return explicitDevice;
+                }
+            }
+
             if (!string.IsNullOrWhiteSpace(cameraDeviceName))
             {
                 foreach (var device in devices)
@@ -320,15 +530,259 @@ namespace Rag.Healthcare.Camera
                 }
             }
 
-            foreach (var device in devices)
+            if (TryResolveCameraForFacing(devices, preferFrontCamera, out var preferredDevice))
             {
-                if (device.isFrontFacing == preferFrontCamera)
-                {
-                    return device;
-                }
+                return preferredDevice;
             }
 
             return devices[0];
+        }
+
+        private IEnumerator SwitchCameraFacingRoutine(
+            bool targetFront,
+            int operationVersion,
+            Action<bool, string> onCompleted)
+        {
+            // Make sure SwitchCameraFacing can publish its Coroutine handle before any
+            // preflight failure completes this iterator.
+            yield return null;
+
+            if (operationVersion != switchOperationVersion || !isActiveAndEnabled)
+            {
+                yield break;
+            }
+
+            var originalPreference = preferFrontCamera;
+            var originalFacing = HasValidFrame ? activeCameraIsFrontFacing : preferFrontCamera;
+            var originalDeviceName = activeDeviceName;
+            var restorePreviousCamera = IsRunning || isStarting;
+            var completionSent = false;
+
+            try
+            {
+                if (!TryGetCameraForFacing(targetFront, out var targetDevice, out var preflightError))
+                {
+                    completionSent = true;
+                    CompleteCameraSwitchState(operationVersion);
+                    InvokeCameraOperationCompleted(onCompleted, false, preflightError);
+                    yield break;
+                }
+
+                if (HasValidFrame && activeCameraIsFrontFacing == targetFront)
+                {
+                    preferFrontCamera = targetFront;
+                    completionSent = true;
+                    CompleteCameraSwitchState(operationVersion);
+                    InvokeCameraOperationCompleted(onCompleted, true, string.Empty);
+                    yield break;
+                }
+
+                SetExplicitCameraSelection(targetDevice.name, targetFront);
+                StopCameraInternal(false);
+
+                bool targetReady = false;
+                string targetError = string.Empty;
+                yield return EnsureCameraReady((success, error) =>
+                {
+                    targetReady = success;
+                    targetError = error;
+                });
+
+                if (operationVersion != switchOperationVersion)
+                {
+                    yield break;
+                }
+
+                if (targetReady && HasValidFrame && activeCameraIsFrontFacing == targetFront)
+                {
+                    preferFrontCamera = targetFront;
+                    completionSent = true;
+                    CompleteCameraSwitchState(operationVersion);
+                    InvokeCameraOperationCompleted(onCompleted, true, string.Empty);
+                    yield break;
+                }
+
+                if (targetReady)
+                {
+                    targetError = targetFront
+                        ? "The camera started, but it did not activate the requested front-facing device."
+                        : "The camera started, but it did not activate the requested rear-facing device.";
+                }
+                else if (string.IsNullOrWhiteSpace(targetError))
+                {
+                    targetError = "The requested camera failed to start.";
+                }
+
+                preferFrontCamera = originalPreference;
+                ClearExplicitCameraSelection();
+
+                if (!restorePreviousCamera)
+                {
+                    StopCameraInternal(false);
+                    completionSent = true;
+                    CompleteCameraSwitchState(operationVersion);
+                    InvokeCameraOperationCompleted(onCompleted, false, targetError);
+                    yield break;
+                }
+
+                StopCameraInternal(false);
+                SetExplicitCameraSelection(originalDeviceName, originalFacing);
+
+                bool recoveryReady = false;
+                string recoveryError = string.Empty;
+                yield return EnsureCameraReady((success, error) =>
+                {
+                    recoveryReady = success;
+                    recoveryError = error;
+                });
+
+                var recoveredOriginalFacing = recoveryReady &&
+                                             HasValidFrame &&
+                                             activeCameraIsFrontFacing == originalFacing;
+                var finalError = recoveredOriginalFacing
+                    ? targetError + " The previous camera was restored."
+                    : targetError + " Previous camera recovery also failed: " +
+                      (string.IsNullOrWhiteSpace(recoveryError) ? "unknown error" : recoveryError);
+
+                completionSent = true;
+                CompleteCameraSwitchState(operationVersion);
+                InvokeCameraOperationCompleted(onCompleted, false, finalError);
+            }
+            finally
+            {
+                if (operationVersion == switchOperationVersion)
+                {
+                    if (!completionSent)
+                    {
+                        CompleteCameraSwitchState(operationVersion);
+                        InvokeCameraOperationCompleted(onCompleted, false, "Camera switch did not complete.");
+                    }
+                    else
+                    {
+                        CompleteCameraSwitchState(operationVersion);
+                    }
+                }
+            }
+        }
+
+        private void CompleteCameraSwitchState(int operationVersion)
+        {
+            if (operationVersion != switchOperationVersion)
+            {
+                return;
+            }
+
+            ClearExplicitCameraSelection();
+            isSwitchingCamera = false;
+            switchCameraCoroutine = null;
+            switchCameraCompletion = null;
+        }
+
+        private void CancelActiveCameraSwitch(string error)
+        {
+            switchOperationVersion++;
+            if (!isSwitchingCamera && switchCameraCoroutine == null)
+            {
+                ClearExplicitCameraSelection();
+                return;
+            }
+
+            var coroutine = switchCameraCoroutine;
+            var completion = switchCameraCompletion;
+            switchCameraCoroutine = null;
+            switchCameraCompletion = null;
+            isSwitchingCamera = false;
+            ClearExplicitCameraSelection();
+
+            if (coroutine != null)
+            {
+                StopCoroutine(coroutine);
+            }
+
+            InvokeCameraOperationCompleted(completion, false, error);
+        }
+
+        private bool TryGetCameraForFacing(bool frontFacing, out WebCamDevice device, out string error)
+        {
+            device = default;
+            error = string.Empty;
+
+            WebCamDevice[] devices;
+            try
+            {
+                devices = WebCamTexture.devices;
+            }
+            catch (Exception exception)
+            {
+                error = "Camera devices could not be queried: " + exception.Message;
+                return false;
+            }
+
+            if (devices == null || devices.Length == 0)
+            {
+                error = "No camera device was found.";
+                return false;
+            }
+
+            if (TryResolveCameraForFacing(devices, frontFacing, out device))
+            {
+                return true;
+            }
+
+            error = frontFacing
+                ? "A front-facing camera is not available."
+                : "A rear-facing camera is not available.";
+            return false;
+        }
+
+        private static bool TryResolveCameraForFacing(
+            WebCamDevice[] devices,
+            bool frontFacing,
+            out WebCamDevice selectedDevice)
+        {
+            if (devices != null)
+            {
+                foreach (var device in devices)
+                {
+                    if (device.isFrontFacing == frontFacing)
+                    {
+                        selectedDevice = device;
+                        return true;
+                    }
+                }
+            }
+
+            selectedDevice = default;
+            return false;
+        }
+
+        private void SetExplicitCameraSelection(string deviceName, bool frontFacing)
+        {
+            hasExplicitCameraSelection = true;
+            explicitCameraIsFrontFacing = frontFacing;
+            explicitCameraDeviceName = deviceName ?? string.Empty;
+        }
+
+        private void ClearExplicitCameraSelection()
+        {
+            hasExplicitCameraSelection = false;
+            explicitCameraIsFrontFacing = false;
+            explicitCameraDeviceName = string.Empty;
+        }
+
+        private void InvokeCameraOperationCompleted(
+            Action<bool, string> onCompleted,
+            bool success,
+            string error)
+        {
+            try
+            {
+                onCompleted?.Invoke(success, error ?? string.Empty);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception, this);
+            }
         }
 
         private bool IsCurrentStart(int startVersion)

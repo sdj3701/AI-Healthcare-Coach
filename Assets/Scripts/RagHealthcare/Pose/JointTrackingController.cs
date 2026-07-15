@@ -40,13 +40,21 @@ namespace Rag.Healthcare.Pose
         private string lastLoggedFailure = string.Empty;
         private int lastSampledCameraTextureId;
         private uint lastSampledCameraUpdateCount;
+        private int trackingEpoch;
 
         public event Action<JointTrackingFrame> TrackingFrameReceived;
         public event Action<string> TrackingFailed;
 
         public JointTrackingFrame LatestFrame { get; private set; }
         public bool IsTracking => isTracking;
+        public bool IsStartRequested => trackingRequested;
         public bool IsRequestInFlight => isRequestInFlight;
+        public bool IsStopping { get; private set; }
+        public bool IsIdle => !isTracking &&
+                              !isRequestInFlight &&
+                              startCoroutine == null &&
+                              trackingCoroutine == null &&
+                              singleFrameCoroutine == null;
         public PoseTrackingBackend Backend => backend;
         public PoseTrackingProvider TrackingProvider => trackingProvider;
         public float PoseFps { get; private set; }
@@ -103,13 +111,28 @@ namespace Rag.Healthcare.Pose
 
         public void StartTracking()
         {
+            var wasRequested = trackingRequested;
             trackingRequested = true;
 
             if (isTracking || startCoroutine != null || trackingCoroutine != null)
             {
+                // A Start received while the previous tracking loop is draining is
+                // intentionally retained. TrackingLoop starts the new epoch after its
+                // physical native request has finished.
+                if (!wasRequested)
+                {
+                    AdvanceTrackingEpoch();
+                }
+
                 return;
             }
 
+            if (!wasRequested)
+            {
+                AdvanceTrackingEpoch();
+            }
+
+            IsStopping = false;
             startCoroutine = StartCoroutine(StartTrackingRoutine());
         }
 
@@ -118,6 +141,11 @@ namespace Rag.Healthcare.Pose
             resumeTrackingAfterPause = false;
             trackingRequested = false;
             isTracking = false;
+            AdvanceTrackingEpoch();
+            IsStopping = startCoroutine != null ||
+                         trackingCoroutine != null ||
+                         singleFrameCoroutine != null ||
+                         isRequestInFlight;
             trackingProvider?.CancelPendingEstimate();
 
             if (startCoroutine != null)
@@ -135,7 +163,9 @@ namespace Rag.Healthcare.Pose
             // Keep the provider warm between ordinary Stop/Start operations. Repeatedly
             // destroying the native PoseLandmarker while the camera session is settling
             // is both expensive and unsafe on iOS. The provider is disposed in OnDestroy.
+            LatestFrame = null;
             LastInferenceMilliseconds = 0f;
+            RefreshStoppingState();
         }
 
         public void RequestSingleTrackingFrame()
@@ -210,6 +240,8 @@ namespace Rag.Healthcare.Pose
                 {
                     isTracking = false;
                 }
+
+                RefreshStoppingState();
             }
         }
 
@@ -250,6 +282,7 @@ namespace Rag.Healthcare.Pose
             finally
             {
                 singleFrameCoroutine = null;
+                RefreshStoppingState();
             }
         }
 
@@ -295,6 +328,7 @@ namespace Rag.Healthcare.Pose
                 trackingCoroutine = null;
                 isTracking = false;
                 isRequestInFlight = false;
+                RefreshStoppingState();
             }
 
             if (trackingRequested && isActiveAndEnabled)
@@ -350,6 +384,7 @@ namespace Rag.Healthcare.Pose
             string error = null;
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var startedAt = Time.realtimeSinceStartup;
+            var estimateEpoch = trackingEpoch;
 
             try
             {
@@ -363,6 +398,14 @@ namespace Rag.Healthcare.Pose
             {
                 isRequestInFlight = false;
                 LastInferenceMilliseconds = (Time.realtimeSinceStartup - startedAt) * 1000f;
+            }
+
+            // Stop and a queued Start may both happen while the native request is
+            // draining. Never let that previous session's frame or cancellation
+            // error leak into the newly requested session.
+            if (estimateEpoch != trackingEpoch)
+            {
+                yield break;
             }
 
             // StopTracking cancels an in-flight native request with PROCESS_CANCELLED.
@@ -538,6 +581,7 @@ namespace Rag.Healthcare.Pose
 
         private void NotifyFailure(string message)
         {
+            LastTrackingError = message ?? string.Empty;
             if (ShouldLogFailure(message))
             {
                 Debug.LogWarning("[JointTrackingController] " + message);
@@ -584,6 +628,29 @@ namespace Rag.Healthcare.Pose
             }
 
             return false;
+        }
+
+        private void AdvanceTrackingEpoch()
+        {
+            unchecked
+            {
+                trackingEpoch++;
+                if (trackingEpoch == 0)
+                {
+                    trackingEpoch = 1;
+                }
+            }
+        }
+
+        private void RefreshStoppingState()
+        {
+            if (startCoroutine == null &&
+                trackingCoroutine == null &&
+                singleFrameCoroutine == null &&
+                !isRequestInFlight)
+            {
+                IsStopping = false;
+            }
         }
     }
 }
