@@ -38,7 +38,7 @@ namespace Rag.Healthcare.Rag.Runtime
         }
 
         private readonly Dictionary<string, JointState> states =
-            new Dictionary<string, JointState>(StringComparer.OrdinalIgnoreCase);
+            new Dictionary<string, JointState>(PoseJointNames.MediaPipe33.Length, StringComparer.OrdinalIgnoreCase);
         private readonly JointTrackingFrame outputFrame = new JointTrackingFrame();
         private TrackedJoint[] outputJoints = Array.Empty<TrackedJoint>();
         private TrackedJoint[] jointPool = Array.Empty<TrackedJoint>();

@@ -5,7 +5,7 @@ using UnityEngine;
 
 namespace AIHealthcareCoach.MediaPipe
 {
-    public sealed class IOSMediaPipePoseEstimator : IPoseEstimator
+    public sealed class IOSMediaPipePoseEstimator : IPoseEstimator, IAsyncPoseEstimator
     {
 #if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal")]
@@ -26,6 +26,21 @@ namespace AIHealthcareCoach.MediaPipe
             int mirrored);
 
         [DllImport("__Internal")]
+        private static extern int AHC_PoseSubmitRgba(
+            IntPtr rgbaPixels,
+            int width,
+            int height,
+            long timestampMs,
+            int rotationAngle,
+            int mirrored);
+
+        [DllImport("__Internal")]
+        private static extern int AHC_PoseTryConsumeLatest();
+
+        [DllImport("__Internal")]
+        private static extern void AHC_PoseCancelPending();
+
+        [DllImport("__Internal")]
         private static extern int AHC_PoseGetLatestJson(StringBuilder buffer, int capacity);
 
         [DllImport("__Internal")]
@@ -43,6 +58,30 @@ namespace AIHealthcareCoach.MediaPipe
         private GCHandle pinnedPixelsHandle;
         private Color32[] pinnedPixels;
         private bool isReady;
+#if UNITY_IOS && !UNITY_EDITOR
+        private bool asyncApiAvailable = true;
+        private long pendingTimestampMs;
+        private InitializationSettings lastInitializationSettings;
+        private bool hasInitializationSettings;
+
+        private readonly struct InitializationSettings
+        {
+            public InitializationSettings(PoseEstimatorSettings settings)
+            {
+                ModelPath = settings.modelPath;
+                NumPoses = settings.numPoses;
+                MinPoseDetectionConfidence = settings.minPoseDetectionConfidence;
+                MinPosePresenceConfidence = settings.minPosePresenceConfidence;
+                MinTrackingConfidence = settings.minTrackingConfidence;
+            }
+
+            public string ModelPath { get; }
+            public int NumPoses { get; }
+            public float MinPoseDetectionConfidence { get; }
+            public float MinPosePresenceConfidence { get; }
+            public float MinTrackingConfidence { get; }
+        }
+#endif
 
         public string BackendName
         {
@@ -54,19 +93,41 @@ namespace AIHealthcareCoach.MediaPipe
             get { return isReady; }
         }
 
+        public bool SupportsAsyncProcessing
+        {
+            get
+            {
+#if UNITY_IOS && !UNITY_EDITOR
+                return isReady && asyncApiAvailable;
+#else
+                return false;
+#endif
+            }
+        }
+
         public string LastError { get; private set; }
 
         public bool Initialize(PoseEstimatorSettings settings)
         {
+            if (settings == null)
+            {
+                isReady = false;
+                LastError = "Pose estimator settings are missing.";
+                return false;
+            }
+
 #if UNITY_IOS && !UNITY_EDITOR
-            var code = AHC_PoseInitialize(
-                settings.modelPath,
-                settings.numPoses,
-                settings.minPoseDetectionConfidence,
-                settings.minPosePresenceConfidence,
-                settings.minTrackingConfidence);
+            var initializationSettings = new InitializationSettings(settings);
+            var code = InitializeNative(initializationSettings);
 
             isReady = code == 0;
+            asyncApiAvailable = true;
+            pendingTimestampMs = 0;
+            if (isReady)
+            {
+                lastInitializationSettings = initializationSettings;
+                hasInitializationSettings = true;
+            }
             LastError = isReady ? string.Empty : ReadLastError();
             return isReady;
 #else
@@ -126,47 +187,220 @@ namespace AIHealthcareCoach.MediaPipe
                 return false;
             }
 
-            if (!TryReadLatestJson(out var json, out var jsonError))
-            {
-                LastError = jsonError;
-                frame = LandmarkFrame.Empty(timestampMs, "EMPTY_NATIVE_RESULT", LastError);
-                return false;
-            }
-
-            try
-            {
-                frame = JsonUtility.FromJson<LandmarkFrame>(json);
-            }
-            catch (Exception exception)
-            {
-                LastError = "MediaPipe returned invalid JSON: " + exception.Message;
-                frame = LandmarkFrame.Empty(timestampMs, "INVALID_NATIVE_RESULT", LastError);
-                return false;
-            }
-
-            if (frame == null)
-            {
-                LastError = "MediaPipe returned an empty pose result.";
-                frame = LandmarkFrame.Empty(timestampMs, "INVALID_NATIVE_RESULT", LastError);
-                return false;
-            }
-
-            if (!string.IsNullOrEmpty(frame.errorCode))
-            {
-                LastError = frame.errorMessage;
-                return false;
-            }
-
-            LastError = string.Empty;
-            return true;
+            return TryParseLatestFrame(timestampMs, out frame);
 #else
             frame = LandmarkFrame.Empty(timestampMs, "IOS_BACKEND_UNAVAILABLE", LastError);
             return false;
 #endif
         }
 
+        public bool TrySubmitFrame(
+            Color32[] rgbaPixels,
+            int width,
+            int height,
+            long timestampMs,
+            bool mirrored,
+            int rotationAngle,
+            out string errorMessage)
+        {
+            errorMessage = string.Empty;
+#if UNITY_IOS && !UNITY_EDITOR
+            if (!isReady)
+            {
+                errorMessage = string.IsNullOrWhiteSpace(LastError)
+                    ? "Pose estimator is not initialized."
+                    : LastError;
+                return false;
+            }
+
+            if (!TryValidateFrame(rgbaPixels, width, height, out errorMessage))
+            {
+                LastError = errorMessage;
+                return false;
+            }
+
+            try
+            {
+                EnsurePixelsPinned(rgbaPixels);
+                var code = AHC_PoseSubmitRgba(
+                    pinnedPixelsHandle.AddrOfPinnedObject(),
+                    width,
+                    height,
+                    timestampMs,
+                    rotationAngle,
+                    mirrored ? 1 : 0);
+                if (code == 0)
+                {
+                    pendingTimestampMs = timestampMs;
+                    LastError = string.Empty;
+                    return true;
+                }
+
+                errorMessage = code == -14
+                    ? "MediaPipe is still processing the previous frame."
+                    : ReadLastError();
+                LastError = errorMessage;
+                return false;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                asyncApiAvailable = false;
+                errorMessage = "The exported iOS project does not contain the asynchronous pose bridge.";
+                LastError = errorMessage;
+                return false;
+            }
+            catch (Exception exception)
+            {
+                errorMessage = "Failed to submit the camera frame: " + exception.Message;
+                LastError = errorMessage;
+                return false;
+            }
+#else
+            errorMessage = "Asynchronous iOS MediaPipe is only available in an iOS device build.";
+            return false;
+#endif
+        }
+
+        public AsyncPoseResultStatus TryGetLatestResult(
+            out LandmarkFrame frame,
+            out string errorMessage)
+        {
+            frame = null;
+            errorMessage = string.Empty;
+#if UNITY_IOS && !UNITY_EDITOR
+            if (!isReady || !asyncApiAvailable)
+            {
+                errorMessage = string.IsNullOrWhiteSpace(LastError)
+                    ? "Pose estimator is not initialized."
+                    : LastError;
+                return AsyncPoseResultStatus.Failed;
+            }
+
+            try
+            {
+                var status = AHC_PoseTryConsumeLatest();
+                if (status == 0)
+                {
+                    return AsyncPoseResultStatus.Waiting;
+                }
+
+                if (status < 0)
+                {
+                    errorMessage = ReadLastError();
+                    LastError = errorMessage;
+                    pendingTimestampMs = 0;
+                    return AsyncPoseResultStatus.Failed;
+                }
+
+                var timestamp = pendingTimestampMs;
+                pendingTimestampMs = 0;
+                if (!TryParseLatestFrame(timestamp, out frame))
+                {
+                    errorMessage = LastError;
+                    return AsyncPoseResultStatus.Failed;
+                }
+
+                return AsyncPoseResultStatus.Ready;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                asyncApiAvailable = false;
+                errorMessage = "The exported iOS project does not contain the asynchronous pose bridge.";
+                LastError = errorMessage;
+                return AsyncPoseResultStatus.Failed;
+            }
+            catch (Exception exception)
+            {
+                errorMessage = "Failed to read the asynchronous pose result: " + exception.Message;
+                LastError = errorMessage;
+                pendingTimestampMs = 0;
+                return AsyncPoseResultStatus.Failed;
+            }
+#else
+            errorMessage = "Asynchronous iOS MediaPipe is only available in an iOS device build.";
+            return AsyncPoseResultStatus.Failed;
+#endif
+        }
+
+        public void CancelPendingFrame()
+        {
+#if UNITY_IOS && !UNITY_EDITOR
+            if (asyncApiAvailable)
+            {
+                try
+                {
+                    AHC_PoseCancelPending();
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    asyncApiAvailable = false;
+                }
+            }
+            pendingTimestampMs = 0;
+#endif
+        }
+
+        public bool TryRecoverFromTimeout(out string errorMessage)
+        {
+            errorMessage = string.Empty;
+#if UNITY_IOS && !UNITY_EDITOR
+            pendingTimestampMs = 0;
+            if (!isReady || !asyncApiAvailable || !hasInitializationSettings)
+            {
+                errorMessage = "MediaPipe timeout recovery cannot run because the last successful initialization settings are unavailable.";
+                LastError = errorMessage;
+                isReady = false;
+                return false;
+            }
+
+            try
+            {
+                // A callback that never arrives leaves the live-stream graph physically
+                // busy. Cancellation only invalidates its generation, so timeout recovery
+                // must replace the graph before another frame can be accepted.
+                AHC_PoseDispose();
+                var code = InitializeNative(lastInitializationSettings);
+                isReady = code == 0;
+                asyncApiAvailable = true;
+                if (isReady)
+                {
+                    LastError = string.Empty;
+                    return true;
+                }
+
+                var nativeError = ReadLastError();
+                errorMessage = string.IsNullOrWhiteSpace(nativeError)
+                    ? $"MediaPipe timeout recovery failed with native error {code}."
+                    : "MediaPipe timeout recovery failed: " + nativeError;
+                LastError = errorMessage;
+                return false;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                asyncApiAvailable = false;
+                isReady = false;
+                errorMessage = "MediaPipe timeout recovery is unavailable because the exported iOS project is missing the native pose bridge.";
+                LastError = errorMessage;
+                return false;
+            }
+            catch (Exception exception)
+            {
+                isReady = false;
+                errorMessage = "MediaPipe timeout recovery failed: " + exception.Message;
+                LastError = errorMessage;
+                return false;
+            }
+#else
+            errorMessage = "MediaPipe timeout recovery is only available in an iOS device build.";
+            LastError = errorMessage;
+            isReady = false;
+            return false;
+#endif
+        }
+
         public void Dispose()
         {
+            CancelPendingFrame();
 #if UNITY_IOS && !UNITY_EDITOR
             AHC_PoseDispose();
 #endif
@@ -202,6 +436,18 @@ namespace AIHealthcareCoach.MediaPipe
             error = string.Empty;
             return true;
         }
+
+#if UNITY_IOS && !UNITY_EDITOR
+        private static int InitializeNative(InitializationSettings settings)
+        {
+            return AHC_PoseInitialize(
+                settings.ModelPath,
+                settings.NumPoses,
+                settings.MinPoseDetectionConfidence,
+                settings.MinPosePresenceConfidence,
+                settings.MinTrackingConfidence);
+        }
+#endif
 
         private void EnsurePixelsPinned(Color32[] pixels)
         {
@@ -271,6 +517,45 @@ namespace AIHealthcareCoach.MediaPipe
             error = "iOS MediaPipe bridge is not available in this runtime.";
             return false;
 #endif
+        }
+
+        private bool TryParseLatestFrame(long timestampMs, out LandmarkFrame frame)
+        {
+            if (!TryReadLatestJson(out var json, out var jsonError))
+            {
+                LastError = jsonError;
+                frame = LandmarkFrame.Empty(timestampMs, "EMPTY_NATIVE_RESULT", LastError);
+                return false;
+            }
+
+            try
+            {
+                frame = JsonUtility.FromJson<LandmarkFrame>(json);
+            }
+            catch (Exception exception)
+            {
+                LastError = "MediaPipe returned invalid JSON: " + exception.Message;
+                frame = LandmarkFrame.Empty(timestampMs, "INVALID_NATIVE_RESULT", LastError);
+                return false;
+            }
+
+            if (frame == null)
+            {
+                LastError = "MediaPipe returned an empty pose result.";
+                frame = LandmarkFrame.Empty(timestampMs, "INVALID_NATIVE_RESULT", LastError);
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(frame.errorCode))
+            {
+                LastError = string.IsNullOrWhiteSpace(frame.errorMessage)
+                    ? frame.errorCode
+                    : frame.errorMessage;
+                return false;
+            }
+
+            LastError = string.Empty;
+            return true;
         }
 
         private static string ReadLastError()

@@ -77,6 +77,7 @@ namespace Rag.Healthcare.Editor
                 "Android must resolve to the native Android TTS backend.", failures);
             Check(TtsBackendResolver.ResolveAuto(RuntimePlatform.IPhonePlayer) == TtsBackend.IosNative,
                 "iOS must resolve to the native AVSpeechSynthesizer backend.", failures);
+            VerifyTtsScheduling(failures);
 
             VerifyBundledKoreanFont(failures);
             VerifyMobileUiStructure(failures);
@@ -115,6 +116,128 @@ namespace Rag.Healthcare.Editor
                     Check(font.HasCharacter(character), "The mobile UI font is missing character: " + character, failures);
                 }
             }
+        }
+
+        private static void VerifyTtsScheduling(ICollection<string> failures)
+        {
+            var scheduler = new TtsRequestScheduler(new TtsRequestSchedulerOptions
+            {
+                DuplicateCooldownSeconds = 2d,
+                StartObservationGraceSeconds = 0.1d,
+                StopTimeoutSeconds = 0.5d,
+                MinimumPreemptPriority = TtsRequestPriority.Critical
+            });
+            scheduler.BeginGeneration(7);
+
+            var info = scheduler.Enqueue(
+                "기본 안내",
+                "info",
+                TtsRequestPriority.Info,
+                0d,
+                2d,
+                7);
+            var startInfo = scheduler.Poll(0d, false);
+            Check(info.Disposition == TtsEnqueueDisposition.AcceptedAsActive &&
+                  startInfo.Type == TtsSchedulerActionType.Start,
+                "The first TTS request must become the only active request.", failures);
+            scheduler.AcknowledgeStarted(info.Request.RequestId, 0d, true);
+
+            scheduler.Enqueue(
+                "일반 경고",
+                "warning",
+                TtsRequestPriority.Warning,
+                0.1d,
+                3d,
+                7);
+            var critical = scheduler.Enqueue(
+                "즉시 멈추세요",
+                "critical",
+                TtsRequestPriority.Critical,
+                0.2d,
+                6d,
+                7);
+            var stop = scheduler.Poll(0.2d, true);
+            Check(critical.Disposition == TtsEnqueueDisposition.AcceptedWithPreemption &&
+                  scheduler.HasPending &&
+                  scheduler.Pending.Priority == TtsRequestPriority.Critical &&
+                  stop.Type == TtsSchedulerActionType.StopForPreemption,
+                "Critical TTS must replace lower-priority pending speech and request one stop.", failures);
+
+            scheduler.AcknowledgeStopIssued(info.Request.RequestId, 0.2d);
+            Check(scheduler.Poll(0.4d, true).Type == TtsSchedulerActionType.None,
+                "TTS must wait for a cancel terminal state before promoting Critical speech.", failures);
+            var quarantine = scheduler.Poll(0.8d, true);
+            Check(quarantine.Type == TtsSchedulerActionType.QuarantineBackend &&
+                  scheduler.IsQuarantined &&
+                  !scheduler.IsBusy,
+                "A backend stop timeout must quarantine speech instead of starting concurrently.", failures);
+
+            scheduler.BeginGeneration(8);
+            var active = scheduler.Enqueue(
+                "기존 안내",
+                "active",
+                TtsRequestPriority.Info,
+                1d,
+                2d,
+                8);
+            scheduler.Poll(1d, false);
+            scheduler.AcknowledgeStarted(active.Request.RequestId, 1d, true);
+            var pendingCritical = scheduler.Enqueue(
+                "안전 안내",
+                "safety",
+                TtsRequestPriority.Critical,
+                1.1d,
+                6d,
+                8);
+            scheduler.Poll(1.1d, true);
+            scheduler.AcknowledgeStopIssued(active.Request.RequestId, 1.1d);
+            var promoteAfterCancel = scheduler.Poll(1.2d, false);
+            Check(pendingCritical.IsScheduled &&
+                  promoteAfterCancel.Type == TtsSchedulerActionType.Start &&
+                  promoteAfterCancel.Request.Priority == TtsRequestPriority.Critical,
+                "Critical TTS may start only after the backend reports idle/cancelled.", failures);
+
+            var stale = scheduler.Enqueue(
+                "이전 세션 안내",
+                "stale",
+                TtsRequestPriority.Info,
+                1.3d,
+                2d,
+                7);
+            Check(stale.Disposition == TtsEnqueueDisposition.RejectedGeneration,
+                "A stale TTS generation must never enter the speech queue.", failures);
+
+            scheduler.BeginGeneration(9);
+            var deferredInfo = scheduler.Enqueue(
+                "곧 만료될 일반 안내",
+                "deferred_info",
+                TtsRequestPriority.Info,
+                2d,
+                0.05d,
+                9);
+            var immediateCritical = scheduler.Enqueue(
+                "즉시 안전 자세를 확인하세요",
+                "immediate_critical",
+                TtsRequestPriority.Critical,
+                2d,
+                6d,
+                9);
+            var startHighestPriority = scheduler.Poll(2d, false);
+            Check(deferredInfo.IsScheduled &&
+                  immediateCritical.IsScheduled &&
+                  startHighestPriority.Type == TtsSchedulerActionType.Start &&
+                  startHighestPriority.Request.RequestId == immediateCritical.Request.RequestId &&
+                  scheduler.Active.RequestId == immediateCritical.Request.RequestId &&
+                  scheduler.Pending.RequestId == deferredInfo.Request.RequestId,
+                "A higher-priority request admitted before Update must start before a queued lower-priority request.",
+                failures);
+
+            scheduler.AcknowledgeStarted(immediateCritical.Request.RequestId, 2d, true);
+            scheduler.Poll(2.01d, true);
+            var afterCriticalFinished = scheduler.Poll(2.2d, false);
+            Check(afterCriticalFinished.Type == TtsSchedulerActionType.None && !scheduler.IsBusy,
+                "A displaced lower-priority request must retain its TTL and expire while higher-priority speech runs.",
+                failures);
         }
 
         private static void VerifyMobileUiStructure(ICollection<string> failures)

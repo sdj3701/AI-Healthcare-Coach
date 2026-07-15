@@ -21,6 +21,22 @@ namespace Rag.Healthcare.Pose
                 return false;
             }
 
+            // MediaPipe frames use a stable 33-landmark order. Take the constant-time
+            // path when that contract is present, while preserving the legacy scan for
+            // replay, remote, or test frames whose joints may be reordered.
+            if (PoseJointNames.TryGetMediaPipeIndex(jointName, out var mediaPipeIndex) &&
+                mediaPipeIndex >= 0 &&
+                mediaPipeIndex < joints.Length)
+            {
+                var indexedCandidate = joints[mediaPipeIndex];
+                if (indexedCandidate != null &&
+                    string.Equals(indexedCandidate.name, jointName, StringComparison.OrdinalIgnoreCase))
+                {
+                    joint = indexedCandidate;
+                    return true;
+                }
+            }
+
             foreach (var candidate in joints)
             {
                 if (candidate != null && string.Equals(candidate.name, jointName, StringComparison.OrdinalIgnoreCase))

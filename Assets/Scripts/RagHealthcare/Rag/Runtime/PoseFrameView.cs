@@ -7,10 +7,10 @@ namespace Rag.Healthcare.Rag.Runtime
     public sealed class PoseFrameView
     {
         private readonly Dictionary<string, TrackedJoint> jointsByName =
-            new Dictionary<string, TrackedJoint>(StringComparer.OrdinalIgnoreCase);
+            new Dictionary<string, TrackedJoint>(PoseJointNames.MediaPipe33.Length, StringComparer.OrdinalIgnoreCase);
 
         private readonly Dictionary<string, TrackedJoint> validJointsByName =
-            new Dictionary<string, TrackedJoint>(StringComparer.OrdinalIgnoreCase);
+            new Dictionary<string, TrackedJoint>(PoseJointNames.MediaPipe33.Length, StringComparer.OrdinalIgnoreCase);
 
         public JointTrackingFrame RawFrame { get; private set; }
         public long TimestampUnixMilliseconds { get; private set; }

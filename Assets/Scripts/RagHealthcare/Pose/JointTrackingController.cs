@@ -32,11 +32,14 @@ namespace Rag.Healthcare.Pose
         private bool isTracking;
         private bool trackingRequested;
         private bool isRequestInFlight;
+        private bool resumeTrackingAfterPause;
         private float nextSampleAt;
         private float poseFpsWindowStartedAt;
         private int poseFramesInWindow;
         private float lastFailureLogAt = -999f;
         private string lastLoggedFailure = string.Empty;
+        private int lastSampledCameraTextureId;
+        private uint lastSampledCameraUpdateCount;
 
         public event Action<JointTrackingFrame> TrackingFrameReceived;
         public event Action<string> TrackingFailed;
@@ -73,6 +76,25 @@ namespace Rag.Healthcare.Pose
             StopTracking();
         }
 
+        private void OnApplicationPause(bool paused)
+        {
+            if (paused)
+            {
+                var shouldResume = trackingRequested || isTracking;
+                StopTracking();
+                resumeTrackingAfterPause = shouldResume;
+                return;
+            }
+
+            if (!resumeTrackingAfterPause || !isActiveAndEnabled)
+            {
+                return;
+            }
+
+            resumeTrackingAfterPause = false;
+            StartTracking();
+        }
+
         private void OnDestroy()
         {
             trackingRequested = false;
@@ -93,8 +115,10 @@ namespace Rag.Healthcare.Pose
 
         public void StopTracking()
         {
+            resumeTrackingAfterPause = false;
             trackingRequested = false;
             isTracking = false;
+            trackingProvider?.CancelPendingEstimate();
 
             if (startCoroutine != null)
             {
@@ -221,6 +245,14 @@ namespace Rag.Healthcare.Pose
                         continue;
                     }
 
+                    // Texture.updateCount identifies whether the camera changed since the
+                    // previous sample, even when it did not change in this exact Unity frame.
+                    if (!TryReserveFreshCameraFrame())
+                    {
+                        yield return null;
+                        continue;
+                    }
+
                     var skippedSamples = Mathf.FloorToInt(Mathf.Max(0f, now - nextSampleAt) / interval);
                     if (skippedSamples > 0)
                     {
@@ -241,6 +273,26 @@ namespace Rag.Healthcare.Pose
             {
                 StartTracking();
             }
+        }
+
+        private bool TryReserveFreshCameraFrame()
+        {
+            var webCamTexture = cameraSource == null ? null : cameraSource.WebCamTexture;
+            if (webCamTexture == null)
+            {
+                return true;
+            }
+
+            var textureId = webCamTexture.GetInstanceID();
+            var updateCount = webCamTexture.updateCount;
+            if (textureId == lastSampledCameraTextureId && updateCount == lastSampledCameraUpdateCount)
+            {
+                return false;
+            }
+
+            lastSampledCameraTextureId = textureId;
+            lastSampledCameraUpdateCount = updateCount;
+            return true;
         }
 
         private IEnumerator EstimateCurrentFrame()
@@ -275,6 +327,15 @@ namespace Rag.Healthcare.Pose
             {
                 isRequestInFlight = false;
                 LastInferenceMilliseconds = (Time.realtimeSinceStartup - startedAt) * 1000f;
+            }
+
+            // StopTracking cancels an in-flight native request with PROCESS_CANCELLED.
+            // That is an expected lifecycle result, not a failed tracking frame. A
+            // caller-requested single frame remains reportable because its coroutine
+            // stays assigned until this method returns.
+            if (!trackingRequested && !isTracking && singleFrameCoroutine == null)
+            {
+                yield break;
             }
 
             if (!string.IsNullOrWhiteSpace(error))

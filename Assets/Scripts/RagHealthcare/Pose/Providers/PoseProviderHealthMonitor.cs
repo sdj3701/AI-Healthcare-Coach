@@ -23,6 +23,8 @@ namespace Rag.Healthcare.Pose.Providers
 
     public sealed class PoseProviderHealthMonitor : MonoBehaviour
     {
+        private const float TelemetryIntervalSeconds = 5f;
+
         [SerializeField] private JointTrackingController controller;
         [SerializeField, Min(1f)] private float unavailableAfterSeconds = 3f;
         [SerializeField, Range(0f, 1f)] private float degradedFailureRatio = 0.2f;
@@ -45,7 +47,6 @@ namespace Rag.Healthcare.Pose.Providers
         {
             if (controller == null) return;
             controller.TrackingFrameReceived += HandleFrame;
-            controller.TrackingFailed += HandleFailure;
             lastFrameAt = Time.unscaledTime;
         }
 
@@ -53,18 +54,11 @@ namespace Rag.Healthcare.Pose.Providers
         {
             if (controller == null) return;
             controller.TrackingFrameReceived -= HandleFrame;
-            controller.TrackingFailed -= HandleFailure;
         }
 
         private void Update()
         {
-            if (controller == null) return;
-            var health = ResolveHealth();
-            if (Latest == null || Latest.health != health || Time.unscaledTime >= nextTelemetryAt)
-            {
-                Publish(health);
-                nextTelemetryAt = Time.unscaledTime + 5f;
-            }
+            TryPublishHealth();
         }
 
         private void HandleFrame(JointTrackingFrame _)
@@ -72,9 +66,22 @@ namespace Rag.Healthcare.Pose.Providers
             lastFrameAt = Time.unscaledTime;
         }
 
-        private void HandleFailure(string _)
+        private void TryPublishHealth()
         {
-            Publish(ResolveHealth());
+            if (controller == null)
+            {
+                return;
+            }
+
+            var now = Time.unscaledTime;
+            var health = ResolveHealth();
+            if (Latest != null && Latest.health == health && now < nextTelemetryAt)
+            {
+                return;
+            }
+
+            Publish(health);
+            nextTelemetryAt = now + TelemetryIntervalSeconds;
         }
 
         private PoseProviderHealth ResolveHealth()

@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+
 namespace Rag.Healthcare.Pose
 {
     public static class PoseJointNames
@@ -72,5 +74,29 @@ namespace Rag.Healthcare.Pose
             LeftFootIndex,
             RightFootIndex
         };
+
+        private static readonly Dictionary<string, int> MediaPipeIndices = CreateMediaPipeIndices();
+
+        public static bool TryGetMediaPipeIndex(string jointName, out int index)
+        {
+            if (string.IsNullOrEmpty(jointName))
+            {
+                index = -1;
+                return false;
+            }
+
+            return MediaPipeIndices.TryGetValue(jointName, out index);
+        }
+
+        private static Dictionary<string, int> CreateMediaPipeIndices()
+        {
+            var indices = new Dictionary<string, int>(MediaPipe33.Length, System.StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < MediaPipe33.Length; i++)
+            {
+                indices[MediaPipe33[i]] = i;
+            }
+
+            return indices;
+        }
     }
 }

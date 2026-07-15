@@ -1,17 +1,82 @@
 import Foundation
+import Dispatch
 import UIKit
 import MediaPipeTasksVision
 
-private final class AHCMediaPipePoseBridge {
+private final class AHCLegacyPoseWaiter {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var completionStatus: Int32?
+
+    func complete(with status: Int32) {
+        lock.lock()
+        guard completionStatus == nil else {
+            lock.unlock()
+            return
+        }
+
+        completionStatus = status
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    func wait(timeoutSeconds: TimeInterval) -> Int32? {
+        if let status = status {
+            return status
+        }
+
+        guard semaphore.wait(timeout: .now() + timeoutSeconds) == .success else {
+            return status
+        }
+
+        return status
+    }
+
+    var status: Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return completionStatus
+    }
+}
+
+private struct AHCPoseSubmission {
+    let token: Int64
+    let generation: Int64
+    let timestampMs: Int
+    let width: Int
+    let height: Int
+    let rotationAngle: Int
+    let mirrored: Bool
+    let landmarkerIdentifier: ObjectIdentifier
+    let legacyWaiter: AHCLegacyPoseWaiter?
+}
+
+private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDelegate {
     static let shared = AHCMediaPipePoseBridge()
 
     private let stateLock = NSLock()
+    private let resultQueue = DispatchQueue(
+        label: "com.aihealthcarecoach.mediapipe.pose-result",
+        qos: .userInitiated
+    )
+    private let teardownQueue = DispatchQueue(
+        label: "com.aihealthcarecoach.mediapipe.pose-teardown",
+        qos: .utility
+    )
+
     private var poseLandmarker: PoseLandmarker?
     private var latestJson = "{}"
     private var lastError = ""
+    private var resultStatus: Int32 = 0
+    private var generation: Int64 = 0
+    private var nextSubmissionToken: Int64 = 0
+    private var preparingGeneration: Int64?
+    private var inFlightSubmission: AHCPoseSubmission?
+    private var lastSubmittedTimestamp = -1
 
     private let maximumImageDimension = 8_192
     private let maximumFrameByteCount = 256 * 1_024 * 1_024
+    private let legacyWaitTimeoutSeconds: TimeInterval = 1.0
 
     private let landmarkNames = [
         "nose",
@@ -49,6 +114,10 @@ private final class AHCMediaPipePoseBridge {
         "right_foot_index"
     ]
 
+    private override init() {
+        super.init()
+    }
+
     func initialize(
         modelPath rawModelPath: String,
         numPoses: Int,
@@ -68,13 +137,17 @@ private final class AHCMediaPipePoseBridge {
 
         let modelPath = normalizedPath(rawModelPath)
         guard FileManager.default.fileExists(atPath: modelPath) else {
-            lastError = "MediaPipe model file was not found: \(modelPath)"
-            latestJson = errorJson(code: "MODEL_NOT_FOUND", message: lastError)
+            publishErrorLocked(
+                status: -2,
+                code: "MODEL_NOT_FOUND",
+                message: "MediaPipe model file was not found: \(modelPath)"
+            )
             return -2
         }
 
         let options = PoseLandmarkerOptions()
-        options.runningMode = .video
+        options.runningMode = .liveStream
+        options.poseLandmarkerLiveStreamDelegate = self
         options.numPoses = numPoses
         options.minPoseDetectionConfidence = minPoseDetectionConfidence
         options.minPosePresenceConfidence = minPosePresenceConfidence
@@ -84,14 +157,41 @@ private final class AHCMediaPipePoseBridge {
 
         do {
             poseLandmarker = try PoseLandmarker(options: options)
+            advanceGenerationLocked()
+            lastSubmittedTimestamp = -1
+            preparingGeneration = nil
+            inFlightSubmission = nil
+            resultStatus = 0
             lastError = ""
             latestJson = "{}"
             return 0
         } catch {
-            lastError = "Failed to initialize PoseLandmarker: \(error.localizedDescription)"
-            latestJson = errorJson(code: "INITIALIZE_FAILED", message: lastError)
+            publishErrorLocked(
+                status: -3,
+                code: "INITIALIZE_FAILED",
+                message: "Failed to initialize PoseLandmarker: \(error.localizedDescription)"
+            )
             return -3
         }
+    }
+
+    func submitRgba(
+        rgbaPointer: UnsafeRawPointer?,
+        width: Int,
+        height: Int,
+        timestampMs: Int,
+        rotationAngle: Int,
+        mirrored: Bool
+    ) -> Int32 {
+        return submitRgba(
+            rgbaPointer: rgbaPointer,
+            width: width,
+            height: height,
+            timestampMs: timestampMs,
+            rotationAngle: rotationAngle,
+            mirrored: mirrored,
+            legacyWaiter: nil
+        )
     }
 
     func processRgba(
@@ -102,63 +202,38 @@ private final class AHCMediaPipePoseBridge {
         rotationAngle: Int,
         mirrored: Bool
     ) -> Int32 {
-        // A second synchronous request must never enter MediaPipe while the first
-        // request (or a lifecycle operation) still owns its native resources.
-        guard stateLock.try() else {
-            return -14
+        let waiter = AHCLegacyPoseWaiter()
+        let submitStatus = submitRgba(
+            rgbaPointer: rgbaPointer,
+            width: width,
+            height: height,
+            timestampMs: timestampMs,
+            rotationAngle: rotationAngle,
+            mirrored: mirrored,
+            legacyWaiter: waiter
+        )
+
+        guard submitStatus == 0 else {
+            return submitStatus
         }
+
+        if let completionStatus = waiter.wait(timeoutSeconds: legacyWaitTimeoutSeconds) {
+            return completionStatus
+        }
+
+        return timeOutLegacySubmission(waiter: waiter)
+    }
+
+    func tryConsumeLatest() -> Int32 {
+        stateLock.lock()
         defer { stateLock.unlock() }
 
-        guard let poseLandmarker = poseLandmarker else {
-            lastError = "PoseLandmarker is not initialized."
-            latestJson = errorJson(code: "NOT_INITIALIZED", message: lastError)
-            return -10
+        let status = resultStatus
+        if status != 0 {
+            resultStatus = 0
         }
 
-        guard let rgbaPointer = rgbaPointer,
-              validatedByteLayout(width: width, height: height) != nil else {
-            lastError = "Input frame is invalid."
-            latestJson = errorJson(code: "INVALID_FRAME", message: lastError)
-            return -11
-        }
-
-        // MPImage/UIImage/CGImage can retain the Data provider. Keep every wrapper
-        // inside this pool so it is released before the synchronous native call
-        // returns and Unity may replace or unpin the source array.
-        return autoreleasepool {
-            guard let image = makeImage(
-                rgbaPointer: rgbaPointer,
-                width: width,
-                height: height,
-                rotationAngle: rotationAngle
-            ) else {
-                lastError = "Failed to convert Unity RGBA frame to MPImage."
-                latestJson = errorJson(code: "IMAGE_CONVERSION_FAILED", message: lastError)
-                return -12
-            }
-
-            do {
-                let result = try poseLandmarker.detect(
-                    videoFrame: image,
-                    timestampInMilliseconds: timestampMs
-                )
-
-                latestJson = resultJson(
-                    result: result,
-                    timestampMs: timestampMs,
-                    width: width,
-                    height: height,
-                    rotationAngle: rotationAngle,
-                    mirrored: mirrored
-                )
-                lastError = ""
-                return 0
-            } catch {
-                lastError = "PoseLandmarker frame processing failed: \(error.localizedDescription)"
-                latestJson = errorJson(code: "PROCESS_FAILED", message: lastError)
-                return -13
-            }
-        }
+        return status
     }
 
     func copyLatestJson(to buffer: UnsafeMutablePointer<CChar>?, capacity: Int) -> Int32 {
@@ -173,12 +248,335 @@ private final class AHCMediaPipePoseBridge {
         return copyString(lastError, to: buffer, capacity: capacity)
     }
 
-    func dispose() {
+    func cancelPending() {
         stateLock.lock()
-        defer { stateLock.unlock() }
+        let hadPendingWork = preparingGeneration != nil || inFlightSubmission != nil
+        advanceGenerationLocked()
+
+        // MediaPipe does not expose cancellation for a submitted live-stream
+        // frame. Keep the physical request as the sole in-flight frame until its
+        // callback arrives, but make its generation stale immediately.
+        inFlightSubmission?.legacyWaiter?.complete(with: -16)
+        if hadPendingWork {
+            publishErrorLocked(
+                status: -16,
+                code: "PROCESS_CANCELLED",
+                message: "Pose inference was cancelled."
+            )
+        } else {
+            resultStatus = 0
+            latestJson = "{}"
+            lastError = ""
+        }
+        stateLock.unlock()
+    }
+
+    func dispose() {
+        let retiredLandmarker: PoseLandmarker?
+        stateLock.lock()
+        advanceGenerationLocked()
+        inFlightSubmission?.legacyWaiter?.complete(with: -16)
+        retiredLandmarker = poseLandmarker
         poseLandmarker = nil
+        inFlightSubmission = nil
+        preparingGeneration = nil
+        lastSubmittedTimestamp = -1
+        resultStatus = 0
         latestJson = "{}"
         lastError = ""
+        stateLock.unlock()
+
+        // PoseLandmarker teardown may wait for its delegate/graph worker. Releasing
+        // the final bridge-owned strong reference while stateLock is held can then
+        // deadlock with a callback trying to acquire the same lock. Keep teardown
+        // serialized, but entirely outside the bridge state lock.
+        guard let retiredLandmarker = retiredLandmarker else {
+            return
+        }
+
+        teardownQueue.async { [retiredLandmarker] in
+            withExtendedLifetime(retiredLandmarker) {}
+        }
+    }
+
+    func poseLandmarker(
+        _ poseLandmarker: PoseLandmarker,
+        didFinishDetection result: PoseLandmarkerResult?,
+        timestampInMilliseconds timestampMs: Int,
+        error: Error?
+    ) {
+        // MediaPipe invokes this delegate off the caller thread. A dedicated serial
+        // queue keeps JSON creation ordered and prevents it from touching Unity's
+        // render/main thread.
+        resultQueue.async { [weak self] in
+            self?.finishDetection(
+                poseLandmarker: poseLandmarker,
+                result: result,
+                timestampMs: timestampMs,
+                error: error
+            )
+        }
+    }
+
+    private func submitRgba(
+        rgbaPointer: UnsafeRawPointer?,
+        width: Int,
+        height: Int,
+        timestampMs: Int,
+        rotationAngle: Int,
+        mirrored: Bool,
+        legacyWaiter: AHCLegacyPoseWaiter?
+    ) -> Int32 {
+        stateLock.lock()
+
+        guard let landmarker = poseLandmarker else {
+            publishErrorLocked(
+                status: -10,
+                code: "NOT_INITIALIZED",
+                message: "PoseLandmarker is not initialized."
+            )
+            stateLock.unlock()
+            return -10
+        }
+
+        guard let rgbaPointer = rgbaPointer,
+              validatedByteLayout(width: width, height: height) != nil else {
+            publishErrorLocked(
+                status: -11,
+                code: "INVALID_FRAME",
+                message: "Input frame is invalid."
+            )
+            stateLock.unlock()
+            return -11
+        }
+
+        // One active frame is intentional. MediaPipe live-stream mode may silently
+        // drop a second frame while busy, so explicit backpressure is safer.
+        guard preparingGeneration == nil, inFlightSubmission == nil else {
+            stateLock.unlock()
+            return -14
+        }
+
+        let submissionGeneration = generation
+        let landmarkerIdentifier = ObjectIdentifier(landmarker)
+        preparingGeneration = submissionGeneration
+        stateLock.unlock()
+
+        // Unity only guarantees that its pinned Color32[] is valid until this C
+        // call returns. Data(bytes:) performs the required native copy before the
+        // asynchronous MediaPipe request is submitted.
+        let image = autoreleasepool {
+            makeImage(
+                rgbaPointer: rgbaPointer,
+                width: width,
+                height: height,
+                rotationAngle: rotationAngle
+            )
+        }
+
+        guard let image = image else {
+            stateLock.lock()
+            if preparingGeneration == submissionGeneration {
+                preparingGeneration = nil
+            }
+
+            let status: Int32
+            if generation == submissionGeneration,
+               let currentLandmarker = poseLandmarker,
+               ObjectIdentifier(currentLandmarker) == landmarkerIdentifier {
+                status = -12
+                publishErrorLocked(
+                    status: status,
+                    code: "IMAGE_CONVERSION_FAILED",
+                    message: "Failed to convert Unity RGBA frame to MPImage."
+                )
+            } else {
+                status = -16
+            }
+
+            legacyWaiter?.complete(with: status)
+            stateLock.unlock()
+            return status
+        }
+
+        stateLock.lock()
+        guard preparingGeneration == submissionGeneration,
+              generation == submissionGeneration,
+              let currentLandmarker = poseLandmarker,
+              ObjectIdentifier(currentLandmarker) == landmarkerIdentifier else {
+            if preparingGeneration == submissionGeneration {
+                preparingGeneration = nil
+            }
+            legacyWaiter?.complete(with: -16)
+            stateLock.unlock()
+            return -16
+        }
+
+        guard let monotonicTimestamp = nextTimestampLocked(requested: timestampMs) else {
+            preparingGeneration = nil
+            publishErrorLocked(
+                status: -13,
+                code: "TIMESTAMP_EXHAUSTED",
+                message: "Pose frame timestamp exceeded the supported range."
+            )
+            legacyWaiter?.complete(with: -13)
+            stateLock.unlock()
+            return -13
+        }
+
+        nextSubmissionToken &+= 1
+        let submission = AHCPoseSubmission(
+            token: nextSubmissionToken,
+            generation: submissionGeneration,
+            timestampMs: monotonicTimestamp,
+            width: width,
+            height: height,
+            rotationAngle: rotationAngle,
+            mirrored: mirrored,
+            landmarkerIdentifier: landmarkerIdentifier,
+            legacyWaiter: legacyWaiter
+        )
+
+        inFlightSubmission = submission
+        preparingGeneration = nil
+        resultStatus = 0
+        lastError = ""
+        stateLock.unlock()
+
+        do {
+            try landmarker.detectAsync(
+                image: image,
+                timestampInMilliseconds: monotonicTimestamp
+            )
+            return 0
+        } catch {
+            stateLock.lock()
+            let isCurrentSubmission =
+                inFlightSubmission?.token == submission.token &&
+                inFlightSubmission?.generation == submission.generation
+
+            let status: Int32
+            if isCurrentSubmission {
+                inFlightSubmission = nil
+                if generation == submissionGeneration,
+                   let currentLandmarker = poseLandmarker,
+                   ObjectIdentifier(currentLandmarker) == landmarkerIdentifier {
+                    status = -13
+                    publishErrorLocked(
+                        status: status,
+                        code: "PROCESS_FAILED",
+                        message: "PoseLandmarker async submission failed: \(error.localizedDescription)"
+                    )
+                } else {
+                    status = -16
+                }
+            } else {
+                status = generation == submissionGeneration ? -13 : -16
+            }
+
+            legacyWaiter?.complete(with: status)
+            stateLock.unlock()
+            return status
+        }
+    }
+
+    private func finishDetection(
+        poseLandmarker callbackLandmarker: PoseLandmarker,
+        result: PoseLandmarkerResult?,
+        timestampMs: Int,
+        error: Error?
+    ) {
+        let callbackIdentifier = ObjectIdentifier(callbackLandmarker)
+
+        stateLock.lock()
+        guard let submission = inFlightSubmission,
+              submission.landmarkerIdentifier == callbackIdentifier,
+              submission.timestampMs == timestampMs else {
+            stateLock.unlock()
+            return
+        }
+
+        guard submission.generation == generation else {
+            inFlightSubmission = nil
+            submission.legacyWaiter?.complete(with: -16)
+            stateLock.unlock()
+            return
+        }
+        stateLock.unlock()
+
+        let completionStatus: Int32
+        let generatedJson: String
+        let generatedError: String
+
+        if let error = error {
+            completionStatus = -13
+            generatedError = "PoseLandmarker frame processing failed: \(error.localizedDescription)"
+            generatedJson = errorJson(
+                code: "PROCESS_FAILED",
+                message: generatedError,
+                timestampMs: submission.timestampMs,
+                width: submission.width,
+                height: submission.height,
+                rotationAngle: submission.rotationAngle,
+                mirrored: submission.mirrored
+            )
+        } else {
+            completionStatus = 0
+            generatedError = ""
+            generatedJson = resultJson(result: result, submission: submission)
+        }
+
+        stateLock.lock()
+        guard let currentSubmission = inFlightSubmission,
+              currentSubmission.token == submission.token,
+              currentSubmission.generation == submission.generation else {
+            stateLock.unlock()
+            return
+        }
+
+        inFlightSubmission = nil
+        if generation == submission.generation,
+           let currentLandmarker = poseLandmarker,
+           ObjectIdentifier(currentLandmarker) == submission.landmarkerIdentifier {
+            latestJson = generatedJson
+            lastError = generatedError
+            resultStatus = completionStatus == 0 ? 1 : completionStatus
+            submission.legacyWaiter?.complete(with: completionStatus)
+        } else {
+            submission.legacyWaiter?.complete(with: -16)
+        }
+        stateLock.unlock()
+    }
+
+    private func timeOutLegacySubmission(waiter: AHCLegacyPoseWaiter) -> Int32 {
+        if let status = waiter.status {
+            return status
+        }
+
+        stateLock.lock()
+        if let status = waiter.status {
+            stateLock.unlock()
+            return status
+        }
+
+        guard let submission = inFlightSubmission,
+              submission.legacyWaiter === waiter else {
+            stateLock.unlock()
+            return waiter.status ?? -15
+        }
+
+        // Invalidate the eventual callback but keep the physical frame marked
+        // in-flight until MediaPipe releases it. This avoids submitting a frame
+        // that MediaPipe would silently drop while its graph is still busy.
+        advanceGenerationLocked()
+        publishErrorLocked(
+            status: -15,
+            code: "PROCESS_TIMEOUT",
+            message: "PoseLandmarker did not finish within the legacy wait limit."
+        )
+        waiter.complete(with: -15)
+        stateLock.unlock()
+        return -15
     }
 
     private func makeImage(
@@ -191,15 +589,7 @@ private final class AHCMediaPipePoseBridge {
             return nil
         }
 
-        // detect(videoFrame:) is synchronous and the caller keeps its Color32[]
-        // pinned for this entire method, so the provider can safely avoid a full
-        // frame copy. The autoreleasepool in processRgba bounds its lifetime.
-        let data = Data(
-            bytesNoCopy: UnsafeMutableRawPointer(mutating: rgbaPointer),
-            count: layout.byteCount,
-            deallocator: .none
-        )
-
+        let data = Data(bytes: rgbaPointer, count: layout.byteCount)
         guard let provider = CGDataProvider(data: data as CFData) else {
             return nil
         }
@@ -257,6 +647,23 @@ private final class AHCMediaPipePoseBridge {
         return (rowResult.partialValue, countResult.partialValue)
     }
 
+    private func nextTimestampLocked(requested: Int) -> Int? {
+        let clampedRequest = max(0, requested)
+
+        if lastSubmittedTimestamp < 0 {
+            lastSubmittedTimestamp = clampedRequest
+            return clampedRequest
+        }
+
+        guard lastSubmittedTimestamp < Int.max else {
+            return nil
+        }
+
+        let timestamp = max(clampedRequest, lastSubmittedTimestamp + 1)
+        lastSubmittedTimestamp = timestamp
+        return timestamp
+    }
+
     private func imageOrientation(for rotationAngle: Int) -> UIImage.Orientation {
         let normalized = ((rotationAngle % 360) + 360) % 360
         switch normalized {
@@ -272,25 +679,22 @@ private final class AHCMediaPipePoseBridge {
     }
 
     private func resultJson(
-        result: PoseLandmarkerResult,
-        timestampMs: Int,
-        width: Int,
-        height: Int,
-        rotationAngle: Int,
-        mirrored: Bool
+        result: PoseLandmarkerResult?,
+        submission: AHCPoseSubmission
     ) -> String {
-        let landmarks = result.landmarks.first ?? []
-        let worldLandmarks = result.worldLandmarks.first ?? []
+        let landmarks = result?.landmarks.first ?? []
 
         let payload: [String: Any] = [
-            "timestampMs": timestampMs,
-            "cameraMode": "ios_mediapipe_video",
-            "sourceWidth": width,
-            "sourceHeight": height,
-            "mirrored": mirrored,
-            "rotationAngle": rotationAngle,
+            "timestampMs": submission.timestampMs,
+            "cameraMode": "ios_mediapipe_live_stream",
+            "sourceWidth": submission.width,
+            "sourceHeight": submission.height,
+            "mirrored": submission.mirrored,
+            "rotationAngle": submission.rotationAngle,
             "landmarks": normalizedLandmarkPayload(landmarks),
-            "worldLandmarks": worldLandmarkPayload(worldLandmarks),
+            // No runtime consumer uses world landmarks. Omitting their conversion
+            // substantially reduces allocations and JSON work on every frame.
+            "worldLandmarks": [],
             "errorCode": "",
             "errorMessage": ""
         ]
@@ -299,31 +703,11 @@ private final class AHCMediaPipePoseBridge {
     }
 
     private func normalizedLandmarkPayload(_ landmarks: [NormalizedLandmark]) -> [[String: Any]] {
+        let normalizedLandmarks = landmarks.prefix(landmarkNames.count)
         var payload: [[String: Any]] = []
-        payload.reserveCapacity(landmarks.count)
+        payload.reserveCapacity(normalizedLandmarks.count)
 
-        for (index, landmark) in landmarks.enumerated() {
-            let visibility = landmark.visibility?.floatValue ?? landmark.presence?.floatValue ?? 1.0
-            let presence = landmark.presence?.floatValue ?? landmark.visibility?.floatValue ?? 1.0
-            payload.append([
-                "id": index,
-                "name": name(for: index),
-                "x": landmark.x,
-                "y": landmark.y,
-                "z": landmark.z,
-                "visibility": visibility,
-                "presence": presence
-            ])
-        }
-
-        return payload
-    }
-
-    private func worldLandmarkPayload(_ landmarks: [Landmark]) -> [[String: Any]] {
-        var payload: [[String: Any]] = []
-        payload.reserveCapacity(landmarks.count)
-
-        for (index, landmark) in landmarks.enumerated() {
+        for (index, landmark) in normalizedLandmarks.enumerated() {
             let visibility = landmark.visibility?.floatValue ?? landmark.presence?.floatValue ?? 1.0
             let presence = landmark.presence?.floatValue ?? landmark.visibility?.floatValue ?? 1.0
             payload.append([
@@ -348,19 +732,40 @@ private final class AHCMediaPipePoseBridge {
         return landmarkNames[index]
     }
 
-    private func errorJson(code: String, message: String) -> String {
+    private func errorJson(
+        code: String,
+        message: String,
+        timestampMs: Int = 0,
+        width: Int = 0,
+        height: Int = 0,
+        rotationAngle: Int = 0,
+        mirrored: Bool = false
+    ) -> String {
         return jsonString([
-            "timestampMs": 0,
-            "cameraMode": "ios_mediapipe_video",
-            "sourceWidth": 0,
-            "sourceHeight": 0,
-            "mirrored": false,
-            "rotationAngle": 0,
+            "timestampMs": timestampMs,
+            "cameraMode": "ios_mediapipe_live_stream",
+            "sourceWidth": width,
+            "sourceHeight": height,
+            "mirrored": mirrored,
+            "rotationAngle": rotationAngle,
             "landmarks": [],
             "worldLandmarks": [],
             "errorCode": code,
             "errorMessage": message
         ])
+    }
+
+    private func publishErrorLocked(status: Int32, code: String, message: String) {
+        lastError = message
+        latestJson = errorJson(code: code, message: message)
+        resultStatus = status
+    }
+
+    private func advanceGenerationLocked() {
+        generation &+= 1
+        if generation == 0 {
+            generation = 1
+        }
     }
 
     private func jsonString(_ payload: [String: Any]) -> String {
@@ -421,6 +826,35 @@ public func AHC_PoseInitialize(
     )
 }
 
+@_cdecl("AHC_PoseSubmitRgba")
+public func AHC_PoseSubmitRgba(
+    _ rgbaPointer: UnsafeRawPointer?,
+    _ width: Int32,
+    _ height: Int32,
+    _ timestampMs: Int64,
+    _ rotationAngle: Int32,
+    _ mirrored: Int32
+) -> Int32 {
+    return AHCMediaPipePoseBridge.shared.submitRgba(
+        rgbaPointer: rgbaPointer,
+        width: Int(width),
+        height: Int(height),
+        timestampMs: Int(clamping: timestampMs),
+        rotationAngle: Int(rotationAngle),
+        mirrored: mirrored != 0
+    )
+}
+
+@_cdecl("AHC_PoseTryConsumeLatest")
+public func AHC_PoseTryConsumeLatest() -> Int32 {
+    return AHCMediaPipePoseBridge.shared.tryConsumeLatest()
+}
+
+@_cdecl("AHC_PoseCancelPending")
+public func AHC_PoseCancelPending() {
+    AHCMediaPipePoseBridge.shared.cancelPending()
+}
+
 @_cdecl("AHC_PoseProcessRgba")
 public func AHC_PoseProcessRgba(
     _ rgbaPointer: UnsafeRawPointer?,
@@ -434,7 +868,7 @@ public func AHC_PoseProcessRgba(
         rgbaPointer: rgbaPointer,
         width: Int(width),
         height: Int(height),
-        timestampMs: Int(timestampMs),
+        timestampMs: Int(clamping: timestampMs),
         rotationAngle: Int(rotationAngle),
         mirrored: mirrored != 0
     )

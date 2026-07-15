@@ -17,6 +17,10 @@ namespace Rag.Healthcare.Pose.Providers
             System.Action<JointTrackingFrame> onFrame,
             System.Action<string> onError);
 
+        public virtual void CancelPendingEstimate()
+        {
+        }
+
         public virtual void Dispose()
         {
         }

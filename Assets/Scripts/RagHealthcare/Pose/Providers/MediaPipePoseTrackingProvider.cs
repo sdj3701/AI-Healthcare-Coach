@@ -37,6 +37,7 @@ namespace Rag.Healthcare.Pose.Providers
 
         [Header("Runtime")]
         [SerializeField, Min(1)] private int framePoolSize = 2;
+        [SerializeField, Min(0.25f)] private float asyncInferenceTimeoutSeconds = 3f;
 
 #if !AHC_USE_HOMULER_MEDIAPIPE
         [Header("Editor Python Fallback")]
@@ -234,14 +235,23 @@ namespace Rag.Healthcare.Pose.Providers
             var startedAt = Time.realtimeSinceStartup;
             try
             {
-                var error = ProcessFallbackFrame(source, timestampUnixMilliseconds, out var frame);
-                if (!string.IsNullOrWhiteSpace(error))
+                if (fallbackPoseEstimator is IAsyncPoseEstimator asyncEstimator &&
+                    asyncEstimator.SupportsAsyncProcessing)
                 {
-                    onError?.Invoke(error);
+                    yield return ProcessAsyncFallbackFrame(
+                        asyncEstimator,
+                        source,
+                        timestampUnixMilliseconds,
+                        onFrame,
+                        onError);
                 }
                 else
                 {
-                    onFrame?.Invoke(frame);
+                    ProcessAndPublishFallbackFrame(
+                        source,
+                        timestampUnixMilliseconds,
+                        onFrame,
+                        onError);
                 }
             }
             finally
@@ -256,6 +266,7 @@ namespace Rag.Healthcare.Pose.Providers
 
         public override void Dispose()
         {
+            CancelPendingEstimate();
 #if AHC_USE_HOMULER_MEDIAPIPE
             poseLandmarker?.Close();
             poseLandmarker = null;
@@ -272,6 +283,16 @@ namespace Rag.Healthcare.Pose.Providers
             isProcessingFrame = false;
             lastTimestampUnixMilliseconds = 0;
             LastInferenceMilliseconds = 0f;
+        }
+
+        public override void CancelPendingEstimate()
+        {
+#if !AHC_USE_HOMULER_MEDIAPIPE
+            if (fallbackPoseEstimator is IAsyncPoseEstimator asyncEstimator)
+            {
+                asyncEstimator.CancelPendingFrame();
+            }
+#endif
         }
 
         private bool TryResolveModel(out string modelPath, out byte[] modelBytes)
@@ -332,6 +353,131 @@ namespace Rag.Healthcare.Pose.Providers
         }
 
 #if !AHC_USE_HOMULER_MEDIAPIPE
+        private IEnumerator ProcessAsyncFallbackFrame(
+            IAsyncPoseEstimator asyncEstimator,
+            Texture source,
+            long timestampUnixMilliseconds,
+            Action<JointTrackingFrame> onFrame,
+            Action<string> onError)
+        {
+            if (fallbackPoseEstimator == null || !fallbackPoseEstimator.IsReady)
+            {
+                onError?.Invoke(BuildNotReadyMessage());
+                yield break;
+            }
+
+            if (!TryReadFallbackPixels(
+                    source,
+                    out var pixels,
+                    out var width,
+                    out var height,
+                    out var rotationAngle,
+                    out var verticallyMirrored))
+            {
+                onError?.Invoke("MediaPipe requires a readable WebCamTexture or Texture2D frame.");
+                yield break;
+            }
+
+            var mediaPipeTimestamp = NormalizeTimestamp(timestampUnixMilliseconds);
+            if (!asyncEstimator.TrySubmitFrame(
+                    pixels,
+                    width,
+                    height,
+                    mediaPipeTimestamp,
+                    verticallyMirrored,
+                    rotationAngle,
+                    out var submitError))
+            {
+                // An older exported native project may not have the additive async ABI.
+                // Keep the existing synchronous implementation as a compatibility path.
+                if (!asyncEstimator.SupportsAsyncProcessing)
+                {
+                    ProcessAndPublishFallbackFrame(
+                        source,
+                        mediaPipeTimestamp,
+                        onFrame,
+                        onError);
+                    yield break;
+                }
+
+                LastError = string.IsNullOrWhiteSpace(submitError)
+                    ? "MediaPipe did not accept the latest camera frame."
+                    : submitError;
+                onError?.Invoke(LastError);
+                yield break;
+            }
+
+            var deadline = Time.realtimeSinceStartup + Mathf.Max(0.25f, asyncInferenceTimeoutSeconds);
+            while (true)
+            {
+                var status = asyncEstimator.TryGetLatestResult(
+                    out var landmarkFrame,
+                    out var resultError);
+                if (status == AsyncPoseResultStatus.Waiting)
+                {
+                    if (Time.realtimeSinceStartup < deadline)
+                    {
+                        yield return null;
+                        continue;
+                    }
+
+                    var recovered = asyncEstimator.TryRecoverFromTimeout(out var recoveryError);
+                    isReady = recovered && fallbackPoseEstimator.IsReady;
+                    if (isReady)
+                    {
+                        LastError = "MediaPipe asynchronous inference timed out; the native pose graph was restarted.";
+                    }
+                    else
+                    {
+                        isReady = false;
+                        LastError = string.IsNullOrWhiteSpace(recoveryError)
+                            ? "MediaPipe asynchronous inference timed out and the native pose graph could not be restarted."
+                            : "MediaPipe asynchronous inference timed out and recovery failed: " + recoveryError;
+                    }
+
+                    onError?.Invoke(LastError);
+                    yield break;
+                }
+
+                if (status == AsyncPoseResultStatus.Failed)
+                {
+                    LastError = string.IsNullOrWhiteSpace(resultError)
+                        ? "Pose landmarks were not detected."
+                        : resultError;
+                    onError?.Invoke(LastError);
+                    yield break;
+                }
+
+                var frame = BuildFrame(landmarkFrame, mediaPipeTimestamp);
+                if (frame == null)
+                {
+                    LastError = "Pose result has an unexpected landmark count.";
+                    onError?.Invoke(LastError);
+                    yield break;
+                }
+
+                LastError = string.Empty;
+                onFrame?.Invoke(frame);
+                yield break;
+            }
+        }
+
+        private void ProcessAndPublishFallbackFrame(
+            Texture source,
+            long timestampUnixMilliseconds,
+            Action<JointTrackingFrame> onFrame,
+            Action<string> onError)
+        {
+            var error = ProcessFallbackFrame(source, timestampUnixMilliseconds, out var frame);
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                onError?.Invoke(error);
+                return;
+            }
+
+            onFrame?.Invoke(frame);
+        }
+
         private string ProcessFallbackFrame(Texture source, long timestampUnixMilliseconds, out JointTrackingFrame frame)
         {
             frame = null;

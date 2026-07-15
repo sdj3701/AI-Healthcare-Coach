@@ -4,6 +4,7 @@ using Rag.Healthcare.Camera;
 using Rag.Healthcare.Pose;
 using Rag.Healthcare.Pose.Rendering;
 using Rag.Healthcare.Rag.Runtime;
+using Rag.Healthcare.Tts;
 using UnityEngine;
 using UnityEngine.UIElements;
 #if UNITY_EDITOR
@@ -78,6 +79,7 @@ namespace Rag.Healthcare.UI
         [SerializeField] private JointTrackingController trackingController;
         [SerializeField] private RealtimeFeedbackOrchestrator feedbackOrchestrator;
         [SerializeField] private PoseFeedbackJsonReceiver feedbackReceiver;
+        [SerializeField] private CoachTtsController coachTts;
         [SerializeField] private PoseJsonReplayPlayer replayPlayer;
         [SerializeField] private bool hideLegacyDebugView = true;
         [SerializeField] private bool hideGeneratedDesktopCanvas = true;
@@ -312,6 +314,7 @@ namespace Rag.Healthcare.UI
             trackingController ??= FindFirstObjectByType<JointTrackingController>();
             feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
+            coachTts ??= FindFirstObjectByType<CoachTtsController>();
             replayPlayer ??= FindFirstObjectByType<PoseJsonReplayPlayer>();
 
             if (Application.isPlaying && replayPlayer == null)
@@ -1330,6 +1333,8 @@ namespace Rag.Healthcare.UI
             ApplyTargetCount();
             replayMode = false;
             replayPlayer?.StopReplay();
+            coachTts ??= FindFirstObjectByType<CoachTtsController>();
+            coachTts?.BeginSession();
             trackingController?.StartTracking();
 
             if (!workoutRunning)
@@ -1379,6 +1384,8 @@ namespace Rag.Healthcare.UI
             }
 
             workoutRunning = false;
+            coachTts ??= FindFirstObjectByType<CoachTtsController>();
+            coachTts?.EndSession();
             trackingController?.StopTracking();
         }
 
@@ -1404,6 +1411,8 @@ namespace Rag.Healthcare.UI
             }
 
             workoutRunning = false;
+            coachTts ??= FindFirstObjectByType<CoachTtsController>();
+            coachTts?.Suspend();
             trackingController?.StopTracking();
             yield return WaitForTrackingRequestToFinish();
             cameraSource?.StopCamera();
@@ -1419,6 +1428,7 @@ namespace Rag.Healthcare.UI
 
             if (shouldResumeTracking)
             {
+                coachTts?.Resume();
                 trackingController?.StartTracking();
                 workoutRunning = true;
                 sessionStartedAt = Time.unscaledTime;
