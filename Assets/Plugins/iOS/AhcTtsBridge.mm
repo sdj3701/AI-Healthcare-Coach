@@ -9,17 +9,25 @@ static AVSpeechSynthesizer *AhcSynthesizer;
 - (void)speechSynthesizer:(AVSpeechSynthesizer *)synthesizer
  didFinishSpeechUtterance:(AVSpeechUtterance *)utterance
 {
-    [[AVAudioSession sharedInstance] setActive:NO
-                                   withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
-                                         error:nil];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (synthesizer != nil && !synthesizer.isSpeaking) {
+            [[AVAudioSession sharedInstance] setActive:NO
+                                           withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                                                 error:nil];
+        }
+    });
 }
 
 - (void)speechSynthesizer:(AVSpeechSynthesizer *)synthesizer
-didCancelSpeechUtterance:(AVSpeechUtterance *)utterance
+ didCancelSpeechUtterance:(AVSpeechUtterance *)utterance
 {
-    [[AVAudioSession sharedInstance] setActive:NO
-                                   withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
-                                         error:nil];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (synthesizer != nil && !synthesizer.isSpeaking) {
+            [[AVAudioSession sharedInstance] setActive:NO
+                                           withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                                                 error:nil];
+        }
+    });
 }
 @end
 
@@ -97,13 +105,17 @@ extern "C" {
     void AhcTtsShutdown(void)
     {
         AhcRunOnMain(^{
-            [AhcSynthesizer stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
-            AhcSynthesizer.delegate = nil;
-            AhcSynthesizer = nil;
+            if (AhcSynthesizer != nil) {
+                [AhcSynthesizer stopSpeakingAtBoundary:AVSpeechBoundaryImmediate];
+                AhcSynthesizer.delegate = nil;
+                AhcSynthesizer = nil;
+            }
             AhcDelegate = nil;
-            [[AVAudioSession sharedInstance] setActive:NO
-                                           withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
-                                                 error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[AVAudioSession sharedInstance] setActive:NO
+                                               withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                                                     error:nil];
+            });
         });
     }
 }

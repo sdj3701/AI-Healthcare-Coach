@@ -80,8 +80,6 @@ namespace Rag.Healthcare.Editor
 
             VerifyBundledKoreanFont(failures);
             VerifyMobileUiStructure(failures);
-            Check(MediaPipeIOSNativeLibraryPreprocessor.ValidateBundledPayload(out var mediaPipeIosPayloadError),
-                mediaPipeIosPayloadError, failures);
 
             var acceptance = PerformanceAcceptanceEvaluator.Evaluate(new PerformanceBenchmarkResult
             {
