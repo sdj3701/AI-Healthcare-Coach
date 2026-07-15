@@ -448,8 +448,7 @@ namespace AIHealthcareCoach.Speech
 
         private static Font ResolveFont()
         {
-            return Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf") ??
-                   Resources.GetBuiltinResource<Font>("Arial.ttf");
+            return Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
         }
     }
 }

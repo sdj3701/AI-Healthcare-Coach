@@ -231,7 +231,7 @@ namespace Rag.Healthcare.Editor
             statusRect.offsetMax = new Vector2(-16f, -16f);
 
             var statusText = statusObject.GetComponent<Text>();
-            statusText.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            statusText.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             statusText.fontSize = 18;
             statusText.color = Color.white;
             statusText.alignment = TextAnchor.UpperLeft;

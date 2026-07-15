@@ -157,7 +157,7 @@ namespace Rag.Healthcare.Pose.Rendering
                 return;
             }
 
-            var font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            var font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             var rowObject = new GameObject("Correct Rep Target Input", typeof(RectTransform), typeof(HorizontalLayoutGroup));
             rowObject.transform.SetParent(root, false);
 

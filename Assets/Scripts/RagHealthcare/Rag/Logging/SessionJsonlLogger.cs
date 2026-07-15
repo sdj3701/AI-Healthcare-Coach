@@ -12,18 +12,25 @@ namespace Rag.Healthcare.Rag.Logging
     {
         [SerializeField] private bool logFrames = true;
         [SerializeField] private bool logFeedback = true;
+        [SerializeField, Range(1, 30)] private int maxLoggedFrameRate = 5;
+        [SerializeField] private bool beginSessionOnAwake;
         [SerializeField] private string directoryName = "RagSessions";
 
         private readonly StringBuilder builder = new StringBuilder(4096);
         private StreamWriter writer;
         private string sessionId;
+        private long nextFrameLogTimestamp;
+        private bool loggingUnavailable;
 
         public string SessionId => sessionId;
         public string CurrentLogPath { get; private set; }
 
         private void Awake()
         {
-            BeginSession();
+            if (beginSessionOnAwake)
+            {
+                BeginSession();
+            }
         }
 
         private void OnDestroy()
@@ -33,18 +40,30 @@ namespace Rag.Healthcare.Rag.Logging
 
         public void BeginSession()
         {
-            if (writer != null)
+            if (writer != null || loggingUnavailable)
             {
                 return;
             }
 
-            sessionId = "session_" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture);
-            var directory = Path.Combine(Application.persistentDataPath, directoryName);
-            Directory.CreateDirectory(directory);
-            CurrentLogPath = Path.Combine(directory, sessionId + ".jsonl");
-            writer = new StreamWriter(CurrentLogPath, false, new UTF8Encoding(false));
-            WriteRaw("{\"type\":\"session_start\",\"sessionId\":\"" + Escape(sessionId) + "\",\"timestampUnixMilliseconds\":" + Now() + "}");
-            Debug.Log("[SessionJsonlLogger] Logging to " + CurrentLogPath);
+            try
+            {
+                sessionId = "session_" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture);
+                var directory = Path.Combine(Application.persistentDataPath, directoryName);
+                Directory.CreateDirectory(directory);
+                CurrentLogPath = Path.Combine(directory, sessionId + ".jsonl");
+                writer = new StreamWriter(CurrentLogPath, false, new UTF8Encoding(false));
+                nextFrameLogTimestamp = 0;
+                WriteRaw("{\"type\":\"session_start\",\"sessionId\":\"" + Escape(sessionId) + "\",\"timestampUnixMilliseconds\":" + Now() + "}");
+                Debug.Log("[SessionJsonlLogger] Logging to " + CurrentLogPath);
+            }
+            catch (Exception exception)
+            {
+                writer?.Dispose();
+                writer = null;
+                CurrentLogPath = string.Empty;
+                loggingUnavailable = true;
+                Debug.LogWarning("[SessionJsonlLogger] Session logging is unavailable: " + exception.Message);
+            }
         }
 
         public void EndSession()
@@ -62,10 +81,24 @@ namespace Rag.Healthcare.Rag.Logging
 
         public void LogFrame(JointTrackingFrame frame)
         {
-            if (!logFrames || writer == null || frame == null)
+            if (!logFrames || frame == null)
             {
                 return;
             }
+
+            BeginSession();
+            if (writer == null)
+            {
+                return;
+            }
+
+            var timestamp = frame.timestampUnixMilliseconds > 0 ? frame.timestampUnixMilliseconds : Now();
+            if (timestamp < nextFrameLogTimestamp)
+            {
+                return;
+            }
+
+            nextFrameLogTimestamp = timestamp + Math.Max(1L, 1000L / Math.Max(1, maxLoggedFrameRate));
 
             builder.Length = 0;
             builder.Append("{\"type\":\"frame\",\"sessionId\":\"")
@@ -115,7 +148,13 @@ namespace Rag.Healthcare.Rag.Logging
 
         public void LogFeedback(FeedbackEvent feedbackEvent, PoseFeedbackMessage message)
         {
-            if (!logFeedback || writer == null || feedbackEvent == null || message == null)
+            if (!logFeedback || feedbackEvent == null || message == null)
+            {
+                return;
+            }
+
+            BeginSession();
+            if (writer == null)
             {
                 return;
             }
@@ -146,7 +185,13 @@ namespace Rag.Healthcare.Rag.Logging
 
         public void LogPhase(ExercisePhaseState phaseState)
         {
-            if (writer == null || phaseState == null)
+            if (phaseState == null)
+            {
+                return;
+            }
+
+            BeginSession();
+            if (writer == null)
             {
                 return;
             }

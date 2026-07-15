@@ -307,6 +307,7 @@ MonoBehaviour:
   autoStartTracking: 0
   requestIntervalSeconds: 0.06666667
   failureLogCooldownSeconds: 1
+  cameraStartupTimeoutSeconds: 10
 --- !u!114 &1954474668
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -360,6 +361,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::Rag.Healthcare.Rag.Logging.SessionJsonlLogger
   logFrames: 1
   logFeedback: 1
+  maxLoggedFrameRate: 5
+  beginSessionOnAwake: 0
   directoryName: RagSessions
 --- !u!114 &1954474671
 MonoBehaviour:
@@ -452,6 +455,12 @@ MonoBehaviour:
   hideGeneratedDesktopCanvas: 1
   showUiInEditMode: 1
   refreshIntervalSeconds: 0.2
+  applyMobilePerformanceDefaults: 1
+  mobileCameraWidth: 640
+  mobileCameraHeight: 480
+  mobileCameraFps: 24
+  mobilePoseFps: 12
+  mobileTargetFrameRate: 30
 --- !u!4 &1954474665
 Transform:
   m_ObjectHideFlags: 0

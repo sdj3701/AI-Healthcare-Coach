@@ -18,12 +18,13 @@ namespace Rag.Healthcare.Camera
         private Texture2D frameTexture;
         private string activeDeviceName;
         private Coroutine startCameraCoroutine;
+        private bool isStarting;
         private bool activeCameraIsFrontFacing;
 
         public event Action<Texture> PreviewTextureChanged;
 
         public bool IsRunning => webCamTexture != null && webCamTexture.isPlaying;
-        public bool IsStarting => startCameraCoroutine != null;
+        public bool IsStarting => isStarting;
         public string ActiveDeviceName => activeDeviceName;
         public bool ActiveCameraIsFrontFacing => activeCameraIsFrontFacing;
         public bool PreferFrontCamera => preferFrontCamera;
@@ -60,12 +61,13 @@ namespace Rag.Healthcare.Camera
                 return true;
             }
 
-            if (startCameraCoroutine != null)
+            if (isStarting)
             {
                 return true;
             }
 
             LastError = string.Empty;
+            isStarting = true;
             startCameraCoroutine = StartCoroutine(StartCameraRoutine());
             return true;
         }
@@ -93,6 +95,7 @@ namespace Rag.Healthcare.Camera
             {
                 LastError = "Camera permission was denied.";
                 Debug.LogWarning("[CameraCaptureSource] " + LastError);
+                isStarting = false;
                 startCameraCoroutine = null;
                 yield break;
             }
@@ -101,19 +104,38 @@ namespace Rag.Healthcare.Camera
             {
                 LastError = "No camera device was found.";
                 Debug.LogWarning("[CameraCaptureSource] " + LastError);
+                isStarting = false;
                 startCameraCoroutine = null;
                 yield break;
             }
 
-            var selectedDevice = ResolveCameraDevice();
-            activeCameraIsFrontFacing = selectedDevice.isFrontFacing;
-            activeDeviceName = selectedDevice.name;
-            webCamTexture = string.IsNullOrWhiteSpace(activeDeviceName)
-                ? new WebCamTexture(Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps))
-                : new WebCamTexture(activeDeviceName, Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps));
+            try
+            {
+                var selectedDevice = ResolveCameraDevice();
+                activeCameraIsFrontFacing = selectedDevice.isFrontFacing;
+                activeDeviceName = selectedDevice.name;
+                webCamTexture = string.IsNullOrWhiteSpace(activeDeviceName)
+                    ? new WebCamTexture(Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps))
+                    : new WebCamTexture(activeDeviceName, Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps));
 
-            webCamTexture.Play();
-            PreviewTextureChanged?.Invoke(webCamTexture);
+                webCamTexture.Play();
+                PreviewTextureChanged?.Invoke(webCamTexture);
+            }
+            catch (Exception exception)
+            {
+                LastError = "Camera failed to start: " + exception.Message;
+                Debug.LogWarning("[CameraCaptureSource] " + LastError);
+                if (webCamTexture != null)
+                {
+                    Destroy(webCamTexture);
+                    webCamTexture = null;
+                }
+
+                activeDeviceName = string.Empty;
+                activeCameraIsFrontFacing = false;
+            }
+
+            isStarting = false;
             startCameraCoroutine = null;
         }
 
@@ -124,6 +146,8 @@ namespace Rag.Healthcare.Camera
                 StopCoroutine(startCameraCoroutine);
                 startCameraCoroutine = null;
             }
+
+            isStarting = false;
 
             if (webCamTexture == null)
             {

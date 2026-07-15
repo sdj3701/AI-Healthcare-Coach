@@ -15,6 +15,23 @@ namespace Rag.Healthcare.UI
     [DisallowMultipleComponent]
     public sealed class MobileWorkoutPrototypeView : MonoBehaviour
     {
+        private const string RuntimeThemeResourcePath = "UI/UnityDefaultRuntimeTheme";
+
+        private static readonly string[] KoreanFontFallbacks =
+        {
+#if UNITY_ANDROID
+            "Noto Sans CJK KR", "Noto Sans KR", "Droid Sans Fallback", "sans-serif"
+#elif UNITY_IOS
+            "Apple SD Gothic Neo", "Noto Sans KR", "Arial Unicode MS"
+#elif UNITY_STANDALONE_OSX || UNITY_EDITOR_OSX
+            "Apple SD Gothic Neo", "Noto Sans KR", "Arial Unicode MS"
+#elif UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
+            "Malgun Gothic", "맑은 고딕", "Noto Sans KR", "Arial Unicode MS"
+#else
+            "Noto Sans KR", "Noto Sans CJK KR", "Arial Unicode MS"
+#endif
+        };
+
         private enum ScreenStep
         {
             Exercise = 1,
@@ -62,8 +79,19 @@ namespace Rag.Healthcare.UI
         [SerializeField] private bool showUiInEditMode = true;
         [SerializeField, Min(0.05f)] private float refreshIntervalSeconds = 0.2f;
 
+        [Header("Mobile Performance")]
+        [SerializeField] private bool applyMobilePerformanceDefaults = true;
+        [SerializeField, Min(16)] private int mobileCameraWidth = 640;
+        [SerializeField, Min(16)] private int mobileCameraHeight = 480;
+        [SerializeField, Range(1, 60)] private int mobileCameraFps = 24;
+        [SerializeField, Range(1, 30)] private int mobilePoseFps = 12;
+        [SerializeField, Range(15, 120)] private int mobileTargetFrameRate = 30;
+
         private UIDocument document;
         private PanelSettings runtimePanelSettings;
+        private Font runtimeFont;
+        private bool ownsRuntimeFont;
+        private bool mobilePerformanceConfigured;
         private VisualElement root;
         private VisualElement contentRoot;
         private VisualElement[] progressPips;
@@ -164,6 +192,21 @@ namespace Rag.Healthcare.UI
             {
                 DestroyPanelSettings();
             }
+
+            if (ownsRuntimeFont && runtimeFont != null)
+            {
+                if (Application.isPlaying)
+                {
+                    Destroy(runtimeFont);
+                }
+                else
+                {
+                    DestroyImmediate(runtimeFont);
+                }
+            }
+
+            runtimeFont = null;
+            ownsRuntimeFont = false;
         }
 
         private void Start()
@@ -204,6 +247,7 @@ namespace Rag.Healthcare.UI
             }
 
             ResolveReferences();
+            ApplyMobilePerformanceDefaults();
             EnsureDocument();
 
             if (document == null || document.rootVisualElement == null)
@@ -269,26 +313,29 @@ namespace Rag.Healthcare.UI
             ConfigurePanelSettings(document.panelSettings);
         }
 
-        private static void ConfigurePanelSettings(PanelSettings panelSettings)
+        private void ConfigurePanelSettings(PanelSettings panelSettings)
         {
             if (panelSettings == null)
             {
                 return;
             }
 
-            panelSettings.scaleMode = PanelScaleMode.ConstantPixelSize;
+            panelSettings.scaleMode = PanelScaleMode.ScaleWithScreenSize;
             panelSettings.referenceResolution = new Vector2Int(390, 844);
+            panelSettings.screenMatchMode = PanelScreenMatchMode.MatchWidthOrHeight;
             panelSettings.match = 0.5f;
             panelSettings.sortingOrder = 100;
             panelSettings.clearColor = true;
             panelSettings.colorClearValue = new Color(0.035f, 0.045f, 0.06f, 1f);
+
+            var theme = Resources.Load<ThemeStyleSheet>(RuntimeThemeResourcePath);
 #if UNITY_EDITOR
-            var theme = AssetDatabase.LoadAssetAtPath<ThemeStyleSheet>("Assets/UI Toolkit/UnityThemes/UnityDefaultRuntimeTheme.tss");
+            theme ??= AssetDatabase.LoadAssetAtPath<ThemeStyleSheet>("Assets/UI Toolkit/UnityThemes/UnityDefaultRuntimeTheme.tss");
+#endif
             if (theme != null)
             {
                 panelSettings.themeStyleSheet = theme;
             }
-#endif
         }
 
 #if UNITY_EDITOR
@@ -327,51 +374,24 @@ namespace Rag.Healthcare.UI
             root = new VisualElement { name = "mobile-workout-root" };
             root.style.flexGrow = 1f;
             root.style.backgroundColor = ColorFromHex(0x090D12);
-            root.style.alignItems = Align.Center;
+            root.style.alignItems = Align.Stretch;
             root.style.justifyContent = Justify.FlexStart;
-            root.style.paddingTop = 34f;
-            root.style.paddingRight = 14f;
-            root.style.paddingBottom = 14f;
-            root.style.paddingLeft = 14f;
+            var font = ResolveRuntimeFont();
+            if (font != null)
+            {
+                root.style.unityFont = font;
+            }
             documentRoot.Add(root);
-
-            root.Add(BuildHeroHeader());
-
-            var phone = new VisualElement { name = "phone-frame" };
-            phone.style.width = 376f;
-            phone.style.height = 780f;
-            phone.style.backgroundColor = ColorFromHex(0x161B22);
-            phone.style.borderTopLeftRadius = 40f;
-            phone.style.borderTopRightRadius = 40f;
-            phone.style.borderBottomLeftRadius = 40f;
-            phone.style.borderBottomRightRadius = 40f;
-            phone.style.borderTopWidth = 4f;
-            phone.style.borderRightWidth = 4f;
-            phone.style.borderBottomWidth = 4f;
-            phone.style.borderLeftWidth = 4f;
-            phone.style.borderTopColor = ColorFromHex(0x30363D);
-            phone.style.borderRightColor = ColorFromHex(0x30363D);
-            phone.style.borderBottomColor = ColorFromHex(0x30363D);
-            phone.style.borderLeftColor = ColorFromHex(0x30363D);
-            phone.style.paddingTop = 12f;
-            phone.style.paddingRight = 12f;
-            phone.style.paddingBottom = 12f;
-            phone.style.paddingLeft = 12f;
-            phone.style.marginTop = 20f;
-            root.Add(phone);
 
             var screen = new VisualElement { name = "phone-screen" };
             screen.style.flexGrow = 1f;
+            screen.style.width = Length.Percent(100f);
             screen.style.backgroundColor = ColorFromHex(0x0B1119);
-            screen.style.borderTopLeftRadius = 30f;
-            screen.style.borderTopRightRadius = 30f;
-            screen.style.borderBottomLeftRadius = 30f;
-            screen.style.borderBottomRightRadius = 30f;
             screen.style.paddingTop = 18f;
             screen.style.paddingRight = 14f;
             screen.style.paddingBottom = 12f;
             screen.style.paddingLeft = 14f;
-            phone.Add(screen);
+            root.Add(screen);
 
             screen.Add(BuildPhoneNotch());
             screen.Add(BuildStatusBar());
@@ -489,8 +509,8 @@ namespace Rag.Healthcare.UI
             row.style.paddingLeft = 8f;
             row.style.paddingRight = 8f;
 
-            row.Add(Label("19:44  🏃", 10, ColorFromHex(0xB6C2D5), FontStyle.Bold));
-            row.Add(Label("5G   ◇  ▰", 9, ColorFromHex(0x34D399), FontStyle.Bold));
+            row.Add(Label("AI HEALTH", 10, ColorFromHex(0xB6C2D5), FontStyle.Bold));
+            row.Add(Label("ONLINE", 9, ColorFromHex(0x34D399), FontStyle.Bold));
             return row;
         }
 
@@ -573,7 +593,7 @@ namespace Rag.Healthcare.UI
             var selected = GetSelectedExercise();
             var pickedHeader = Row("picked-header", 22f, 0f);
             pickedHeader.style.justifyContent = Justify.SpaceBetween;
-            var pickedTitle = Label("✓ 내가 고른 운동 목록 (1)", 11, ColorFromHex(0xB6C2D5), FontStyle.Normal);
+            var pickedTitle = Label("선택한 운동 목록 (1)", 11, ColorFromHex(0xB6C2D5), FontStyle.Normal);
             pickedTitle.style.flexGrow = 1f;
             pickedHeader.Add(pickedTitle);
             pickedHeader.Add(Label("Real-time Save", 9, ColorFromHex(0x34D399), FontStyle.Bold));
@@ -626,7 +646,7 @@ namespace Rag.Healthcare.UI
 
             var visibleExercises = GetVisibleExercises();
             var listHeader = Row("exercise-list-header", 26f, 0f);
-            var listTitle = Label("🌟 " + selectedCategory + " 운동 리스트 (터치 시 선택)", 12, ColorFromHex(0xD6E0EF), FontStyle.Bold);
+            var listTitle = Label(selectedCategory + " 운동 리스트 (터치하여 선택)", 12, ColorFromHex(0xD6E0EF), FontStyle.Bold);
             listTitle.style.flexGrow = 1f;
             listHeader.Add(listTitle);
 
@@ -1060,7 +1080,6 @@ namespace Rag.Healthcare.UI
             ApplyTargetCount();
             replayMode = false;
             replayPlayer?.StopReplay();
-            cameraSource?.StartCamera();
             trackingController?.StartTracking();
 
             if (!workoutRunning)
@@ -1160,6 +1179,23 @@ namespace Rag.Healthcare.UI
             feedbackOrchestrator?.SetCorrectRepTarget(GetTargetCount());
         }
 
+        private void ApplyMobilePerformanceDefaults()
+        {
+            if (mobilePerformanceConfigured ||
+                !applyMobilePerformanceDefaults ||
+                !Application.isPlaying ||
+                !Application.isMobilePlatform)
+            {
+                return;
+            }
+
+            mobilePerformanceConfigured = true;
+            QualitySettings.vSyncCount = 0;
+            Application.targetFrameRate = Mathf.Clamp(mobileTargetFrameRate, 15, 120);
+            cameraSource?.ConfigureCapture(mobileCameraWidth, mobileCameraHeight, mobileCameraFps);
+            trackingController?.ConfigureSamplingRate(mobilePoseFps);
+        }
+
         private void ApplyCompatibilityVisibility()
         {
             if (hideLegacyDebugView)
@@ -1213,9 +1249,9 @@ namespace Rag.Healthcare.UI
         {
             return category switch
             {
-                "상체" => "상체 💪",
-                "하체" => "하체 🦵",
-                "맨몸" => "맨몸 🧘",
+                "상체" => "상체",
+                "하체" => "하체",
+                "맨몸" => "맨몸",
                 _ => category
             };
         }
@@ -1224,16 +1260,44 @@ namespace Rag.Healthcare.UI
         {
             return id switch
             {
-                "squat" => "🦵",
-                "lunge" => "🏃",
-                "legpress" => "🦿",
-                "deadlift" => "🏋",
-                "pushup" => "💪",
-                "pullup" => "↕",
-                "plank" => "▰",
-                "burpee" => "⚡",
-                _ => "•"
+                "squat" => "SQ",
+                "lunge" => "LU",
+                "legpress" => "LP",
+                "deadlift" => "DL",
+                "pushup" => "PU",
+                "pullup" => "PL",
+                "plank" => "PK",
+                "burpee" => "BP",
+                _ => "EX"
             };
+        }
+
+        private Font ResolveRuntimeFont()
+        {
+            if (runtimeFont != null)
+            {
+                return runtimeFont;
+            }
+
+            try
+            {
+                runtimeFont = Font.CreateDynamicFontFromOSFont(KoreanFontFallbacks, 16);
+                ownsRuntimeFont = runtimeFont != null;
+                if (ownsRuntimeFont)
+                {
+                    runtimeFont.name = "AI Healthcare Korean Runtime Font";
+                    runtimeFont.hideFlags = HideFlags.DontSave;
+                    return runtimeFont;
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[MobileWorkoutPrototypeView] Korean system font could not be loaded: " + exception.Message);
+            }
+
+            runtimeFont = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            ownsRuntimeFont = false;
+            return runtimeFont;
         }
 
         private void UpdateProgress()

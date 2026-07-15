@@ -23,6 +23,7 @@ namespace Rag.Healthcare.Pose
         [SerializeField] private bool autoStartTracking;
         [SerializeField, Min(0.01f)] private float requestIntervalSeconds = 1f / 15f;
         [SerializeField, Min(0f)] private float failureLogCooldownSeconds = 1f;
+        [SerializeField, Min(1f)] private float cameraStartupTimeoutSeconds = 10f;
 
         private readonly List<PoseFeedbackMessage> generatedFeedback = new List<PoseFeedbackMessage>();
         private Coroutine startCoroutine;
@@ -128,6 +129,14 @@ namespace Rag.Healthcare.Pose
                 yield break;
             }
 
+            yield return WaitForCameraReady();
+            if (!IsCameraReady())
+            {
+                NotifyFailure(BuildCameraFailureMessage());
+                startCoroutine = null;
+                yield break;
+            }
+
             yield return trackingProvider.Initialize();
 
             if (!trackingProvider.IsReady)
@@ -147,6 +156,13 @@ namespace Rag.Healthcare.Pose
         {
             if (!PrepareCameraAndProvider())
             {
+                yield break;
+            }
+
+            yield return WaitForCameraReady();
+            if (!IsCameraReady())
+            {
+                NotifyFailure(BuildCameraFailureMessage());
                 yield break;
             }
 
@@ -259,6 +275,43 @@ namespace Rag.Healthcare.Pose
             }
 
             return true;
+        }
+
+        private IEnumerator WaitForCameraReady()
+        {
+            var deadline = Time.realtimeSinceStartup + Mathf.Max(1f, cameraStartupTimeoutSeconds);
+            while (cameraSource != null && Time.realtimeSinceStartup < deadline)
+            {
+                if (cameraSource.HasValidFrame)
+                {
+                    yield break;
+                }
+
+                if (!cameraSource.IsRunning &&
+                    !cameraSource.IsStarting &&
+                    !string.IsNullOrWhiteSpace(cameraSource.LastError))
+                {
+                    yield break;
+                }
+
+                yield return null;
+            }
+        }
+
+        private bool IsCameraReady()
+        {
+            return cameraSource != null && cameraSource.HasValidFrame;
+        }
+
+        private string BuildCameraFailureMessage()
+        {
+            if (cameraSource != null && !string.IsNullOrWhiteSpace(cameraSource.LastError))
+            {
+                return cameraSource.LastError;
+            }
+
+            return "Camera did not provide a valid frame within " +
+                   Mathf.Max(1f, cameraStartupTimeoutSeconds).ToString("0.#") + " seconds.";
         }
 
         private PoseTrackingProvider ResolveProvider()
