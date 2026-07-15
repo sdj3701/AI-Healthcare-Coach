@@ -30,7 +30,7 @@ namespace AIHealthcareCoach.Editor
         {
             var podfilePath = Path.Combine(pathToBuiltProject, "Podfile");
             var content =
-                "platform :ios, '13.0'\n" +
+                "platform :ios, '15.0'\n" +
                 "use_frameworks!\n\n" +
                 "target 'UnityFramework' do\n" +
                 "  pod 'MediaPipeTasksVision'\n" +
@@ -51,8 +51,8 @@ namespace AIHealthcareCoach.Editor
             var mainTarget = project.GetUnityMainTargetGuid();
             var frameworkTarget = project.GetUnityFrameworkTargetGuid();
 
-            project.SetBuildProperty(mainTarget, "IPHONEOS_DEPLOYMENT_TARGET", "13.0");
-            project.SetBuildProperty(frameworkTarget, "IPHONEOS_DEPLOYMENT_TARGET", "13.0");
+            project.SetBuildProperty(mainTarget, "IPHONEOS_DEPLOYMENT_TARGET", "15.0");
+            project.SetBuildProperty(frameworkTarget, "IPHONEOS_DEPLOYMENT_TARGET", "15.0");
             project.SetBuildProperty(frameworkTarget, "SWIFT_VERSION", "5.0");
             project.SetBuildProperty(frameworkTarget, "CLANG_ENABLE_MODULES", "YES");
             project.SetBuildProperty(frameworkTarget, "ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES", "NO");
