@@ -59,6 +59,11 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         label: "com.aihealthcarecoach.mediapipe.pose-result",
         qos: .userInitiated
     )
+    private let submissionQueue = DispatchQueue(
+        label: "com.aihealthcarecoach.mediapipe.pose-submission",
+        qos: .userInitiated
+    )
+    private let submissionQueueCapacity = DispatchSemaphore(value: 1)
     private let teardownQueue = DispatchQueue(
         label: "com.aihealthcarecoach.mediapipe.pose-teardown",
         qos: .utility
@@ -71,6 +76,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
     private var generation: Int64 = 0
     private var nextSubmissionToken: Int64 = 0
     private var preparingGeneration: Int64?
+    private var preparingLegacyWaiter: AHCLegacyPoseWaiter?
     private var inFlightSubmission: AHCPoseSubmission?
     private var lastSubmittedTimestamp = -1
 
@@ -160,6 +166,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             advanceGenerationLocked()
             lastSubmittedTimestamp = -1
             preparingGeneration = nil
+            preparingLegacyWaiter = nil
             inFlightSubmission = nil
             resultStatus = 0
             lastError = ""
@@ -256,6 +263,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         // MediaPipe does not expose cancellation for a submitted live-stream
         // frame. Keep the physical request as the sole in-flight frame until its
         // callback arrives, but make its generation stale immediately.
+        preparingLegacyWaiter?.complete(with: -16)
         inFlightSubmission?.legacyWaiter?.complete(with: -16)
         if hadPendingWork {
             publishErrorLocked(
@@ -275,11 +283,13 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         let retiredLandmarker: PoseLandmarker?
         stateLock.lock()
         advanceGenerationLocked()
+        preparingLegacyWaiter?.complete(with: -16)
         inFlightSubmission?.legacyWaiter?.complete(with: -16)
         retiredLandmarker = poseLandmarker
         poseLandmarker = nil
         inFlightSubmission = nil
         preparingGeneration = nil
+        preparingLegacyWaiter = nil
         lastSubmittedTimestamp = -1
         resultStatus = 0
         latestJson = "{}"
@@ -340,7 +350,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         }
 
         guard let rgbaPointer = rgbaPointer,
-              validatedByteLayout(width: width, height: height) != nil else {
+              let byteLayout = validatedByteLayout(width: width, height: height) else {
             publishErrorLocked(
                 status: -11,
                 code: "INVALID_FRAME",
@@ -357,27 +367,73 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             return -14
         }
 
+        // dispose()/initialize() can clear lifecycle state while an older queued
+        // conversion is still draining. A non-blocking capacity gate keeps the
+        // serial queue bounded to one physical preparation task in that case.
+        guard submissionQueueCapacity.wait(timeout: DispatchTime.now()) == .success else {
+            stateLock.unlock()
+            return -14
+        }
+
         let submissionGeneration = generation
         let landmarkerIdentifier = ObjectIdentifier(landmarker)
         preparingGeneration = submissionGeneration
+        preparingLegacyWaiter = legacyWaiter
+        resultStatus = 0
+        lastError = ""
         stateLock.unlock()
 
         // Unity only guarantees that its pinned Color32[] is valid until this C
-        // call returns. Data(bytes:) performs the required native copy before the
-        // asynchronous MediaPipe request is submitted.
-        let image = autoreleasepool {
-            makeImage(
-                rgbaPointer: rgbaPointer,
-                width: width,
-                height: height,
-                rotationAngle: rotationAngle
-            )
+        // call returns. Keep this one native copy synchronous; image allocation,
+        // orientation correction, and MediaPipe submission run on a serial queue.
+        let rgbaData = Data(bytes: rgbaPointer, count: byteLayout.byteCount)
+
+        submissionQueue.async { [self] in
+            defer { submissionQueueCapacity.signal() }
+            autoreleasepool {
+                prepareAndSubmit(
+                    rgbaData: rgbaData,
+                    landmarker: landmarker,
+                    landmarkerIdentifier: landmarkerIdentifier,
+                    submissionGeneration: submissionGeneration,
+                    timestampMs: timestampMs,
+                    width: width,
+                    height: height,
+                    rotationAngle: rotationAngle,
+                    mirrored: mirrored,
+                    legacyWaiter: legacyWaiter
+                )
+            }
         }
+
+        return 0
+    }
+
+    private func prepareAndSubmit(
+        rgbaData: Data,
+        landmarker: PoseLandmarker,
+        landmarkerIdentifier: ObjectIdentifier,
+        submissionGeneration: Int64,
+        timestampMs: Int,
+        width: Int,
+        height: Int,
+        rotationAngle: Int,
+        mirrored: Bool,
+        legacyWaiter: AHCLegacyPoseWaiter?
+    ) {
+        let image = makeImage(
+            rgbaData: rgbaData,
+            width: width,
+            height: height,
+            rotationAngle: rotationAngle,
+            mirrored: mirrored
+        )
 
         guard let image = image else {
             stateLock.lock()
             if preparingGeneration == submissionGeneration {
                 preparingGeneration = nil
+                preparingLegacyWaiter = nil
             }
 
             let status: Int32
@@ -396,7 +452,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
 
             legacyWaiter?.complete(with: status)
             stateLock.unlock()
-            return status
+            return
         }
 
         stateLock.lock()
@@ -406,14 +462,16 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
               ObjectIdentifier(currentLandmarker) == landmarkerIdentifier else {
             if preparingGeneration == submissionGeneration {
                 preparingGeneration = nil
+                preparingLegacyWaiter = nil
             }
             legacyWaiter?.complete(with: -16)
             stateLock.unlock()
-            return -16
+            return
         }
 
         guard let monotonicTimestamp = nextTimestampLocked(requested: timestampMs) else {
             preparingGeneration = nil
+            preparingLegacyWaiter = nil
             publishErrorLocked(
                 status: -13,
                 code: "TIMESTAMP_EXHAUSTED",
@@ -421,7 +479,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             )
             legacyWaiter?.complete(with: -13)
             stateLock.unlock()
-            return -13
+            return
         }
 
         nextSubmissionToken &+= 1
@@ -439,6 +497,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
 
         inFlightSubmission = submission
         preparingGeneration = nil
+        preparingLegacyWaiter = nil
         resultStatus = 0
         lastError = ""
         stateLock.unlock()
@@ -448,7 +507,6 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
                 image: image,
                 timestampInMilliseconds: monotonicTimestamp
             )
-            return 0
         } catch {
             stateLock.lock()
             let isCurrentSubmission =
@@ -476,7 +534,6 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
 
             legacyWaiter?.complete(with: status)
             stateLock.unlock()
-            return status
         }
     }
 
@@ -559,15 +616,16 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             return status
         }
 
-        guard let submission = inFlightSubmission,
-              submission.legacyWaiter === waiter else {
+        let isPreparing = preparingLegacyWaiter === waiter
+        let isInFlight = inFlightSubmission?.legacyWaiter === waiter
+        guard isPreparing || isInFlight else {
             stateLock.unlock()
             return waiter.status ?? -15
         }
 
-        // Invalidate the eventual callback but keep the physical frame marked
-        // in-flight until MediaPipe releases it. This avoids submitting a frame
-        // that MediaPipe would silently drop while its graph is still busy.
+        // Invalidate queued preparation or the eventual callback, but keep the
+        // physical work marked active until its queue task/callback drains. This
+        // prevents MediaPipe from silently dropping a replacement frame.
         advanceGenerationLocked()
         publishErrorLocked(
             status: -15,
@@ -580,17 +638,35 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
     }
 
     private func makeImage(
-        rgbaPointer: UnsafeRawPointer,
+        rgbaData: Data,
         width: Int,
         height: Int,
-        rotationAngle: Int
+        rotationAngle: Int,
+        mirrored: Bool
     ) -> MPImage? {
-        guard let layout = validatedByteLayout(width: width, height: height) else {
+        guard let layout = validatedByteLayout(width: width, height: height),
+              rgbaData.count == layout.byteCount else {
             return nil
         }
 
-        let data = Data(bytes: rgbaPointer, count: layout.byteCount)
-        guard let provider = CGDataProvider(data: data as CFData) else {
+        let imageData: Data
+        if mirrored {
+            // WebCamTexture.videoVerticallyMirrored describes the memory layout,
+            // not a display-only UIImage transform. Reverse the RGBA scanlines so
+            // MediaPipe receives pixels in the same upright coordinate system.
+            guard let flippedData = verticallyFlippedRgbaData(
+                rgbaData,
+                bytesPerRow: layout.bytesPerRow,
+                height: height
+            ) else {
+                return nil
+            }
+            imageData = flippedData
+        } else {
+            imageData = rgbaData
+        }
+
+        guard let provider = CGDataProvider(data: imageData as CFData) else {
             return nil
         }
 
@@ -623,6 +699,47 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         )
 
         return try? MPImage(uiImage: uiImage)
+    }
+
+    private func verticallyFlippedRgbaData(
+        _ data: Data,
+        bytesPerRow: Int,
+        height: Int
+    ) -> Data? {
+        guard bytesPerRow > 0,
+              height > 0,
+              data.count == bytesPerRow * height else {
+            return nil
+        }
+
+        var flippedData = Data(count: data.count)
+        let copiedAllRows = data.withUnsafeBytes {
+            (sourceBuffer: UnsafeRawBufferPointer) -> Bool in
+            guard let sourceBaseAddress = sourceBuffer.baseAddress else {
+                return false
+            }
+
+            return flippedData.withUnsafeMutableBytes {
+                (destinationBuffer: UnsafeMutableRawBufferPointer) -> Bool in
+                guard let destinationBaseAddress = destinationBuffer.baseAddress else {
+                    return false
+                }
+
+                for destinationRow in 0..<height {
+                    let sourceRow = height - destinationRow - 1
+                    destinationBaseAddress
+                        .advanced(by: destinationRow * bytesPerRow)
+                        .copyMemory(
+                            from: sourceBaseAddress.advanced(by: sourceRow * bytesPerRow),
+                            byteCount: bytesPerRow
+                        )
+                }
+
+                return true
+            }
+        }
+
+        return copiedAllRows ? flippedData : nil
     }
 
     private func validatedByteLayout(width: Int, height: Int) -> (bytesPerRow: Int, byteCount: Int)? {
@@ -803,6 +920,14 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
 
         return path
     }
+}
+
+// Version 2 guarantees the non-blocking submit/consume ABI used by the Unity
+// runtime. Managed code checks this before creating the graph so an incremental
+// build cannot silently fall back to the legacy semaphore-based entry point.
+@_cdecl("AHC_PoseGetBridgeVersion")
+public func AHC_PoseGetBridgeVersion() -> Int32 {
+    return 2
 }
 
 @_cdecl("AHC_PoseInitialize")

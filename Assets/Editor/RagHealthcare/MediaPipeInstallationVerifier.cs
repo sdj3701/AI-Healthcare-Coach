@@ -29,8 +29,17 @@ namespace Rag.Healthcare.Editor
 
         public static MediaPipeVerificationReport Verify()
         {
+            var absoluteBridgePath = Path.Combine(Directory.GetCurrentDirectory(), SwiftBridgePath);
+            var bridgeSource = File.Exists(absoluteBridgePath)
+                ? File.ReadAllText(absoluteBridgePath)
+                : string.Empty;
+            var asyncBridgeConfigured = bridgeSource.Contains("AHC_PoseGetBridgeVersion") &&
+                                        bridgeSource.Contains("AHC_PoseSubmitRgba") &&
+                                        bridgeSource.Contains("AHC_PoseTryConsumeLatest") &&
+                                        bridgeSource.Contains("AHC_PoseCancelPending");
             var bridgeConfigured = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(SwiftBridgePath) != null &&
-                                   AssetDatabase.LoadAssetAtPath<MonoScript>(BuildPostprocessorPath) != null;
+                                   AssetDatabase.LoadAssetAtPath<MonoScript>(BuildPostprocessorPath) != null &&
+                                   asyncBridgeConfigured;
             var model = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(ModelPath);
             var modelInfo = new FileInfo(Path.Combine(Directory.GetCurrentDirectory(), ModelPath));
             var modelValid = model != null && modelInfo.Exists && modelInfo.Length > 1024;
@@ -40,11 +49,12 @@ namespace Rag.Healthcare.Editor
             {
                 success = success,
                 packageConfigured = bridgeConfigured,
+                asyncBridgeConfigured = asyncBridgeConfigured,
                 modelValid = modelValid,
                 modelBytes = modelInfo.Exists ? modelInfo.Length : 0,
                 message = success
                     ? $"MediaPipe iOS Swift bridge and pose model are configured ({modelInfo.Length:N0} bytes)."
-                    : $"iOS Swift bridge configured: {bridgeConfigured}; model valid: {modelValid}. Verify {SwiftBridgePath}, {BuildPostprocessorPath}, and {ModelPath}."
+                    : $"iOS Swift bridge configured: {bridgeConfigured}; async ABI configured: {asyncBridgeConfigured}; model valid: {modelValid}. Verify {SwiftBridgePath}, {BuildPostprocessorPath}, and {ModelPath}."
             };
         }
     }
@@ -54,6 +64,7 @@ namespace Rag.Healthcare.Editor
     {
         public bool success;
         public bool packageConfigured;
+        public bool asyncBridgeConfigured;
         public bool modelValid;
         public long modelBytes;
         public string message;

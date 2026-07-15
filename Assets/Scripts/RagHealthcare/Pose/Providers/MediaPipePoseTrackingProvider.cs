@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.IO;
+using System.Threading.Tasks;
 using UnityEngine;
 
 #pragma warning disable 0414
@@ -61,6 +62,16 @@ namespace Rag.Healthcare.Pose.Providers
 #else
         private IPoseEstimator fallbackPoseEstimator;
         private Color32[] fallbackPixels;
+        private Task<bool> fallbackInitializationTask;
+        private Task<AsyncRecoveryOutcome> fallbackRecoveryTask;
+        private float asyncBusyStartedAt = -1f;
+        private int consecutiveAsyncRecoveryCount;
+
+        private sealed class AsyncRecoveryOutcome
+        {
+            public bool Recovered;
+            public string Error = string.Empty;
+        }
 #endif
 
         public override PoseTrackingBackend Backend => PoseTrackingBackend.LocalMediaPipe;
@@ -70,6 +81,17 @@ namespace Rag.Healthcare.Pose.Providers
 
         public override IEnumerator Initialize()
         {
+#if !AHC_USE_HOMULER_MEDIAPIPE
+            // A stopped Start coroutine does not cancel native graph creation. Reattach
+            // to that task on the next Start instead of disposing an estimator that is
+            // still inside MediaPipe initialization.
+            if (fallbackInitializationTask != null)
+            {
+                yield return CompleteFallbackInitialization();
+                yield break;
+            }
+#endif
+
             Dispose();
             LastError = string.Empty;
             DroppedFrameCount = 0;
@@ -131,19 +153,27 @@ namespace Rag.Healthcare.Pose.Providers
             };
 
             fallbackPoseEstimator = PoseEstimatorFactory.Create(settings);
-            if (fallbackPoseEstimator == null || !fallbackPoseEstimator.Initialize(settings))
+            if (fallbackPoseEstimator == null)
             {
-                var error = fallbackPoseEstimator == null
-                    ? "Pose estimator factory returned no fallback provider."
-                    : fallbackPoseEstimator.LastError;
-                SetFailure("Editor Python MediaPipe fallback failed to initialize: " + error);
+                SetFailure("Pose estimator factory returned no fallback provider.");
                 Dispose();
                 yield break;
             }
 
-            isReady = true;
-            LastError = string.Empty;
-            Debug.Log("[MediaPipePoseTrackingProvider] Using " + fallbackPoseEstimator.BackendName + " fallback.");
+#if UNITY_IOS && !UNITY_EDITOR
+            var estimatorToInitialize = fallbackPoseEstimator;
+            fallbackInitializationTask = Task.Run(() => estimatorToInitialize.Initialize(settings));
+            yield return CompleteFallbackInitialization();
+#else
+            if (!fallbackPoseEstimator.Initialize(settings))
+            {
+                SetFailure("MediaPipe fallback failed to initialize: " + fallbackPoseEstimator.LastError);
+                Dispose();
+                yield break;
+            }
+
+            MarkFallbackInitialized();
+#endif
 #endif
 
             yield break;
@@ -245,6 +275,14 @@ namespace Rag.Healthcare.Pose.Providers
                         onFrame,
                         onError);
                 }
+                else if (fallbackPoseEstimator is IAsyncPoseEstimator)
+                {
+                    isReady = false;
+                    LastError = string.IsNullOrWhiteSpace(fallbackPoseEstimator.LastError)
+                        ? "The asynchronous MediaPipe pose backend is unavailable. Build a fresh iOS Xcode export from Unity."
+                        : fallbackPoseEstimator.LastError;
+                    onError?.Invoke(LastError);
+                }
                 else
                 {
                     ProcessAndPublishFallbackFrame(
@@ -275,9 +313,65 @@ namespace Rag.Healthcare.Pose.Providers
             resultBuffer = default;
             appliedImageRotationDegrees = int.MinValue;
 #else
-            fallbackPoseEstimator?.Dispose();
+            var estimatorToDispose = fallbackPoseEstimator;
+            Task activeNativeTask = fallbackInitializationTask;
+            if (activeNativeTask == null)
+            {
+                activeNativeTask = fallbackRecoveryTask;
+            }
+
             fallbackPoseEstimator = null;
+            fallbackInitializationTask = null;
+            fallbackRecoveryTask = null;
             fallbackPixels = null;
+            asyncBusyStartedAt = -1f;
+            consecutiveAsyncRecoveryCount = 0;
+
+            if (estimatorToDispose != null)
+            {
+                if (activeNativeTask != null && !activeNativeTask.IsCompleted)
+                {
+                    activeNativeTask.ContinueWith(
+                        completedTask =>
+                        {
+                            // Observe any background failure before releasing the
+                            // estimator so it cannot surface later as an unobserved
+                            // task exception during app shutdown.
+                            _ = completedTask.Exception;
+                            try
+                            {
+                                if (estimatorToDispose is IOSMediaPipePoseEstimator iosEstimator)
+                                {
+                                    iosEstimator.AbandonManagedResources();
+                                }
+                                else
+                                {
+                                    estimatorToDispose.Dispose();
+                                }
+                            }
+                            catch
+                            {
+                                // The Unity object is already disposing; no managed
+                                // callback target remains for a teardown error.
+                            }
+                        },
+                        TaskScheduler.Default);
+                }
+                else
+                {
+                    if (estimatorToDispose is IOSMediaPipePoseEstimator iosEstimator)
+                    {
+                        // The Swift bridge owns one process-wide graph. A provider
+                        // leaving a scene must not tear down a graph that a newer
+                        // provider may already be reusing.
+                        iosEstimator.AbandonManagedResources();
+                    }
+                    else
+                    {
+                        estimatorToDispose.Dispose();
+                    }
+                }
+            }
 #endif
             isReady = false;
             isProcessingFrame = false;
@@ -288,6 +382,15 @@ namespace Rag.Healthcare.Pose.Providers
         public override void CancelPendingEstimate()
         {
 #if !AHC_USE_HOMULER_MEDIAPIPE
+            // Initialization and timeout recovery may be creating a GPU graph on a
+            // worker thread. Calling into the bridge here would wait on its state lock
+            // and freeze Unity, so let that operation finish naturally.
+            if ((fallbackInitializationTask != null && !fallbackInitializationTask.IsCompleted) ||
+                (fallbackRecoveryTask != null && !fallbackRecoveryTask.IsCompleted))
+            {
+                return;
+            }
+
             if (fallbackPoseEstimator is IAsyncPoseEstimator asyncEstimator)
             {
                 asyncEstimator.CancelPendingFrame();
@@ -353,6 +456,55 @@ namespace Rag.Healthcare.Pose.Providers
         }
 
 #if !AHC_USE_HOMULER_MEDIAPIPE
+        private IEnumerator CompleteFallbackInitialization()
+        {
+            var initializationTask = fallbackInitializationTask;
+            if (initializationTask == null)
+            {
+                yield break;
+            }
+
+            while (!initializationTask.IsCompleted)
+            {
+                yield return null;
+            }
+
+            fallbackInitializationTask = null;
+
+            bool initialized;
+            try
+            {
+                initialized = initializationTask.GetAwaiter().GetResult();
+            }
+            catch (Exception exception)
+            {
+                SetFailure("MediaPipe fallback initialization failed: " + exception.GetBaseException().Message);
+                Dispose();
+                yield break;
+            }
+
+            if (!initialized || fallbackPoseEstimator == null || !fallbackPoseEstimator.IsReady)
+            {
+                var error = fallbackPoseEstimator == null
+                    ? "The pose estimator was disposed while it was initializing."
+                    : fallbackPoseEstimator.LastError;
+                SetFailure("MediaPipe fallback failed to initialize: " + error);
+                Dispose();
+                yield break;
+            }
+
+            MarkFallbackInitialized();
+        }
+
+        private void MarkFallbackInitialized()
+        {
+            isReady = true;
+            LastError = string.Empty;
+            asyncBusyStartedAt = -1f;
+            consecutiveAsyncRecoveryCount = 0;
+            Debug.Log("[MediaPipePoseTrackingProvider] Using " + fallbackPoseEstimator.BackendName + " fallback.");
+        }
+
         private IEnumerator ProcessAsyncFallbackFrame(
             IAsyncPoseEstimator asyncEstimator,
             Texture source,
@@ -388,16 +540,37 @@ namespace Rag.Healthcare.Pose.Providers
                     rotationAngle,
                     out var submitError))
             {
-                // An older exported native project may not have the additive async ABI.
-                // Keep the existing synchronous implementation as a compatibility path.
+                // Never call the legacy blocking iOS API here. It waits on a native
+                // semaphore for up to one second per frame and starves every UI event.
                 if (!asyncEstimator.SupportsAsyncProcessing)
                 {
-                    ProcessAndPublishFallbackFrame(
-                        source,
-                        mediaPipeTimestamp,
-                        onFrame,
-                        onError);
+                    isReady = false;
+                    LastError = string.IsNullOrWhiteSpace(submitError)
+                        ? "The asynchronous MediaPipe pose bridge is unavailable. Build a fresh iOS Xcode export from Unity."
+                        : submitError;
+                    onError?.Invoke(LastError);
                     yield break;
+                }
+
+                if (IsNativeBusyError(submitError))
+                {
+                    if (asyncBusyStartedAt < 0f)
+                    {
+                        asyncBusyStartedAt = Time.realtimeSinceStartup;
+                    }
+                    else if (Time.realtimeSinceStartup - asyncBusyStartedAt >=
+                             Mathf.Max(0.25f, asyncInferenceTimeoutSeconds))
+                    {
+                        yield return RecoverAsyncFallback(
+                            asyncEstimator,
+                            "MediaPipe remained busy after cancellation",
+                            onError);
+                        yield break;
+                    }
+                }
+                else
+                {
+                    asyncBusyStartedAt = -1f;
                 }
 
                 LastError = string.IsNullOrWhiteSpace(submitError)
@@ -406,6 +579,8 @@ namespace Rag.Healthcare.Pose.Providers
                 onError?.Invoke(LastError);
                 yield break;
             }
+
+            asyncBusyStartedAt = -1f;
 
             var deadline = Time.realtimeSinceStartup + Mathf.Max(0.25f, asyncInferenceTimeoutSeconds);
             while (true)
@@ -421,21 +596,10 @@ namespace Rag.Healthcare.Pose.Providers
                         continue;
                     }
 
-                    var recovered = asyncEstimator.TryRecoverFromTimeout(out var recoveryError);
-                    isReady = recovered && fallbackPoseEstimator.IsReady;
-                    if (isReady)
-                    {
-                        LastError = "MediaPipe asynchronous inference timed out; the native pose graph was restarted.";
-                    }
-                    else
-                    {
-                        isReady = false;
-                        LastError = string.IsNullOrWhiteSpace(recoveryError)
-                            ? "MediaPipe asynchronous inference timed out and the native pose graph could not be restarted."
-                            : "MediaPipe asynchronous inference timed out and recovery failed: " + recoveryError;
-                    }
-
-                    onError?.Invoke(LastError);
+                    yield return RecoverAsyncFallback(
+                        asyncEstimator,
+                        "MediaPipe asynchronous inference timed out",
+                        onError);
                     yield break;
                 }
 
@@ -457,9 +621,81 @@ namespace Rag.Healthcare.Pose.Providers
                 }
 
                 LastError = string.Empty;
+                consecutiveAsyncRecoveryCount = 0;
                 onFrame?.Invoke(frame);
                 yield break;
             }
+        }
+
+        private IEnumerator RecoverAsyncFallback(
+            IAsyncPoseEstimator asyncEstimator,
+            string reason,
+            Action<string> onError)
+        {
+            const int maximumConsecutiveRecoveries = 1;
+            if (consecutiveAsyncRecoveryCount >= maximumConsecutiveRecoveries)
+            {
+                isReady = false;
+                LastError = reason +
+                            "; automatic recovery was already attempted. Stop and Start tracking to retry safely.";
+                onError?.Invoke(LastError);
+                yield break;
+            }
+
+            consecutiveAsyncRecoveryCount++;
+            var estimator = fallbackPoseEstimator;
+            fallbackRecoveryTask = Task.Run(() =>
+            {
+                var recovered = asyncEstimator.TryRecoverFromTimeout(out var recoveryError);
+                return new AsyncRecoveryOutcome
+                {
+                    Recovered = recovered,
+                    Error = recoveryError ?? string.Empty
+                };
+            });
+
+            var recoveryTask = fallbackRecoveryTask;
+            while (!recoveryTask.IsCompleted)
+            {
+                yield return null;
+            }
+
+            fallbackRecoveryTask = null;
+
+            AsyncRecoveryOutcome outcome;
+            try
+            {
+                outcome = recoveryTask.GetAwaiter().GetResult();
+            }
+            catch (Exception exception)
+            {
+                outcome = new AsyncRecoveryOutcome
+                {
+                    Recovered = false,
+                    Error = exception.GetBaseException().Message
+                };
+            }
+
+            isReady = outcome.Recovered && ReferenceEquals(estimator, fallbackPoseEstimator) && estimator.IsReady;
+            asyncBusyStartedAt = -1f;
+            if (isReady)
+            {
+                LastError = reason + "; the native pose graph was restarted in the background.";
+            }
+            else
+            {
+                LastError = string.IsNullOrWhiteSpace(outcome.Error)
+                    ? reason + " and the native pose graph could not be restarted."
+                    : reason + "; recovery failed: " + outcome.Error;
+            }
+
+            onError?.Invoke(LastError);
+        }
+
+        private static bool IsNativeBusyError(string error)
+        {
+            return !string.IsNullOrWhiteSpace(error) &&
+                   error.IndexOf("still processing", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void ProcessAndPublishFallbackFrame(

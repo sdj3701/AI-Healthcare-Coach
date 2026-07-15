@@ -1358,17 +1358,25 @@ namespace Rag.Healthcare.UI
 
         private IEnumerator StopWorkoutAndReplayRoutine()
         {
-            StopWorkoutOnly();
-            yield return WaitForTrackingRequestToFinish();
-
-            // Keep the capture session warm while replay is visible. START can then
-            // resume without repeatedly tearing down AVFoundation and MediaPipe.
+            // Ensure the coroutine handle is assigned before transition work runs.
             yield return null;
+            try
+            {
+                StopWorkoutOnly();
+                yield return WaitForTrackingRequestToFinish();
 
-            replayPlayer?.PlayLatestSession();
-            replayMode = true;
-            RefreshPreviewTexture();
-            sessionTransitionCoroutine = null;
+                // Keep the capture session warm while replay is visible. START can then
+                // resume without repeatedly tearing down AVFoundation and MediaPipe.
+                yield return null;
+
+                replayPlayer?.PlayLatestSession();
+                replayMode = true;
+                RefreshPreviewTexture();
+            }
+            finally
+            {
+                sessionTransitionCoroutine = null;
+            }
         }
 
         private void StopWorkoutOnly()
@@ -1401,41 +1409,49 @@ namespace Rag.Healthcare.UI
 
         private IEnumerator SwitchCameraRoutine()
         {
-            replayMode = false;
-            replayPlayer?.StopReplay();
-            var shouldResumeTracking = workoutRunning || (trackingController != null && trackingController.IsTracking);
-
-            if (workoutRunning)
-            {
-                elapsedBeforePause += Time.unscaledTime - sessionStartedAt;
-            }
-
-            workoutRunning = false;
-            coachTts ??= FindFirstObjectByType<CoachTtsController>();
-            coachTts?.Suspend();
-            trackingController?.StopTracking();
-            yield return WaitForTrackingRequestToFinish();
-            cameraSource?.StopCamera();
-            cameraSource?.TogglePreferredCameraFacing();
-
-            // AVFoundation can still be releasing the previous capture session
-            // for the remainder of this frame. Debounce camera switches and give
-            // it two player-loop turns before creating the replacement texture.
+            // Ensure the coroutine handle is assigned before transition work runs.
             yield return null;
-            yield return null;
-
-            cameraSource?.StartCamera();
-
-            if (shouldResumeTracking)
+            try
             {
-                coachTts?.Resume();
-                trackingController?.StartTracking();
-                workoutRunning = true;
-                sessionStartedAt = Time.unscaledTime;
-            }
+                replayMode = false;
+                replayPlayer?.StopReplay();
+                var shouldResumeTracking = workoutRunning || (trackingController != null && trackingController.IsTracking);
 
-            RefreshPreviewTexture();
-            sessionTransitionCoroutine = null;
+                if (workoutRunning)
+                {
+                    elapsedBeforePause += Time.unscaledTime - sessionStartedAt;
+                }
+
+                workoutRunning = false;
+                coachTts ??= FindFirstObjectByType<CoachTtsController>();
+                coachTts?.Suspend();
+                trackingController?.StopTracking();
+                yield return WaitForTrackingRequestToFinish();
+                cameraSource?.StopCamera();
+                cameraSource?.TogglePreferredCameraFacing();
+
+                // AVFoundation can still be releasing the previous capture session
+                // for the remainder of this frame. Debounce camera switches and give
+                // it two player-loop turns before creating the replacement texture.
+                yield return null;
+                yield return null;
+
+                cameraSource?.StartCamera();
+
+                if (shouldResumeTracking)
+                {
+                    coachTts?.Resume();
+                    trackingController?.StartTracking();
+                    workoutRunning = true;
+                    sessionStartedAt = Time.unscaledTime;
+                }
+
+                RefreshPreviewTexture();
+            }
+            finally
+            {
+                sessionTransitionCoroutine = null;
+            }
         }
 
         private IEnumerator WaitForTrackingRequestToFinish()
@@ -1462,17 +1478,25 @@ namespace Rag.Healthcare.UI
 
         private IEnumerator ResetSessionRoutine()
         {
-            StopWorkoutOnly();
-            yield return WaitForTrackingRequestToFinish();
-            cameraSource?.StopCamera();
+            // Ensure the coroutine handle is assigned before transition work runs.
             yield return null;
-            yield return null;
-            replayPlayer?.StopReplay();
-            elapsedBeforePause = 0f;
-            replayMode = false;
-            ApplyTargetCount();
-            RenderCurrentStep();
-            sessionTransitionCoroutine = null;
+            try
+            {
+                StopWorkoutOnly();
+                yield return WaitForTrackingRequestToFinish();
+                cameraSource?.StopCamera();
+                yield return null;
+                yield return null;
+                replayPlayer?.StopReplay();
+                elapsedBeforePause = 0f;
+                replayMode = false;
+                ApplyTargetCount();
+                RenderCurrentStep();
+            }
+            finally
+            {
+                sessionTransitionCoroutine = null;
+            }
         }
 
         private void ApplyTargetCountFromFields()

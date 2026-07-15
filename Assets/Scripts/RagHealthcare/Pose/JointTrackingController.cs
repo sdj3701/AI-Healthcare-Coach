@@ -155,47 +155,71 @@ namespace Rag.Healthcare.Pose
 
         private IEnumerator StartTrackingRoutine()
         {
-            if (!PrepareCameraAndProvider())
+            // StartCoroutine advances an iterator immediately. Yield once so the
+            // returned handle is assigned before any startup path can fail or exit.
+            yield return null;
+
+            var trackingLoopStarted = false;
+            try
+            {
+                if (!trackingRequested)
+                {
+                    yield break;
+                }
+
+                if (!PrepareCameraAndProvider())
+                {
+                    trackingRequested = false;
+                    yield break;
+                }
+
+                yield return WaitForCameraReady();
+                if (!IsCameraReady())
+                {
+                    NotifyFailure(BuildCameraFailureMessage());
+                    trackingRequested = false;
+                    yield break;
+                }
+
+                if (!trackingProvider.IsReady)
+                {
+                    yield return trackingProvider.Initialize();
+                }
+
+                if (!trackingProvider.IsReady)
+                {
+                    NotifyFailure(BuildProviderFailureMessage());
+                    trackingRequested = false;
+                    yield break;
+                }
+
+                if (!trackingRequested)
+                {
+                    yield break;
+                }
+
+                isTracking = true;
+                ResetRuntimeMetrics();
+                trackingCoroutine = StartCoroutine(TrackingLoop());
+                trackingLoopStarted = trackingCoroutine != null;
+            }
+            finally
             {
                 startCoroutine = null;
-                yield break;
+                if (!trackingLoopStarted)
+                {
+                    isTracking = false;
+                }
             }
-
-            yield return WaitForCameraReady();
-            if (!IsCameraReady())
-            {
-                NotifyFailure(BuildCameraFailureMessage());
-                startCoroutine = null;
-                yield break;
-            }
-
-            if (!trackingProvider.IsReady)
-            {
-                yield return trackingProvider.Initialize();
-            }
-
-            if (!trackingProvider.IsReady)
-            {
-                NotifyFailure(BuildProviderFailureMessage());
-                trackingRequested = false;
-                startCoroutine = null;
-                yield break;
-            }
-
-            if (!trackingRequested)
-            {
-                startCoroutine = null;
-                yield break;
-            }
-
-            isTracking = true;
-            ResetRuntimeMetrics();
-            trackingCoroutine = StartCoroutine(TrackingLoop());
-            startCoroutine = null;
         }
 
         private IEnumerator RequestSingleTrackingFrameRoutine()
         {
+            // Match the Start routine's handle-assignment guard. A synchronous
+            // camera/provider failure must not leave a completed Coroutine handle
+            // stored in singleFrameCoroutine forever.
+            yield return null;
+
             try
             {
                 if (!PrepareCameraAndProvider())
@@ -231,6 +255,9 @@ namespace Rag.Healthcare.Pose
 
         private IEnumerator TrackingLoop()
         {
+            // Make sure trackingCoroutine receives its handle before frame access or
+            // provider code can throw during the first pass through the loop.
+            yield return null;
             nextSampleAt = Time.unscaledTime;
 
             try
@@ -266,6 +293,7 @@ namespace Rag.Healthcare.Pose
             finally
             {
                 trackingCoroutine = null;
+                isTracking = false;
                 isRequestInFlight = false;
             }
 
@@ -284,8 +312,16 @@ namespace Rag.Healthcare.Pose
             }
 
             var textureId = webCamTexture.GetInstanceID();
+            var textureChanged = textureId != lastSampledCameraTextureId;
+            var didUpdateThisFrame = webCamTexture.didUpdateThisFrame;
             var updateCount = webCamTexture.updateCount;
-            if (textureId == lastSampledCameraTextureId && updateCount == lastSampledCameraUpdateCount)
+            var updateCountChanged = updateCount != lastSampledCameraUpdateCount;
+
+            // didUpdateThisFrame is the authoritative signal on iOS, where
+            // updateCount can remain unchanged even while AVFoundation delivers
+            // frames. updateCount remains a fallback so a frame that arrived between
+            // pose sampling ticks can still be consumed on other platforms.
+            if (!textureChanged && !didUpdateThisFrame && !updateCountChanged)
             {
                 return false;
             }

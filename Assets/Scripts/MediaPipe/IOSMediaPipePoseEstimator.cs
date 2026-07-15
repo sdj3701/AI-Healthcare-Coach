@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using UnityEngine;
 
 namespace AIHealthcareCoach.MediaPipe
@@ -15,6 +16,9 @@ namespace AIHealthcareCoach.MediaPipe
             float minPoseDetectionConfidence,
             float minPosePresenceConfidence,
             float minTrackingConfidence);
+
+        [DllImport("__Internal")]
+        private static extern int AHC_PoseGetBridgeVersion();
 
         [DllImport("__Internal")]
         private static extern int AHC_PoseProcessRgba(
@@ -53,12 +57,16 @@ namespace AIHealthcareCoach.MediaPipe
         private const int InitialJsonBufferCapacity = 65536;
         private const int MaximumJsonBufferCapacity = 1024 * 1024;
         private const int MaximumImageDimension = 8192;
+#if UNITY_IOS && !UNITY_EDITOR
+        private const int RequiredAsyncBridgeVersion = 2;
+#endif
 
         private StringBuilder jsonBuffer = new StringBuilder(InitialJsonBufferCapacity);
         private GCHandle pinnedPixelsHandle;
         private Color32[] pinnedPixels;
         private bool isReady;
 #if UNITY_IOS && !UNITY_EDITOR
+        private static readonly object NativeLifecycleGate = new object();
         private bool asyncApiAvailable = true;
         private long pendingTimestampMs;
         private InitializationSettings lastInitializationSettings;
@@ -117,19 +125,59 @@ namespace AIHealthcareCoach.MediaPipe
             }
 
 #if UNITY_IOS && !UNITY_EDITOR
-            var initializationSettings = new InitializationSettings(settings);
-            var code = InitializeNative(initializationSettings);
-
-            isReady = code == 0;
-            asyncApiAvailable = true;
-            pendingTimestampMs = 0;
-            if (isReady)
+            Monitor.Enter(NativeLifecycleGate);
+            try
             {
-                lastInitializationSettings = initializationSettings;
-                hasInitializationSettings = true;
+                var initializationSettings = new InitializationSettings(settings);
+                int bridgeVersion;
+                try
+                {
+                    bridgeVersion = AHC_PoseGetBridgeVersion();
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    isReady = false;
+                    asyncApiAvailable = false;
+                    LastError = BuildOutdatedBridgeMessage();
+                    return false;
+                }
+
+                if (bridgeVersion < RequiredAsyncBridgeVersion)
+                {
+                    isReady = false;
+                    asyncApiAvailable = false;
+                    LastError = BuildOutdatedBridgeMessage();
+                    return false;
+                }
+
+                int code;
+                try
+                {
+                    code = InitializeNative(initializationSettings);
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    isReady = false;
+                    asyncApiAvailable = false;
+                    LastError = BuildOutdatedBridgeMessage();
+                    return false;
+                }
+
+                isReady = code == 0;
+                asyncApiAvailable = true;
+                pendingTimestampMs = 0;
+                if (isReady)
+                {
+                    lastInitializationSettings = initializationSettings;
+                    hasInitializationSettings = true;
+                }
+                LastError = isReady ? string.Empty : ReadLastError();
+                return isReady;
             }
-            LastError = isReady ? string.Empty : ReadLastError();
-            return isReady;
+            finally
+            {
+                Monitor.Exit(NativeLifecycleGate);
+            }
 #else
             isReady = false;
             LastError = "iOS MediaPipe bridge is only available in an iOS device build.";
@@ -245,7 +293,7 @@ namespace AIHealthcareCoach.MediaPipe
             catch (EntryPointNotFoundException)
             {
                 asyncApiAvailable = false;
-                errorMessage = "The exported iOS project does not contain the asynchronous pose bridge.";
+                errorMessage = BuildOutdatedBridgeMessage();
                 LastError = errorMessage;
                 return false;
             }
@@ -305,7 +353,7 @@ namespace AIHealthcareCoach.MediaPipe
             catch (EntryPointNotFoundException)
             {
                 asyncApiAvailable = false;
-                errorMessage = "The exported iOS project does not contain the asynchronous pose bridge.";
+                errorMessage = BuildOutdatedBridgeMessage();
                 LastError = errorMessage;
                 return AsyncPoseResultStatus.Failed;
             }
@@ -325,7 +373,13 @@ namespace AIHealthcareCoach.MediaPipe
         public void CancelPendingFrame()
         {
 #if UNITY_IOS && !UNITY_EDITOR
-            if (asyncApiAvailable)
+            pendingTimestampMs = 0;
+            if (!asyncApiAvailable || !Monitor.TryEnter(NativeLifecycleGate))
+            {
+                return;
+            }
+
+            try
             {
                 try
                 {
@@ -336,7 +390,10 @@ namespace AIHealthcareCoach.MediaPipe
                     asyncApiAvailable = false;
                 }
             }
-            pendingTimestampMs = 0;
+            finally
+            {
+                Monitor.Exit(NativeLifecycleGate);
+            }
 #endif
         }
 
@@ -344,51 +401,59 @@ namespace AIHealthcareCoach.MediaPipe
         {
             errorMessage = string.Empty;
 #if UNITY_IOS && !UNITY_EDITOR
-            pendingTimestampMs = 0;
-            if (!isReady || !asyncApiAvailable || !hasInitializationSettings)
-            {
-                errorMessage = "MediaPipe timeout recovery cannot run because the last successful initialization settings are unavailable.";
-                LastError = errorMessage;
-                isReady = false;
-                return false;
-            }
-
+            Monitor.Enter(NativeLifecycleGate);
             try
             {
-                // A callback that never arrives leaves the live-stream graph physically
-                // busy. Cancellation only invalidates its generation, so timeout recovery
-                // must replace the graph before another frame can be accepted.
-                AHC_PoseDispose();
-                var code = InitializeNative(lastInitializationSettings);
-                isReady = code == 0;
-                asyncApiAvailable = true;
-                if (isReady)
+                pendingTimestampMs = 0;
+                if (!isReady || !asyncApiAvailable || !hasInitializationSettings)
                 {
-                    LastError = string.Empty;
-                    return true;
+                    errorMessage = "MediaPipe timeout recovery cannot run because the last successful initialization settings are unavailable.";
+                    LastError = errorMessage;
+                    isReady = false;
+                    return false;
                 }
 
-                var nativeError = ReadLastError();
-                errorMessage = string.IsNullOrWhiteSpace(nativeError)
-                    ? $"MediaPipe timeout recovery failed with native error {code}."
-                    : "MediaPipe timeout recovery failed: " + nativeError;
-                LastError = errorMessage;
-                return false;
+                try
+                {
+                    // A callback that never arrives leaves the live-stream graph physically
+                    // busy. Cancellation only invalidates its generation, so timeout recovery
+                    // must replace the graph before another frame can be accepted.
+                    AHC_PoseDispose();
+                    var code = InitializeNative(lastInitializationSettings);
+                    isReady = code == 0;
+                    asyncApiAvailable = true;
+                    if (isReady)
+                    {
+                        LastError = string.Empty;
+                        return true;
+                    }
+
+                    var nativeError = ReadLastError();
+                    errorMessage = string.IsNullOrWhiteSpace(nativeError)
+                        ? $"MediaPipe timeout recovery failed with native error {code}."
+                        : "MediaPipe timeout recovery failed: " + nativeError;
+                    LastError = errorMessage;
+                    return false;
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    asyncApiAvailable = false;
+                    isReady = false;
+                    errorMessage = BuildOutdatedBridgeMessage();
+                    LastError = errorMessage;
+                    return false;
+                }
+                catch (Exception exception)
+                {
+                    isReady = false;
+                    errorMessage = "MediaPipe timeout recovery failed: " + exception.Message;
+                    LastError = errorMessage;
+                    return false;
+                }
             }
-            catch (EntryPointNotFoundException)
+            finally
             {
-                asyncApiAvailable = false;
-                isReady = false;
-                errorMessage = "MediaPipe timeout recovery is unavailable because the exported iOS project is missing the native pose bridge.";
-                LastError = errorMessage;
-                return false;
-            }
-            catch (Exception exception)
-            {
-                isReady = false;
-                errorMessage = "MediaPipe timeout recovery failed: " + exception.Message;
-                LastError = errorMessage;
-                return false;
+                Monitor.Exit(NativeLifecycleGate);
             }
 #else
             errorMessage = "MediaPipe timeout recovery is only available in an iOS device build.";
@@ -402,10 +467,42 @@ namespace AIHealthcareCoach.MediaPipe
         {
             CancelPendingFrame();
 #if UNITY_IOS && !UNITY_EDITOR
-            AHC_PoseDispose();
+            if (Monitor.TryEnter(NativeLifecycleGate))
+            {
+                try
+                {
+                    try
+                    {
+                        AHC_PoseDispose();
+                    }
+                    catch (EntryPointNotFoundException)
+                    {
+                        // An incremental Xcode export can contain an older bridge.
+                        asyncApiAvailable = false;
+                    }
+                }
+                finally
+                {
+                    Monitor.Exit(NativeLifecycleGate);
+                }
+            }
 #endif
             ReleasePinnedPixels();
             isReady = false;
+        }
+
+        /// <summary>
+        /// Releases only managed resources after a background lifecycle operation.
+        /// A superseding provider may already own the process-wide native graph, so
+        /// a delayed cleanup must never call the global AHC_PoseDispose entry point.
+        /// </summary>
+        public void AbandonManagedResources()
+        {
+            ReleasePinnedPixels();
+            isReady = false;
+#if UNITY_IOS && !UNITY_EDITOR
+            pendingTimestampMs = 0;
+#endif
         }
 
         private static bool TryValidateFrame(
@@ -446,6 +543,13 @@ namespace AIHealthcareCoach.MediaPipe
                 settings.MinPoseDetectionConfidence,
                 settings.MinPosePresenceConfidence,
                 settings.MinTrackingConfidence);
+        }
+
+        private static string BuildOutdatedBridgeMessage()
+        {
+            return "The Xcode project contains an outdated MediaPipe pose bridge. " +
+                   "Delete the previous iOS export and build a fresh Xcode project from Unity; " +
+                   "synchronous pose fallback is disabled because it can freeze the UI.";
         }
 #endif
 
