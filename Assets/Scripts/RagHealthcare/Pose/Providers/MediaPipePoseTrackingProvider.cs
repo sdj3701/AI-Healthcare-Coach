@@ -26,12 +26,12 @@ namespace Rag.Healthcare.Pose.Providers
         [SerializeField] private TextAsset modelBytesAsset;
 
         [Header("MediaPipe")]
-        [SerializeField] private bool useGpuDelegate;
+        [SerializeField] private bool useGpuDelegate = true;
         [SerializeField, Min(1)] private int numPoses = 1;
         [SerializeField, Range(0f, 1f)] private float minPoseDetectionConfidence = 0.5f;
         [SerializeField, Range(0f, 1f)] private float minPosePresenceConfidence = 0.5f;
         [SerializeField, Range(0f, 1f)] private float minTrackingConfidence = 0.5f;
-        [SerializeField] private int imageRotationDegrees;
+        [SerializeField] private int imageRotationDegrees = 90;
         [SerializeField] private bool mirrorXOutput;
         [SerializeField] private bool invertYOutput;
 
@@ -470,7 +470,12 @@ namespace Rag.Healthcare.Pose.Providers
 #if AHC_USE_HOMULER_MEDIAPIPE
         private BaseOptions.Delegate ResolveDelegate()
         {
+#if UNITY_IOS && !UNITY_EDITOR
+            // Force GPU (Metal) delegate on iOS to prevent XNNPACK thread pool crashes and improve performance
+            return BaseOptions.Delegate.GPU;
+#else
             return useGpuDelegate ? BaseOptions.Delegate.GPU : BaseOptions.Delegate.CPU;
+#endif
         }
 
         private void EnsureTextureFramePool(int width, int height)

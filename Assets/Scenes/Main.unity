@@ -322,12 +322,12 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::Rag.Healthcare.Pose.Providers.MediaPipePoseTrackingProvider
   modelRelativePath: MediaPipe/pose_landmarker_lite.task
   modelBytesAsset: {fileID: 0}
-  useGpuDelegate: 0
+  useGpuDelegate: 1
   numPoses: 1
   minPoseDetectionConfidence: 0.5
   minPosePresenceConfidence: 0.5
   minTrackingConfidence: 0.5
-  imageRotationDegrees: 0
+  imageRotationDegrees: 90
   mirrorXOutput: 0
   invertYOutput: 0
   framePoolSize: 2
