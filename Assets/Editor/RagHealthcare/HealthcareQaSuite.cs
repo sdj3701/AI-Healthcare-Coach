@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using AIHealthcareCoach.MediaPipe;
+using AIHealthcareCoach.Editor;
 using Rag.Healthcare.Camera;
 using Rag.Healthcare.Monetization;
 using Rag.Healthcare.Performance;
@@ -79,6 +80,8 @@ namespace Rag.Healthcare.Editor
 
             VerifyBundledKoreanFont(failures);
             VerifyMobileUiStructure(failures);
+            Check(MediaPipeIOSNativeLibraryPreprocessor.ValidateBundledPayload(out var mediaPipeIosPayloadError),
+                mediaPipeIosPayloadError, failures);
 
             var acceptance = PerformanceAcceptanceEvaluator.Evaluate(new PerformanceBenchmarkResult
             {
