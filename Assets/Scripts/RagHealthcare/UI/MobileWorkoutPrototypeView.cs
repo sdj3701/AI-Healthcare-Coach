@@ -16,6 +16,10 @@ namespace Rag.Healthcare.UI
     public sealed class MobileWorkoutPrototypeView : MonoBehaviour
     {
         private const string RuntimeThemeResourcePath = "UI/UnityDefaultRuntimeTheme";
+        private const string BundledKoreanFontResourcePath = "Fonts/NotoSansKR-Regular";
+        private const float BaseHorizontalPadding = 16f;
+        private const float BaseTopPadding = 12f;
+        private const float BaseBottomPadding = 14f;
 
         private static readonly string[] KoreanFontFallbacks =
         {
@@ -93,6 +97,8 @@ namespace Rag.Healthcare.UI
         private bool ownsRuntimeFont;
         private bool mobilePerformanceConfigured;
         private VisualElement root;
+        private VisualElement screenRoot;
+        private ScrollView contentScroll;
         private VisualElement contentRoot;
         private VisualElement[] progressPips;
         private Image previewImage;
@@ -119,6 +125,9 @@ namespace Rag.Healthcare.UI
         private float sessionStartedAt;
         private float elapsedBeforePause;
         private float nextRefreshAt;
+        private Rect lastSafeArea = new Rect(-1f, -1f, -1f, -1f);
+        private int lastScreenWidth = -1;
+        private int lastScreenHeight = -1;
 #if UNITY_EDITOR
         private bool editorRebuildQueued;
 #endif
@@ -229,6 +238,8 @@ namespace Rag.Healthcare.UI
                 EnsureDocumentAndUi();
             }
 
+            ApplySafeAreaInsetsIfNeeded();
+
             if (Time.unscaledTime < nextRefreshAt)
             {
                 return;
@@ -323,7 +334,7 @@ namespace Rag.Healthcare.UI
             panelSettings.scaleMode = PanelScaleMode.ScaleWithScreenSize;
             panelSettings.referenceResolution = new Vector2Int(390, 844);
             panelSettings.screenMatchMode = PanelScreenMatchMode.MatchWidthOrHeight;
-            panelSettings.match = 0.5f;
+            panelSettings.match = 0f;
             panelSettings.sortingOrder = 100;
             panelSettings.clearColor = true;
             panelSettings.colorClearValue = new Color(0.035f, 0.045f, 0.06f, 1f);
@@ -370,9 +381,13 @@ namespace Rag.Healthcare.UI
         {
             var documentRoot = document.rootVisualElement;
             documentRoot.Clear();
+            documentRoot.style.width = Length.Percent(100f);
+            documentRoot.style.height = Length.Percent(100f);
+            documentRoot.style.flexGrow = 1f;
+            documentRoot.style.backgroundColor = ColorFromHex(0x0B1119);
 
             root = new VisualElement { name = "mobile-workout-root" };
-            root.style.flexGrow = 1f;
+            root.StretchToParentSize();
             root.style.backgroundColor = ColorFromHex(0x090D12);
             root.style.alignItems = Align.Stretch;
             root.style.justifyContent = Justify.FlexStart;
@@ -383,27 +398,109 @@ namespace Rag.Healthcare.UI
             }
             documentRoot.Add(root);
 
-            var screen = new VisualElement { name = "phone-screen" };
-            screen.style.flexGrow = 1f;
-            screen.style.width = Length.Percent(100f);
-            screen.style.backgroundColor = ColorFromHex(0x0B1119);
-            screen.style.paddingTop = 18f;
-            screen.style.paddingRight = 14f;
-            screen.style.paddingBottom = 12f;
-            screen.style.paddingLeft = 14f;
-            root.Add(screen);
+            screenRoot = new VisualElement { name = "full-screen-content" };
+            screenRoot.StretchToParentSize();
+            screenRoot.style.backgroundColor = ColorFromHex(0x0B1119);
+            screenRoot.style.paddingTop = BaseTopPadding;
+            screenRoot.style.paddingRight = BaseHorizontalPadding;
+            screenRoot.style.paddingBottom = BaseBottomPadding;
+            screenRoot.style.paddingLeft = BaseHorizontalPadding;
+            root.Add(screenRoot);
 
-            screen.Add(BuildPhoneNotch());
-            screen.Add(BuildStatusBar());
-            screen.Add(BuildProgressBlock());
+            screenRoot.Add(BuildAppHeader());
+            screenRoot.Add(BuildProgressBlock());
 
-            contentRoot = new VisualElement { name = "step-content" };
+            contentScroll = new ScrollView(ScrollViewMode.Vertical) { name = "step-scroll" };
+            contentScroll.style.flexGrow = 1f;
+            contentScroll.style.width = Length.Percent(100f);
+            contentScroll.style.marginTop = 8f;
+            contentScroll.horizontalScrollerVisibility = ScrollerVisibility.Hidden;
+            contentScroll.verticalScrollerVisibility = ScrollerVisibility.Auto;
+            contentRoot = contentScroll.contentContainer;
             contentRoot.style.flexGrow = 1f;
             contentRoot.style.flexDirection = FlexDirection.Column;
-            contentRoot.style.marginTop = 8f;
-            screen.Add(contentRoot);
+            contentRoot.style.width = Length.Percent(100f);
+            screenRoot.Add(contentScroll);
 
-            screen.Add(BuildHomeIndicator());
+            screenRoot.RegisterCallback<GeometryChangedEvent>(_ => ApplySafeAreaInsetsIfNeeded());
+            screenRoot.schedule.Execute(() => ApplySafeAreaInsetsIfNeeded(true));
+        }
+
+        private VisualElement BuildAppHeader()
+        {
+            var header = new VisualElement { name = "app-header" };
+            header.style.height = 58f;
+            header.style.flexShrink = 0f;
+            header.style.flexDirection = FlexDirection.Row;
+            header.style.alignItems = Align.Center;
+            header.style.paddingLeft = 4f;
+            header.style.paddingRight = 4f;
+
+            var brand = new VisualElement { name = "app-brand" };
+            brand.style.flexGrow = 1f;
+            brand.style.justifyContent = Justify.Center;
+
+            var title = Label("AI 헬스케어 코치", 19, Color.white, FontStyle.Bold);
+            title.style.height = 27f;
+            brand.Add(title);
+
+            var subtitle = Label("실시간 자세 코칭", 10, ColorFromHex(0x8F9AAF), FontStyle.Bold);
+            subtitle.style.height = 18f;
+            brand.Add(subtitle);
+            header.Add(brand);
+
+            var online = Label("ONLINE", 9, ColorFromHex(0x34D399), FontStyle.Bold);
+            online.style.width = 64f;
+            online.style.height = 28f;
+            online.style.unityTextAlign = TextAnchor.MiddleCenter;
+            online.style.backgroundColor = new Color(0.02f, 0.23f, 0.17f, 0.9f);
+            online.style.borderTopLeftRadius = 14f;
+            online.style.borderTopRightRadius = 14f;
+            online.style.borderBottomLeftRadius = 14f;
+            online.style.borderBottomRightRadius = 14f;
+            header.Add(online);
+            return header;
+        }
+
+        private void ApplySafeAreaInsetsIfNeeded(bool force = false)
+        {
+            if (screenRoot == null || document == null || Screen.width <= 0 || Screen.height <= 0)
+            {
+                return;
+            }
+
+            var safeArea = Screen.safeArea;
+            if (!force &&
+                lastScreenWidth == Screen.width &&
+                lastScreenHeight == Screen.height &&
+                lastSafeArea == safeArea)
+            {
+                return;
+            }
+
+            var documentRoot = document.rootVisualElement;
+            var panelWidth = documentRoot.resolvedStyle.width;
+            var panelHeight = documentRoot.resolvedStyle.height;
+            if (float.IsNaN(panelWidth) || float.IsNaN(panelHeight) || panelWidth <= 0f || panelHeight <= 0f)
+            {
+                return;
+            }
+
+            var scaleX = panelWidth / Screen.width;
+            var scaleY = panelHeight / Screen.height;
+            var leftInset = Mathf.Max(0f, safeArea.xMin) * scaleX;
+            var rightInset = Mathf.Max(0f, Screen.width - safeArea.xMax) * scaleX;
+            var topInset = Mathf.Max(0f, Screen.height - safeArea.yMax) * scaleY;
+            var bottomInset = Mathf.Max(0f, safeArea.yMin) * scaleY;
+
+            screenRoot.style.paddingLeft = BaseHorizontalPadding + leftInset;
+            screenRoot.style.paddingRight = BaseHorizontalPadding + rightInset;
+            screenRoot.style.paddingTop = BaseTopPadding + topInset;
+            screenRoot.style.paddingBottom = BaseBottomPadding + bottomInset;
+
+            lastScreenWidth = Screen.width;
+            lastScreenHeight = Screen.height;
+            lastSafeArea = safeArea;
         }
 
         private VisualElement BuildHeroHeader()
@@ -586,6 +683,10 @@ namespace Rag.Healthcare.UI
 
             RefreshDynamicText();
             RefreshPreviewTexture();
+            if (contentScroll != null)
+            {
+                contentScroll.scrollOffset = Vector2.zero;
+            }
         }
 
         private void RenderExerciseStep()
@@ -605,6 +706,7 @@ namespace Rag.Healthcare.UI
             chip.style.height = 30f;
             chip.style.backgroundColor = new Color(0.015f, 0.18f, 0.14f, 0.92f);
             chip.style.color = ColorFromHex(0x5EEAD4);
+            chip.style.unityFont = ResolveRuntimeFont();
             chip.style.unityFontStyleAndWeight = FontStyle.Bold;
             chip.style.fontSize = 12f;
             chip.style.borderTopLeftRadius = 16f;
@@ -935,6 +1037,7 @@ namespace Rag.Healthcare.UI
             var field = new TextField { value = value.ToString(), maxLength = 3 };
             field.style.width = 64f;
             field.style.height = 38f;
+            field.style.unityFont = ResolveRuntimeFont();
             field.style.unityTextAlign = TextAnchor.MiddleCenter;
             field.style.backgroundColor = ColorFromHex(0xF1F5F9);
             field.style.color = ColorFromHex(0x020617);
@@ -1279,6 +1382,13 @@ namespace Rag.Healthcare.UI
                 return runtimeFont;
             }
 
+            runtimeFont = Resources.Load<Font>(BundledKoreanFontResourcePath);
+            if (runtimeFont != null)
+            {
+                ownsRuntimeFont = false;
+                return runtimeFont;
+            }
+
             try
             {
                 runtimeFont = Font.CreateDynamicFontFromOSFont(KoreanFontFallbacks, 16);
@@ -1422,6 +1532,7 @@ namespace Rag.Healthcare.UI
 
             button.style.backgroundColor = background;
             button.style.color = textColor;
+            button.style.unityFont = ResolveRuntimeFont();
             button.style.unityFontStyleAndWeight = FontStyle.Bold;
             button.style.fontSize = 12f;
             button.style.borderTopLeftRadius = 12f;
@@ -1456,11 +1567,12 @@ namespace Rag.Healthcare.UI
             return row;
         }
 
-        private static Label Label(string text, int size, Color color, FontStyle style = FontStyle.Normal)
+        private Label Label(string text, int size, Color color, FontStyle style = FontStyle.Normal)
         {
             var label = new Label(text);
             label.style.fontSize = size;
             label.style.color = color;
+            label.style.unityFont = ResolveRuntimeFont();
             label.style.unityFontStyleAndWeight = style;
             label.style.whiteSpace = WhiteSpace.Normal;
             return label;

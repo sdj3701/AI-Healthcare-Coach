@@ -13,8 +13,10 @@ using Rag.Healthcare.Rag.Runtime;
 using Rag.Healthcare.Rag.Rules;
 using Rag.Healthcare.Replay;
 using Rag.Healthcare.Tts;
+using Rag.Healthcare.UI;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 namespace Rag.Healthcare.Editor
 {
@@ -75,6 +77,9 @@ namespace Rag.Healthcare.Editor
             Check(TtsBackendResolver.ResolveAuto(RuntimePlatform.IPhonePlayer) == TtsBackend.IosNative,
                 "iOS must resolve to the native AVSpeechSynthesizer backend.", failures);
 
+            VerifyBundledKoreanFont(failures);
+            VerifyMobileUiStructure(failures);
+
             var acceptance = PerformanceAcceptanceEvaluator.Evaluate(new PerformanceBenchmarkResult
             {
                 durationSeconds = 600f, averagePoseFps = 15f, averageInferenceMs = 45f, droppedFrames = 5
@@ -90,6 +95,51 @@ namespace Rag.Healthcare.Editor
         private static void Check(bool condition, string failure, ICollection<string> failures)
         {
             if (!condition) failures.Add(failure);
+        }
+
+        private static void VerifyBundledKoreanFont(ICollection<string> failures)
+        {
+            var font = Resources.Load<Font>("Fonts/NotoSansKR-Regular");
+            Check(font != null, "The mobile UI Korean font must be bundled in Resources.", failures);
+            if (font == null)
+            {
+                return;
+            }
+
+            const string requiredCharacters = "AI 헬스케어 코치 운동 선택 목표 설정 자세 추적 리플레이 0123456789";
+            foreach (var character in requiredCharacters)
+            {
+                if (!char.IsWhiteSpace(character))
+                {
+                    Check(font.HasCharacter(character), "The mobile UI font is missing character: " + character, failures);
+                }
+            }
+        }
+
+        private static void VerifyMobileUiStructure(ICollection<string> failures)
+        {
+            var host = new GameObject("Mobile UI QA Host");
+            try
+            {
+                host.AddComponent<MobileWorkoutPrototypeView>();
+                var document = host.GetComponent<UIDocument>();
+                var documentRoot = document == null ? null : document.rootVisualElement;
+                var fullScreen = documentRoot?.Q<VisualElement>("full-screen-content");
+
+                Check(documentRoot != null, "The mobile UI must create a UI document.", failures);
+                Check(fullScreen != null, "The mobile UI must create a full-screen content root.", failures);
+                Check(fullScreen != null && fullScreen.style.position.value == Position.Absolute,
+                    "The mobile UI content root must stretch absolutely across the panel.", failures);
+                Check(documentRoot?.Q<ScrollView>("step-scroll") != null,
+                    "The mobile UI body must remain scrollable on short phone screens.", failures);
+                Check(documentRoot?.Q<VisualElement>("phone-notch") == null &&
+                      documentRoot?.Q<VisualElement>("phone-home-indicator") == null,
+                    "The app UI must not draw a second phone frame inside the physical screen.", failures);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(host);
+            }
         }
 
         private static void VerifyLandmarkStability(ICollection<string> failures)
