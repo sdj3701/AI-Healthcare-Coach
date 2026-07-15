@@ -18,7 +18,6 @@ namespace Rag.Healthcare.Pose.Providers
 {
     public sealed class MediaPipePoseTrackingProvider : PoseTrackingProvider
     {
-        private const string PluginDefine = "AHC_USE_HOMULER_MEDIAPIPE";
         private const int ExpectedLandmarkCount = 33;
 
         [Header("Model")]
@@ -31,7 +30,8 @@ namespace Rag.Healthcare.Pose.Providers
         [SerializeField, Range(0f, 1f)] private float minPoseDetectionConfidence = 0.5f;
         [SerializeField, Range(0f, 1f)] private float minPosePresenceConfidence = 0.5f;
         [SerializeField, Range(0f, 1f)] private float minTrackingConfidence = 0.5f;
-        [SerializeField] private int imageRotationDegrees = 90;
+        [SerializeField, Tooltip("Camera metadata is used when this value is negative.")]
+        private int imageRotationDegrees = -1;
         [SerializeField] private bool mirrorXOutput;
         [SerializeField] private bool invertYOutput;
 
@@ -41,7 +41,7 @@ namespace Rag.Healthcare.Pose.Providers
 #if !AHC_USE_HOMULER_MEDIAPIPE
         [Header("Editor Python Fallback")]
         [SerializeField] private bool useEditorPythonMediaPipeFallback = true;
-        [SerializeField, Min(1)] private int targetPoseFps = 15;
+        [SerializeField, Min(1)] private int targetPoseFps = 8;
         [SerializeField] private string editorPythonExecutablePath = string.Empty;
         [SerializeField] private string editorPythonWorkerRelativePath = "MediaPipe/editor_pose_worker.py";
 #endif
@@ -56,6 +56,7 @@ namespace Rag.Healthcare.Pose.Providers
         private PoseLandmarkerResult resultBuffer;
         private TextureFramePool textureFramePool;
         private ImageProcessingOptions imageProcessingOptions;
+        private int appliedImageRotationDegrees = int.MinValue;
 #else
         private IPoseEstimator fallbackPoseEstimator;
         private Color32[] fallbackPixels;
@@ -97,7 +98,7 @@ namespace Rag.Healthcare.Pose.Providers
 
                 poseLandmarker = PoseLandmarker.CreateFromOptions(options);
                 resultBuffer = PoseLandmarkerResult.Alloc(Mathf.Max(1, numPoses), false);
-                imageProcessingOptions = new ImageProcessingOptions(rotationDegrees: NormalizeRotation(imageRotationDegrees));
+                UpdateImageProcessingOptions(null);
                 isReady = true;
             }
             catch (Exception exception)
@@ -109,9 +110,8 @@ namespace Rag.Healthcare.Pose.Providers
             if (!useEditorPythonMediaPipeFallback)
             {
                 SetFailure(
-                    "MediaPipe Unity Plugin package is configured, but the provider is compiled in fallback mode. " +
-                    $"Install/resolve com.github.homuler.mediapipe and add scripting define '{PluginDefine}', " +
-                    "or enable the Editor Python MediaPipe fallback.");
+                    "The platform MediaPipe provider is disabled. Enable the local MediaPipe fallback to use " +
+                    "the iOS Swift bridge or Editor Python worker.");
                 yield break;
             }
 
@@ -196,6 +196,7 @@ namespace Rag.Healthcare.Pose.Providers
                 textureFrame = null;
 
                 var mediaPipeTimestamp = NormalizeTimestamp(timestampUnixMilliseconds);
+                UpdateImageProcessingOptions(source);
                 var success = poseLandmarker.TryDetectForVideo(
                     image,
                     mediaPipeTimestamp,
@@ -261,6 +262,7 @@ namespace Rag.Healthcare.Pose.Providers
             textureFramePool?.Dispose();
             textureFramePool = null;
             resultBuffer = default;
+            appliedImageRotationDegrees = int.MinValue;
 #else
             fallbackPoseEstimator?.Dispose();
             fallbackPoseEstimator = null;
@@ -339,7 +341,13 @@ namespace Rag.Healthcare.Pose.Providers
                 return BuildNotReadyMessage();
             }
 
-            if (!TryReadFallbackPixels(source, out var pixels, out var width, out var height, out var rotationAngle))
+            if (!TryReadFallbackPixels(
+                    source,
+                    out var pixels,
+                    out var width,
+                    out var height,
+                    out var rotationAngle,
+                    out var verticallyMirrored))
             {
                 return "Editor Python MediaPipe fallback requires a readable WebCamTexture or Texture2D frame.";
             }
@@ -352,7 +360,7 @@ namespace Rag.Healthcare.Pose.Providers
                     width,
                     height,
                     mediaPipeTimestamp,
-                    false,
+                    verticallyMirrored,
                     rotationAngle,
                     out var landmarkFrame);
 
@@ -381,12 +389,19 @@ namespace Rag.Healthcare.Pose.Providers
             }
         }
 
-        private bool TryReadFallbackPixels(Texture source, out Color32[] pixels, out int width, out int height, out int rotationAngle)
+        private bool TryReadFallbackPixels(
+            Texture source,
+            out Color32[] pixels,
+            out int width,
+            out int height,
+            out int rotationAngle,
+            out bool verticallyMirrored)
         {
             pixels = null;
             width = 0;
             height = 0;
-            rotationAngle = NormalizeRotation(imageRotationDegrees);
+            rotationAngle = ResolveImageRotation(source);
+            verticallyMirrored = false;
 
             if (source is WebCamTexture webCamTexture)
             {
@@ -404,7 +419,8 @@ namespace Rag.Healthcare.Pose.Providers
                 }
 
                 pixels = webCamTexture.GetPixels32(fallbackPixels);
-                rotationAngle = NormalizeRotation(imageRotationDegrees != 0 ? imageRotationDegrees : webCamTexture.videoRotationAngle);
+                rotationAngle = ResolveImageRotation(webCamTexture);
+                verticallyMirrored = webCamTexture.videoVerticallyMirrored;
                 return pixels != null && pixels.Length >= requiredLength;
             }
 
@@ -468,6 +484,18 @@ namespace Rag.Healthcare.Pose.Providers
 #endif
 
 #if AHC_USE_HOMULER_MEDIAPIPE
+        private void UpdateImageProcessingOptions(Texture source)
+        {
+            var rotationDegrees = ResolveImageRotation(source);
+            if (rotationDegrees == appliedImageRotationDegrees)
+            {
+                return;
+            }
+
+            imageProcessingOptions = new ImageProcessingOptions(rotationDegrees: rotationDegrees);
+            appliedImageRotationDegrees = rotationDegrees;
+        }
+
         private BaseOptions.Delegate ResolveDelegate()
         {
 #if UNITY_IOS && !UNITY_EDITOR
@@ -538,6 +566,18 @@ namespace Rag.Healthcare.Pose.Providers
             };
         }
 #endif
+
+        private int ResolveImageRotation(Texture source)
+        {
+            if (imageRotationDegrees >= 0)
+            {
+                return NormalizeRotation(imageRotationDegrees);
+            }
+
+            return source is WebCamTexture webCamTexture
+                ? NormalizeRotation(webCamTexture.videoRotationAngle)
+                : 0;
+        }
     }
 }
 

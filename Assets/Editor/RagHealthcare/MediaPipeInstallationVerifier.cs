@@ -8,7 +8,8 @@ namespace Rag.Healthcare.Editor
     public static class MediaPipeInstallationVerifier
     {
         private const string ModelPath = "Assets/StreamingAssets/MediaPipe/pose_landmarker_lite.task";
-        private const string PackageName = "com.github.homuler.mediapipe";
+        private const string SwiftBridgePath = "Assets/Plugins/iOS/AHCMediaPipePoseBridge.swift";
+        private const string BuildPostprocessorPath = "Assets/Editor/MediaPipeIOSBuildPostprocessor.cs";
 
         [MenuItem("AI Healthcare/Verify MediaPipe Installation")]
         public static void VerifyMenu()
@@ -28,23 +29,22 @@ namespace Rag.Healthcare.Editor
 
         public static MediaPipeVerificationReport Verify()
         {
-            var manifestPath = Path.Combine(Directory.GetCurrentDirectory(), "Packages", "manifest.json");
-            var manifest = File.Exists(manifestPath) ? File.ReadAllText(manifestPath) : string.Empty;
-            var packageConfigured = manifest.IndexOf(PackageName, StringComparison.OrdinalIgnoreCase) >= 0;
+            var bridgeConfigured = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(SwiftBridgePath) != null &&
+                                   AssetDatabase.LoadAssetAtPath<MonoScript>(BuildPostprocessorPath) != null;
             var model = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(ModelPath);
             var modelInfo = new FileInfo(Path.Combine(Directory.GetCurrentDirectory(), ModelPath));
             var modelValid = model != null && modelInfo.Exists && modelInfo.Length > 1024;
 
-            var success = packageConfigured && modelValid;
+            var success = bridgeConfigured && modelValid;
             return new MediaPipeVerificationReport
             {
                 success = success,
-                packageConfigured = packageConfigured,
+                packageConfigured = bridgeConfigured,
                 modelValid = modelValid,
                 modelBytes = modelInfo.Exists ? modelInfo.Length : 0,
                 message = success
-                    ? $"MediaPipe package and pose model are configured ({modelInfo.Length:N0} bytes)."
-                    : $"Package configured: {packageConfigured}; model valid: {modelValid}. Resolve Packages/manifest.json and verify {ModelPath}."
+                    ? $"MediaPipe iOS Swift bridge and pose model are configured ({modelInfo.Length:N0} bytes)."
+                    : $"iOS Swift bridge configured: {bridgeConfigured}; model valid: {modelValid}. Verify {SwiftBridgePath}, {BuildPostprocessorPath}, and {ModelPath}."
             };
         }
     }

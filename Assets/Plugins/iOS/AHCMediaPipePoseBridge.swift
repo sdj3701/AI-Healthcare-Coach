@@ -5,9 +5,13 @@ import MediaPipeTasksVision
 private final class AHCMediaPipePoseBridge {
     static let shared = AHCMediaPipePoseBridge()
 
+    private let stateLock = NSLock()
     private var poseLandmarker: PoseLandmarker?
     private var latestJson = "{}"
     private var lastError = ""
+
+    private let maximumImageDimension = 8_192
+    private let maximumFrameByteCount = 256 * 1_024 * 1_024
 
     private let landmarkNames = [
         "nose",
@@ -52,6 +56,16 @@ private final class AHCMediaPipePoseBridge {
         minPosePresenceConfidence: Float,
         minTrackingConfidence: Float
     ) -> Int32 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        // Starting and stopping a workout should not rebuild the native graph when
+        // the same bridge instance is already ready.
+        if poseLandmarker != nil {
+            lastError = ""
+            return 0
+        }
+
         let modelPath = normalizedPath(rawModelPath)
         guard FileManager.default.fileExists(atPath: modelPath) else {
             lastError = "MediaPipe model file was not found: \(modelPath)"
@@ -66,6 +80,7 @@ private final class AHCMediaPipePoseBridge {
         options.minPosePresenceConfidence = minPosePresenceConfidence
         options.minTrackingConfidence = minTrackingConfidence
         options.baseOptions.modelAssetPath = modelPath
+        options.baseOptions.delegate = .GPU
 
         do {
             poseLandmarker = try PoseLandmarker(options: options)
@@ -87,61 +102,80 @@ private final class AHCMediaPipePoseBridge {
         rotationAngle: Int,
         mirrored: Bool
     ) -> Int32 {
+        // A second synchronous request must never enter MediaPipe while the first
+        // request (or a lifecycle operation) still owns its native resources.
+        guard stateLock.try() else {
+            return -14
+        }
+        defer { stateLock.unlock() }
+
         guard let poseLandmarker = poseLandmarker else {
             lastError = "PoseLandmarker is not initialized."
             latestJson = errorJson(code: "NOT_INITIALIZED", message: lastError)
             return -10
         }
 
-        guard let rgbaPointer = rgbaPointer, width > 0, height > 0 else {
+        guard let rgbaPointer = rgbaPointer,
+              validatedByteLayout(width: width, height: height) != nil else {
             lastError = "Input frame is invalid."
             latestJson = errorJson(code: "INVALID_FRAME", message: lastError)
             return -11
         }
 
-        guard let image = makeImage(
-            rgbaPointer: rgbaPointer,
-            width: width,
-            height: height,
-            rotationAngle: rotationAngle
-        ) else {
-            lastError = "Failed to convert Unity RGBA frame to MPImage."
-            latestJson = errorJson(code: "IMAGE_CONVERSION_FAILED", message: lastError)
-            return -12
-        }
-
-        do {
-            let result = try poseLandmarker.detect(
-                videoFrame: image,
-                timestampInMilliseconds: timestampMs
-            )
-
-            latestJson = resultJson(
-                result: result,
-                timestampMs: timestampMs,
+        // MPImage/UIImage/CGImage can retain the Data provider. Keep every wrapper
+        // inside this pool so it is released before the synchronous native call
+        // returns and Unity may replace or unpin the source array.
+        return autoreleasepool {
+            guard let image = makeImage(
+                rgbaPointer: rgbaPointer,
                 width: width,
                 height: height,
-                rotationAngle: rotationAngle,
-                mirrored: mirrored
-            )
-            lastError = ""
-            return 0
-        } catch {
-            lastError = "PoseLandmarker frame processing failed: \(error.localizedDescription)"
-            latestJson = errorJson(code: "PROCESS_FAILED", message: lastError)
-            return -13
+                rotationAngle: rotationAngle
+            ) else {
+                lastError = "Failed to convert Unity RGBA frame to MPImage."
+                latestJson = errorJson(code: "IMAGE_CONVERSION_FAILED", message: lastError)
+                return -12
+            }
+
+            do {
+                let result = try poseLandmarker.detect(
+                    videoFrame: image,
+                    timestampInMilliseconds: timestampMs
+                )
+
+                latestJson = resultJson(
+                    result: result,
+                    timestampMs: timestampMs,
+                    width: width,
+                    height: height,
+                    rotationAngle: rotationAngle,
+                    mirrored: mirrored
+                )
+                lastError = ""
+                return 0
+            } catch {
+                lastError = "PoseLandmarker frame processing failed: \(error.localizedDescription)"
+                latestJson = errorJson(code: "PROCESS_FAILED", message: lastError)
+                return -13
+            }
         }
     }
 
     func copyLatestJson(to buffer: UnsafeMutablePointer<CChar>?, capacity: Int) -> Int32 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         return copyString(latestJson, to: buffer, capacity: capacity)
     }
 
     func copyLastError(to buffer: UnsafeMutablePointer<CChar>?, capacity: Int) -> Int32 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         return copyString(lastError, to: buffer, capacity: capacity)
     }
 
     func dispose() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         poseLandmarker = nil
         latestJson = "{}"
         lastError = ""
@@ -153,9 +187,18 @@ private final class AHCMediaPipePoseBridge {
         height: Int,
         rotationAngle: Int
     ) -> MPImage? {
-        let bytesPerRow = width * 4
-        let byteCount = bytesPerRow * height
-        let data = Data(bytes: rgbaPointer, count: byteCount)
+        guard let layout = validatedByteLayout(width: width, height: height) else {
+            return nil
+        }
+
+        // detect(videoFrame:) is synchronous and the caller keeps its Color32[]
+        // pinned for this entire method, so the provider can safely avoid a full
+        // frame copy. The autoreleasepool in processRgba bounds its lifetime.
+        let data = Data(
+            bytesNoCopy: UnsafeMutableRawPointer(mutating: rgbaPointer),
+            count: layout.byteCount,
+            deallocator: .none
+        )
 
         guard let provider = CGDataProvider(data: data as CFData) else {
             return nil
@@ -172,7 +215,7 @@ private final class AHCMediaPipePoseBridge {
             height: height,
             bitsPerComponent: 8,
             bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
+            bytesPerRow: layout.bytesPerRow,
             space: colorSpace,
             bitmapInfo: bitmapInfo,
             provider: provider,
@@ -190,6 +233,28 @@ private final class AHCMediaPipePoseBridge {
         )
 
         return try? MPImage(uiImage: uiImage)
+    }
+
+    private func validatedByteLayout(width: Int, height: Int) -> (bytesPerRow: Int, byteCount: Int)? {
+        guard width > 0,
+              height > 0,
+              width <= maximumImageDimension,
+              height <= maximumImageDimension else {
+            return nil
+        }
+
+        let rowResult = width.multipliedReportingOverflow(by: 4)
+        guard !rowResult.overflow else {
+            return nil
+        }
+
+        let countResult = rowResult.partialValue.multipliedReportingOverflow(by: height)
+        guard !countResult.overflow,
+              countResult.partialValue <= maximumFrameByteCount else {
+            return nil
+        }
+
+        return (rowResult.partialValue, countResult.partialValue)
     }
 
     private func imageOrientation(for rotationAngle: Int) -> UIImage.Orientation {

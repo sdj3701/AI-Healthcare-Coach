@@ -28,7 +28,9 @@ namespace Rag.Healthcare.Pose
         private readonly List<PoseFeedbackMessage> generatedFeedback = new List<PoseFeedbackMessage>();
         private Coroutine startCoroutine;
         private Coroutine trackingCoroutine;
+        private Coroutine singleFrameCoroutine;
         private bool isTracking;
+        private bool trackingRequested;
         private bool isRequestInFlight;
         private float nextSampleAt;
         private float poseFpsWindowStartedAt;
@@ -41,6 +43,7 @@ namespace Rag.Healthcare.Pose
 
         public JointTrackingFrame LatestFrame { get; private set; }
         public bool IsTracking => isTracking;
+        public bool IsRequestInFlight => isRequestInFlight;
         public PoseTrackingBackend Backend => backend;
         public PoseTrackingProvider TrackingProvider => trackingProvider;
         public float PoseFps { get; private set; }
@@ -72,12 +75,15 @@ namespace Rag.Healthcare.Pose
 
         private void OnDestroy()
         {
+            trackingRequested = false;
             trackingProvider?.Dispose();
         }
 
         public void StartTracking()
         {
-            if (isTracking || startCoroutine != null)
+            trackingRequested = true;
+
+            if (isTracking || startCoroutine != null || trackingCoroutine != null)
             {
                 return;
             }
@@ -87,8 +93,8 @@ namespace Rag.Healthcare.Pose
 
         public void StopTracking()
         {
+            trackingRequested = false;
             isTracking = false;
-            isRequestInFlight = false;
 
             if (startCoroutine != null)
             {
@@ -96,24 +102,26 @@ namespace Rag.Healthcare.Pose
                 startCoroutine = null;
             }
 
-            if (trackingCoroutine != null)
+            if (singleFrameCoroutine != null && !isRequestInFlight)
             {
-                StopCoroutine(trackingCoroutine);
-                trackingCoroutine = null;
+                StopCoroutine(singleFrameCoroutine);
+                singleFrameCoroutine = null;
             }
 
-            trackingProvider?.Dispose();
+            // Keep the provider warm between ordinary Stop/Start operations. Repeatedly
+            // destroying the native PoseLandmarker while the camera session is settling
+            // is both expensive and unsafe on iOS. The provider is disposed in OnDestroy.
             LastInferenceMilliseconds = 0f;
         }
 
         public void RequestSingleTrackingFrame()
         {
-            if (!isActiveAndEnabled || isRequestInFlight)
+            if (!isActiveAndEnabled || isRequestInFlight || singleFrameCoroutine != null)
             {
                 return;
             }
 
-            StartCoroutine(RequestSingleTrackingFrameRoutine());
+            singleFrameCoroutine = StartCoroutine(RequestSingleTrackingFrameRoutine());
         }
 
         public void ConfigureSamplingRate(float targetFps)
@@ -137,11 +145,21 @@ namespace Rag.Healthcare.Pose
                 yield break;
             }
 
-            yield return trackingProvider.Initialize();
+            if (!trackingProvider.IsReady)
+            {
+                yield return trackingProvider.Initialize();
+            }
 
             if (!trackingProvider.IsReady)
             {
                 NotifyFailure(BuildProviderFailureMessage());
+                trackingRequested = false;
+                startCoroutine = null;
+                yield break;
+            }
+
+            if (!trackingRequested)
+            {
                 startCoroutine = null;
                 yield break;
             }
@@ -154,54 +172,74 @@ namespace Rag.Healthcare.Pose
 
         private IEnumerator RequestSingleTrackingFrameRoutine()
         {
-            if (!PrepareCameraAndProvider())
+            try
             {
-                yield break;
-            }
+                if (!PrepareCameraAndProvider())
+                {
+                    yield break;
+                }
 
-            yield return WaitForCameraReady();
-            if (!IsCameraReady())
+                yield return WaitForCameraReady();
+                if (!IsCameraReady())
+                {
+                    NotifyFailure(BuildCameraFailureMessage());
+                    yield break;
+                }
+
+                if (!trackingProvider.IsReady)
+                {
+                    yield return trackingProvider.Initialize();
+                }
+
+                if (!trackingProvider.IsReady)
+                {
+                    NotifyFailure(BuildProviderFailureMessage());
+                    yield break;
+                }
+
+                yield return EstimateCurrentFrame();
+            }
+            finally
             {
-                NotifyFailure(BuildCameraFailureMessage());
-                yield break;
+                singleFrameCoroutine = null;
             }
-
-            if (!trackingProvider.IsReady)
-            {
-                yield return trackingProvider.Initialize();
-            }
-
-            if (!trackingProvider.IsReady)
-            {
-                NotifyFailure(BuildProviderFailureMessage());
-                yield break;
-            }
-
-            yield return EstimateCurrentFrame();
         }
 
         private IEnumerator TrackingLoop()
         {
             nextSampleAt = Time.unscaledTime;
 
-            while (isTracking)
+            try
             {
-                var interval = Mathf.Max(0.01f, requestIntervalSeconds);
-                var now = Time.unscaledTime;
-                if (now < nextSampleAt)
+                while (isTracking)
                 {
-                    yield return null;
-                    continue;
-                }
+                    var interval = Mathf.Max(0.01f, requestIntervalSeconds);
+                    var now = Time.unscaledTime;
+                    if (now < nextSampleAt)
+                    {
+                        yield return null;
+                        continue;
+                    }
 
-                var skippedSamples = Mathf.FloorToInt(Mathf.Max(0f, now - nextSampleAt) / interval);
-                if (skippedSamples > 0)
-                {
-                    DroppedFrameCount += skippedSamples;
-                }
+                    var skippedSamples = Mathf.FloorToInt(Mathf.Max(0f, now - nextSampleAt) / interval);
+                    if (skippedSamples > 0)
+                    {
+                        DroppedFrameCount += skippedSamples;
+                    }
 
-                nextSampleAt = now + interval;
-                yield return EstimateCurrentFrame();
+                    nextSampleAt = now + interval;
+                    yield return EstimateCurrentFrame();
+                }
+            }
+            finally
+            {
+                trackingCoroutine = null;
+                isRequestInFlight = false;
+            }
+
+            if (trackingRequested && isActiveAndEnabled)
+            {
+                StartTracking();
             }
         }
 
@@ -225,14 +263,19 @@ namespace Rag.Healthcare.Pose
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var startedAt = Time.realtimeSinceStartup;
 
-            yield return trackingProvider.EstimatePose(
-                cameraSource.PreviewTexture,
-                timestamp,
-                value => frame = value,
-                message => error = message);
-
-            isRequestInFlight = false;
-            LastInferenceMilliseconds = (Time.realtimeSinceStartup - startedAt) * 1000f;
+            try
+            {
+                yield return trackingProvider.EstimatePose(
+                    cameraSource.PreviewTexture,
+                    timestamp,
+                    value => frame = value,
+                    message => error = message);
+            }
+            finally
+            {
+                isRequestInFlight = false;
+                LastInferenceMilliseconds = (Time.realtimeSinceStartup - startedAt) * 1000f;
+            }
 
             if (!string.IsNullOrWhiteSpace(error))
             {

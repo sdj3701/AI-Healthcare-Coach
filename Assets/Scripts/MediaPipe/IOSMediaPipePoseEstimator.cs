@@ -35,8 +35,13 @@ namespace AIHealthcareCoach.MediaPipe
         private static extern void AHC_PoseDispose();
 #endif
 
-        private const int JsonBufferCapacity = 65536;
-        private readonly StringBuilder jsonBuffer = new StringBuilder(JsonBufferCapacity);
+        private const int InitialJsonBufferCapacity = 65536;
+        private const int MaximumJsonBufferCapacity = 1024 * 1024;
+        private const int MaximumImageDimension = 8192;
+
+        private StringBuilder jsonBuffer = new StringBuilder(InitialJsonBufferCapacity);
+        private GCHandle pinnedPixelsHandle;
+        private Color32[] pinnedPixels;
         private bool isReady;
 
         public string BackendName
@@ -87,17 +92,18 @@ namespace AIHealthcareCoach.MediaPipe
                 return false;
             }
 
-            if (rgbaPixels == null || rgbaPixels.Length == 0 || width <= 0 || height <= 0)
+            if (!TryValidateFrame(rgbaPixels, width, height, out var validationError))
             {
-                frame = LandmarkFrame.Empty(timestampMs, "INVALID_FRAME", "Frame pixels are empty.");
+                LastError = validationError;
+                frame = LandmarkFrame.Empty(timestampMs, "INVALID_FRAME", LastError);
                 return false;
             }
 
-            var handle = GCHandle.Alloc(rgbaPixels, GCHandleType.Pinned);
             try
             {
+                EnsurePixelsPinned(rgbaPixels);
                 var code = AHC_PoseProcessRgba(
-                    handle.AddrOfPinnedObject(),
+                    pinnedPixelsHandle.AddrOfPinnedObject(),
                     width,
                     height,
                     timestampMs,
@@ -106,27 +112,53 @@ namespace AIHealthcareCoach.MediaPipe
 
                 if (code != 0)
                 {
-                    LastError = ReadLastError();
+                    LastError = code == -14
+                        ? "MediaPipe is still processing the previous frame."
+                        : ReadLastError();
                     frame = LandmarkFrame.Empty(timestampMs, "NATIVE_PROCESS_FAILED", LastError);
                     return false;
                 }
             }
-            finally
+            catch (Exception exception)
             {
-                handle.Free();
+                LastError = "Failed to pin or process the camera frame: " + exception.Message;
+                frame = LandmarkFrame.Empty(timestampMs, "NATIVE_PROCESS_EXCEPTION", LastError);
+                return false;
             }
 
-            jsonBuffer.Length = 0;
-            var required = AHC_PoseGetLatestJson(jsonBuffer, JsonBufferCapacity);
-            if (required <= 0 || jsonBuffer.Length == 0)
+            if (!TryReadLatestJson(out var json, out var jsonError))
             {
-                LastError = ReadLastError();
+                LastError = jsonError;
                 frame = LandmarkFrame.Empty(timestampMs, "EMPTY_NATIVE_RESULT", LastError);
                 return false;
             }
 
-            frame = JsonUtility.FromJson<LandmarkFrame>(jsonBuffer.ToString());
-            return frame != null && string.IsNullOrEmpty(frame.errorCode);
+            try
+            {
+                frame = JsonUtility.FromJson<LandmarkFrame>(json);
+            }
+            catch (Exception exception)
+            {
+                LastError = "MediaPipe returned invalid JSON: " + exception.Message;
+                frame = LandmarkFrame.Empty(timestampMs, "INVALID_NATIVE_RESULT", LastError);
+                return false;
+            }
+
+            if (frame == null)
+            {
+                LastError = "MediaPipe returned an empty pose result.";
+                frame = LandmarkFrame.Empty(timestampMs, "INVALID_NATIVE_RESULT", LastError);
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(frame.errorCode))
+            {
+                LastError = frame.errorMessage;
+                return false;
+            }
+
+            LastError = string.Empty;
+            return true;
 #else
             frame = LandmarkFrame.Empty(timestampMs, "IOS_BACKEND_UNAVAILABLE", LastError);
             return false;
@@ -138,7 +170,107 @@ namespace AIHealthcareCoach.MediaPipe
 #if UNITY_IOS && !UNITY_EDITOR
             AHC_PoseDispose();
 #endif
+            ReleasePinnedPixels();
             isReady = false;
+        }
+
+        private static bool TryValidateFrame(
+            Color32[] rgbaPixels,
+            int width,
+            int height,
+            out string error)
+        {
+            if (rgbaPixels == null || rgbaPixels.Length == 0)
+            {
+                error = "Frame pixels are empty.";
+                return false;
+            }
+
+            if (width <= 0 || height <= 0 || width > MaximumImageDimension || height > MaximumImageDimension)
+            {
+                error = $"Frame dimensions are invalid: {width}x{height}.";
+                return false;
+            }
+
+            var requiredPixelCount = (long)width * height;
+            if (requiredPixelCount > rgbaPixels.LongLength)
+            {
+                error = $"Frame buffer is too small. Expected {requiredPixelCount} pixels but received {rgbaPixels.LongLength}.";
+                return false;
+            }
+
+            error = string.Empty;
+            return true;
+        }
+
+        private void EnsurePixelsPinned(Color32[] pixels)
+        {
+            if (ReferenceEquals(pinnedPixels, pixels) && pinnedPixelsHandle.IsAllocated)
+            {
+                return;
+            }
+
+            ReleasePinnedPixels();
+            pinnedPixelsHandle = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+            pinnedPixels = pixels;
+        }
+
+        private void ReleasePinnedPixels()
+        {
+            if (pinnedPixelsHandle.IsAllocated)
+            {
+                pinnedPixelsHandle.Free();
+            }
+
+            pinnedPixels = null;
+        }
+
+        private bool TryReadLatestJson(out string json, out string error)
+        {
+#if UNITY_IOS && !UNITY_EDITOR
+            jsonBuffer.Length = 0;
+            var required = AHC_PoseGetLatestJson(jsonBuffer, jsonBuffer.Capacity);
+            if (required <= 0)
+            {
+                json = string.Empty;
+                error = ReadLastError();
+                return false;
+            }
+
+            if (required > jsonBuffer.Capacity)
+            {
+                if (required > MaximumJsonBufferCapacity)
+                {
+                    json = string.Empty;
+                    error = $"MediaPipe JSON result is too large ({required} bytes).";
+                    return false;
+                }
+
+                jsonBuffer = new StringBuilder(required);
+                required = AHC_PoseGetLatestJson(jsonBuffer, jsonBuffer.Capacity);
+                if (required <= 0 || required > jsonBuffer.Capacity)
+                {
+                    json = string.Empty;
+                    error = "MediaPipe JSON result changed size while it was being copied.";
+                    return false;
+                }
+            }
+
+            if (jsonBuffer.Length == 0)
+            {
+                json = string.Empty;
+                error = ReadLastError();
+                return false;
+            }
+
+            json = jsonBuffer.ToString();
+            error = string.Empty;
+            return true;
+#else
+            json = string.Empty;
+            error = "iOS MediaPipe bridge is not available in this runtime.";
+            return false;
+#endif
         }
 
         private static string ReadLastError()

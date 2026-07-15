@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using Rag.Healthcare.Camera;
 using Rag.Healthcare.Pose;
 using Rag.Healthcare.Pose.Rendering;
@@ -87,8 +88,8 @@ namespace Rag.Healthcare.UI
         [SerializeField] private bool applyMobilePerformanceDefaults = true;
         [SerializeField, Min(16)] private int mobileCameraWidth = 640;
         [SerializeField, Min(16)] private int mobileCameraHeight = 480;
-        [SerializeField, Range(1, 60)] private int mobileCameraFps = 24;
-        [SerializeField, Range(1, 30)] private int mobilePoseFps = 12;
+        [SerializeField, Range(1, 60)] private int mobileCameraFps = 20;
+        [SerializeField, Range(1, 30)] private int mobilePoseFps = 8;
         [SerializeField, Range(15, 120)] private int mobileTargetFrameRate = 30;
 
         private UIDocument document;
@@ -101,6 +102,7 @@ namespace Rag.Healthcare.UI
         private ScrollView contentScroll;
         private VisualElement contentRoot;
         private VisualElement[] progressPips;
+        private VisualElement previewFrame;
         private Image previewImage;
         private VisualElement previewPlaceholder;
         private Label stepLabel;
@@ -128,6 +130,14 @@ namespace Rag.Healthcare.UI
         private Rect lastSafeArea = new Rect(-1f, -1f, -1f, -1f);
         private int lastScreenWidth = -1;
         private int lastScreenHeight = -1;
+        private Coroutine sessionTransitionCoroutine;
+        private Texture lastPreviewLayoutTexture;
+        private int lastPreviewLayoutWidth = -1;
+        private int lastPreviewLayoutHeight = -1;
+        private int lastPreviewRotation = int.MinValue;
+        private bool lastPreviewMirrored;
+        private float lastPreviewFrameWidth = -1f;
+        private float lastPreviewFrameHeight = -1f;
 #if UNITY_EDITOR
         private bool editorRebuildQueued;
 #endif
@@ -180,6 +190,12 @@ namespace Rag.Healthcare.UI
 
         private void OnDisable()
         {
+            if (sessionTransitionCoroutine != null)
+            {
+                StopCoroutine(sessionTransitionCoroutine);
+                sessionTransitionCoroutine = null;
+            }
+
             if (cameraSource != null)
             {
                 cameraSource.PreviewTextureChanged -= HandlePreviewTextureChanged;
@@ -862,6 +878,11 @@ namespace Rag.Healthcare.UI
             utilityRow.Add(ActionButton("카메라 전환", ColorFromHex(0x161B22), Color.white, 38f, SwitchCamera));
             utilityRow.Add(ActionButton("목표 수정", ColorFromHex(0x161B22), Color.white, 38f, () =>
             {
+                if (sessionTransitionCoroutine != null)
+                {
+                    return;
+                }
+
                 StopWorkoutOnly();
                 currentStep = ScreenStep.Target;
                 RenderCurrentStep();
@@ -879,6 +900,11 @@ namespace Rag.Healthcare.UI
             resetRow.Add(ActionButton("리셋", ColorFromHex(0x101621), ColorFromHex(0x94A3B8), 30f, ResetSession));
             resetRow.Add(ActionButton("운동 선택", ColorFromHex(0x101621), ColorFromHex(0x94A3B8), 30f, () =>
             {
+                if (sessionTransitionCoroutine != null)
+                {
+                    return;
+                }
+
                 StopWorkoutOnly();
                 currentStep = ScreenStep.Exercise;
                 RenderCurrentStep();
@@ -889,6 +915,8 @@ namespace Rag.Healthcare.UI
         private VisualElement BuildPreviewPanel()
         {
             var frame = Card("preview-frame", 270f);
+            previewFrame = frame;
+            InvalidatePreviewLayout();
             frame.style.marginTop = 8f;
             frame.style.backgroundColor = Color.black;
             frame.style.position = Position.Relative;
@@ -897,11 +925,18 @@ namespace Rag.Healthcare.UI
             previewImage = new Image { name = "camera-or-replay-preview", scaleMode = ScaleMode.ScaleToFit };
             previewImage.style.position = Position.Absolute;
             previewImage.style.left = 0f;
-            previewImage.style.right = 0f;
             previewImage.style.top = 0f;
-            previewImage.style.bottom = 0f;
+            previewImage.style.width = Length.Percent(100f);
+            previewImage.style.height = Length.Percent(100f);
             previewImage.generateVisualContent += OnGenerateVisualContent;
             frame.Add(previewImage);
+            frame.RegisterCallback<GeometryChangedEvent>(_ =>
+            {
+                if (previewFrame == frame)
+                {
+                    ApplyPreviewLayout(previewImage == null ? null : previewImage.image);
+                }
+            });
 
             previewPlaceholder = new VisualElement { name = "preview-placeholder" };
             previewPlaceholder.style.position = Position.Absolute;
@@ -1148,7 +1183,11 @@ namespace Rag.Healthcare.UI
             }
 
             Texture texture = null;
-            if (cameraSource != null && (cameraSource.IsRunning || cameraSource.IsStarting))
+            if (replayMode && replayPlayer != null && replayPlayer.LoadedFrameCount > 0)
+            {
+                texture = replayPlayer.PreviewTexture;
+            }
+            else if (cameraSource != null && (cameraSource.IsRunning || cameraSource.IsStarting))
             {
                 texture = cameraSource.PreviewTexture;
                 replayMode = false;
@@ -1160,12 +1199,119 @@ namespace Rag.Healthcare.UI
             }
 
             previewImage.image = texture;
+            ApplyPreviewLayout(texture);
             previewImage.style.display = texture == null ? DisplayStyle.None : DisplayStyle.Flex;
 
             if (previewPlaceholder != null)
             {
                 previewPlaceholder.style.display = texture == null ? DisplayStyle.Flex : DisplayStyle.None;
             }
+        }
+
+        private void ApplyPreviewLayout(Texture texture)
+        {
+            if (previewImage == null || previewFrame == null)
+            {
+                return;
+            }
+
+            if (texture == null)
+            {
+                previewImage.style.left = 0f;
+                previewImage.style.top = 0f;
+                previewImage.style.width = Length.Percent(100f);
+                previewImage.style.height = Length.Percent(100f);
+                previewImage.style.rotate = new Rotate(new Angle(0f, AngleUnit.Degree));
+                previewImage.style.scale = new Scale(Vector3.one);
+                InvalidatePreviewLayout();
+                return;
+            }
+
+            var frameWidth = previewFrame.resolvedStyle.width;
+            var frameHeight = previewFrame.resolvedStyle.height;
+            var textureWidth = texture.width;
+            var textureHeight = texture.height;
+            if (float.IsNaN(frameWidth) || float.IsNaN(frameHeight) ||
+                frameWidth <= 0f || frameHeight <= 0f ||
+                textureWidth <= 0 || textureHeight <= 0)
+            {
+                return;
+            }
+
+            // WebCamTexture metadata becomes reliable a few frames after Play().
+            // This method is called by the periodic refresh, frame callbacks, and
+            // geometry changes so the correction updates without restarting UI.
+            var rotation = replayMode || cameraSource == null
+                ? 0
+                : NormalizeRotation(cameraSource.VideoRotationAngle);
+            var mirrored = !replayMode && cameraSource != null && cameraSource.VideoVerticallyMirrored;
+
+            if (lastPreviewLayoutTexture == texture &&
+                lastPreviewLayoutWidth == textureWidth &&
+                lastPreviewLayoutHeight == textureHeight &&
+                lastPreviewRotation == rotation &&
+                lastPreviewMirrored == mirrored &&
+                Mathf.Abs(lastPreviewFrameWidth - frameWidth) < 0.1f &&
+                Mathf.Abs(lastPreviewFrameHeight - frameHeight) < 0.1f)
+            {
+                return;
+            }
+
+            var quarterTurn = rotation == 90 || rotation == 270;
+            var displayAspect = quarterTurn
+                ? (float)textureHeight / textureWidth
+                : (float)textureWidth / textureHeight;
+            var frameAspect = frameWidth / frameHeight;
+
+            float fittedWidth;
+            float fittedHeight;
+            if (displayAspect > frameAspect)
+            {
+                fittedWidth = frameWidth;
+                fittedHeight = frameWidth / displayAspect;
+            }
+            else
+            {
+                fittedHeight = frameHeight;
+                fittedWidth = frameHeight * displayAspect;
+            }
+
+            // Size the element in its unrotated coordinate system. Rotating this
+            // Image also rotates generateVisualContent, keeping the skeleton and
+            // camera pixels on the exact same transform.
+            var elementWidth = quarterTurn ? fittedHeight : fittedWidth;
+            var elementHeight = quarterTurn ? fittedWidth : fittedHeight;
+            previewImage.style.left = (frameWidth - elementWidth) * 0.5f;
+            previewImage.style.top = (frameHeight - elementHeight) * 0.5f;
+            previewImage.style.width = elementWidth;
+            previewImage.style.height = elementHeight;
+            previewImage.style.rotate = new Rotate(new Angle(rotation, AngleUnit.Degree));
+            previewImage.style.scale = new Scale(new Vector3(1f, mirrored ? -1f : 1f, 1f));
+
+            lastPreviewLayoutTexture = texture;
+            lastPreviewLayoutWidth = textureWidth;
+            lastPreviewLayoutHeight = textureHeight;
+            lastPreviewRotation = rotation;
+            lastPreviewMirrored = mirrored;
+            lastPreviewFrameWidth = frameWidth;
+            lastPreviewFrameHeight = frameHeight;
+        }
+
+        private void InvalidatePreviewLayout()
+        {
+            lastPreviewLayoutTexture = null;
+            lastPreviewLayoutWidth = -1;
+            lastPreviewLayoutHeight = -1;
+            lastPreviewRotation = int.MinValue;
+            lastPreviewMirrored = false;
+            lastPreviewFrameWidth = -1f;
+            lastPreviewFrameHeight = -1f;
+        }
+
+        private static int NormalizeRotation(int rotation)
+        {
+            rotation %= 360;
+            return rotation < 0 ? rotation + 360 : rotation;
         }
 
         private void HandlePreviewTextureChanged(Texture texture)
@@ -1175,7 +1321,8 @@ namespace Rag.Healthcare.UI
 
         private void StartWorkout()
         {
-            if (!Application.isPlaying)
+            if (!Application.isPlaying || sessionTransitionCoroutine != null ||
+                (workoutRunning && trackingController != null && trackingController.IsTracking))
             {
                 return;
             }
@@ -1196,16 +1343,27 @@ namespace Rag.Healthcare.UI
 
         private void StopWorkoutAndReplay()
         {
-            if (!Application.isPlaying)
+            if (!Application.isPlaying || sessionTransitionCoroutine != null)
             {
                 return;
             }
 
+            sessionTransitionCoroutine = StartCoroutine(StopWorkoutAndReplayRoutine());
+        }
+
+        private IEnumerator StopWorkoutAndReplayRoutine()
+        {
             StopWorkoutOnly();
-            cameraSource?.StopCamera();
+            yield return WaitForTrackingRequestToFinish();
+
+            // Keep the capture session warm while replay is visible. START can then
+            // resume without repeatedly tearing down AVFoundation and MediaPipe.
+            yield return null;
+
             replayPlayer?.PlayLatestSession();
             replayMode = true;
             RefreshPreviewTexture();
+            sessionTransitionCoroutine = null;
         }
 
         private void StopWorkoutOnly()
@@ -1226,17 +1384,37 @@ namespace Rag.Healthcare.UI
 
         private void SwitchCamera()
         {
-            if (!Application.isPlaying)
+            if (!Application.isPlaying || sessionTransitionCoroutine != null)
             {
                 return;
             }
 
+            sessionTransitionCoroutine = StartCoroutine(SwitchCameraRoutine());
+        }
+
+        private IEnumerator SwitchCameraRoutine()
+        {
             replayMode = false;
             replayPlayer?.StopReplay();
             var shouldResumeTracking = workoutRunning || (trackingController != null && trackingController.IsTracking);
+
+            if (workoutRunning)
+            {
+                elapsedBeforePause += Time.unscaledTime - sessionStartedAt;
+            }
+
+            workoutRunning = false;
             trackingController?.StopTracking();
+            yield return WaitForTrackingRequestToFinish();
             cameraSource?.StopCamera();
             cameraSource?.TogglePreferredCameraFacing();
+
+            // AVFoundation can still be releasing the previous capture session
+            // for the remainder of this frame. Debounce camera switches and give
+            // it two player-loop turns before creating the replacement texture.
+            yield return null;
+            yield return null;
+
             cameraSource?.StartCamera();
 
             if (shouldResumeTracking)
@@ -1245,22 +1423,46 @@ namespace Rag.Healthcare.UI
                 workoutRunning = true;
                 sessionStartedAt = Time.unscaledTime;
             }
+
+            RefreshPreviewTexture();
+            sessionTransitionCoroutine = null;
+        }
+
+        private IEnumerator WaitForTrackingRequestToFinish()
+        {
+            const float timeoutSeconds = 1f;
+            var timeoutAt = Time.realtimeSinceStartup + timeoutSeconds;
+            while (trackingController != null &&
+                   trackingController.IsRequestInFlight &&
+                   Time.realtimeSinceStartup < timeoutAt)
+            {
+                yield return null;
+            }
         }
 
         private void ResetSession()
         {
-            if (!Application.isPlaying)
+            if (!Application.isPlaying || sessionTransitionCoroutine != null)
             {
                 return;
             }
 
+            sessionTransitionCoroutine = StartCoroutine(ResetSessionRoutine());
+        }
+
+        private IEnumerator ResetSessionRoutine()
+        {
             StopWorkoutOnly();
+            yield return WaitForTrackingRequestToFinish();
             cameraSource?.StopCamera();
+            yield return null;
+            yield return null;
             replayPlayer?.StopReplay();
             elapsedBeforePause = 0f;
             replayMode = false;
             ApplyTargetCount();
             RenderCurrentStep();
+            sessionTransitionCoroutine = null;
         }
 
         private void ApplyTargetCountFromFields()
@@ -1433,7 +1635,9 @@ namespace Rag.Healthcare.UI
 
         private void ResetStepReferences()
         {
+            previewFrame = null;
             previewImage = null;
+            InvalidatePreviewLayout();
             previewPlaceholder = null;
             timerLabel = null;
             correctCountLabel = null;
@@ -1659,6 +1863,7 @@ namespace Rag.Healthcare.UI
         {
             if (previewImage != null)
             {
+                ApplyPreviewLayout(previewImage.image);
                 previewImage.MarkDirtyRepaint();
             }
         }

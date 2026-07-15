@@ -10,7 +10,6 @@ using Rag.Healthcare.Rag.Runtime;
 using Rag.Healthcare.Tts;
 using Rag.Healthcare.UI;
 using UnityEditor;
-using UnityEditor.Build;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -25,7 +24,6 @@ namespace Rag.Healthcare.Editor
     public static class RagSquatCoachSceneBuilder
     {
         private const string ScenePath = "Assets/Scenes/TestRagSysten.unity";
-        private const string MediaPipeDefine = "AHC_USE_HOMULER_MEDIAPIPE";
 
         [MenuItem("Rag/RAG/Create TestRagSysten Scene")]
         public static void EnsureSquatCoachScene()
@@ -45,27 +43,6 @@ namespace Rag.Healthcare.Editor
             EnsureSceneInBuildSettings();
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
-        }
-
-        [MenuItem("Rag/RAG/Enable Homuler MediaPipe Define")]
-        public static void EnableHomulerMediaPipeDefine()
-        {
-            var target = NamedBuildTarget.Standalone;
-            var defines = PlayerSettings.GetScriptingDefineSymbols(target)
-                .Split(';')
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .ToList();
-
-            if (!defines.Contains(MediaPipeDefine))
-            {
-                defines.Add(MediaPipeDefine);
-                PlayerSettings.SetScriptingDefineSymbols(target, string.Join(";", defines));
-                Debug.Log($"Added scripting define '{MediaPipeDefine}' for {target.TargetName}.");
-            }
-            else
-            {
-                Debug.Log($"Scripting define '{MediaPipeDefine}' is already enabled for {target.TargetName}.");
-            }
         }
 
         private static void CreateScene()

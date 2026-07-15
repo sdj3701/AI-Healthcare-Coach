@@ -14,12 +14,21 @@ namespace Rag.Healthcare.Camera
         [SerializeField] private bool preferFrontCamera = true;
         [SerializeField] private bool playOnStart = true;
 
+        [Header("Lifecycle")]
+        [SerializeField, Min(0f)] private float restartSettleDelaySeconds = 0.25f;
+        [SerializeField, Min(1f)] private float firstFrameTimeoutSeconds = 8f;
+
         private WebCamTexture webCamTexture;
         private Texture2D frameTexture;
         private string activeDeviceName;
         private Coroutine startCameraCoroutine;
         private bool isStarting;
         private bool activeCameraIsFrontFacing;
+        private bool hasReceivedFirstFrame;
+        private bool resumeCameraAfterPause;
+        private bool isQuitting;
+        private int lifecycleVersion;
+        private float nextAllowedStartTime;
 
         public event Action<Texture> PreviewTextureChanged;
 
@@ -33,7 +42,11 @@ namespace Rag.Healthcare.Camera
         public WebCamTexture WebCamTexture => webCamTexture;
         public int FrameWidth => webCamTexture != null ? webCamTexture.width : 0;
         public int FrameHeight => webCamTexture != null ? webCamTexture.height : 0;
-        public bool HasValidFrame => IsRunning && FrameWidth > 16 && FrameHeight > 16;
+        public int VideoRotationAngle => webCamTexture != null
+            ? NormalizeRotationAngle(webCamTexture.videoRotationAngle)
+            : 0;
+        public bool VideoVerticallyMirrored => webCamTexture != null && webCamTexture.videoVerticallyMirrored;
+        public bool HasValidFrame => IsRunning && hasReceivedFirstFrame && FrameWidth > 16 && FrameHeight > 16;
 
         private void Start()
         {
@@ -45,7 +58,8 @@ namespace Rag.Healthcare.Camera
 
         private void OnDestroy()
         {
-            StopCamera();
+            resumeCameraAfterPause = false;
+            StopCameraInternal(false);
 
             if (frameTexture != null)
             {
@@ -54,21 +68,74 @@ namespace Rag.Healthcare.Camera
             }
         }
 
+        private void OnApplicationPause(bool pauseStatus)
+        {
+            if (pauseStatus)
+            {
+                resumeCameraAfterPause = IsRunning || isStarting;
+                if (resumeCameraAfterPause)
+                {
+                    StopCameraInternal(true);
+                }
+
+                return;
+            }
+
+            if (!resumeCameraAfterPause || isQuitting)
+            {
+                return;
+            }
+
+            resumeCameraAfterPause = false;
+            StartCamera();
+        }
+
+        private void OnApplicationQuit()
+        {
+            isQuitting = true;
+            resumeCameraAfterPause = false;
+        }
+
         public bool StartCamera()
         {
-            if (IsRunning)
+            if (isQuitting || !isActiveAndEnabled)
+            {
+                LastError = "Camera source is not active.";
+                return false;
+            }
+
+            if (isStarting || IsRunning)
             {
                 return true;
             }
 
-            if (isStarting)
+            if (webCamTexture != null)
             {
-                return true;
+                var staleTexture = DetachCurrentCamera();
+                ScheduleRestartDelay();
+                NotifyPreviewTextureChanged(null);
+                ReleaseCameraTexture(staleTexture);
             }
 
             LastError = string.Empty;
+            hasReceivedFirstFrame = false;
             isStarting = true;
-            startCameraCoroutine = StartCoroutine(StartCameraRoutine());
+            var startVersion = ++lifecycleVersion;
+
+            try
+            {
+                var coroutine = StartCoroutine(StartCameraRoutine(startVersion));
+                startCameraCoroutine = isStarting && startVersion == lifecycleVersion ? coroutine : null;
+            }
+            catch (Exception exception)
+            {
+                isStarting = false;
+                startCameraCoroutine = null;
+                LastError = "Camera failed to start: " + exception.Message;
+                Debug.LogWarning("[CameraCaptureSource] " + LastError);
+                return false;
+            }
+
             return true;
         }
 
@@ -84,63 +151,105 @@ namespace Rag.Healthcare.Camera
             requestedFps = Mathf.Max(1, fps);
         }
 
-        private IEnumerator StartCameraRoutine()
+        private IEnumerator StartCameraRoutine(int startVersion)
         {
+            while (IsCurrentStart(startVersion) && Time.realtimeSinceStartup < nextAllowedStartTime)
+            {
+                yield return null;
+            }
+
+            if (!IsCurrentStart(startVersion))
+            {
+                yield break;
+            }
+
             if (!Application.HasUserAuthorization(UserAuthorization.WebCam))
             {
                 yield return Application.RequestUserAuthorization(UserAuthorization.WebCam);
             }
 
+            if (!IsCurrentStart(startVersion))
+            {
+                yield break;
+            }
+
             if (!Application.HasUserAuthorization(UserAuthorization.WebCam))
             {
-                LastError = "Camera permission was denied.";
-                Debug.LogWarning("[CameraCaptureSource] " + LastError);
-                isStarting = false;
-                startCameraCoroutine = null;
+                FailStart(startVersion, "Camera permission was denied.", null);
                 yield break;
             }
 
-            if (WebCamTexture.devices == null || WebCamTexture.devices.Length == 0)
+            var devices = WebCamTexture.devices;
+            if (devices == null || devices.Length == 0)
             {
-                LastError = "No camera device was found.";
-                Debug.LogWarning("[CameraCaptureSource] " + LastError);
-                isStarting = false;
-                startCameraCoroutine = null;
+                FailStart(startVersion, "No camera device was found.", null);
                 yield break;
             }
 
+            WebCamTexture candidateTexture = null;
             try
             {
-                var selectedDevice = ResolveCameraDevice();
+                var selectedDevice = ResolveCameraDevice(devices);
                 activeCameraIsFrontFacing = selectedDevice.isFrontFacing;
                 activeDeviceName = selectedDevice.name;
-                webCamTexture = string.IsNullOrWhiteSpace(activeDeviceName)
+                candidateTexture = string.IsNullOrWhiteSpace(activeDeviceName)
                     ? new WebCamTexture(Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps))
                     : new WebCamTexture(activeDeviceName, Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps));
 
-                webCamTexture.Play();
-                PreviewTextureChanged?.Invoke(webCamTexture);
+                if (!IsCurrentStart(startVersion))
+                {
+                    ReleaseCameraTexture(candidateTexture);
+                    yield break;
+                }
+
+                webCamTexture = candidateTexture;
+                candidateTexture.Play();
             }
             catch (Exception exception)
             {
-                LastError = "Camera failed to start: " + exception.Message;
-                Debug.LogWarning("[CameraCaptureSource] " + LastError);
-                if (webCamTexture != null)
-                {
-                    Destroy(webCamTexture);
-                    webCamTexture = null;
-                }
-
-                activeDeviceName = string.Empty;
-                activeCameraIsFrontFacing = false;
+                FailStart(startVersion, "Camera failed to start: " + exception.Message, candidateTexture);
+                yield break;
             }
 
-            isStarting = false;
-            startCameraCoroutine = null;
+            var firstFrameDeadline = Time.realtimeSinceStartup + Mathf.Max(1f, firstFrameTimeoutSeconds);
+            while (IsCurrentStart(startVersion) && Time.realtimeSinceStartup < firstFrameDeadline)
+            {
+                if (candidateTexture != null &&
+                    candidateTexture.isPlaying &&
+                    candidateTexture.didUpdateThisFrame &&
+                    candidateTexture.width > 16 &&
+                    candidateTexture.height > 16)
+                {
+                    hasReceivedFirstFrame = true;
+                    CompleteStart(startVersion);
+                    NotifyPreviewTextureChanged(candidateTexture);
+                    yield break;
+                }
+
+                yield return null;
+            }
+
+            if (IsCurrentStart(startVersion))
+            {
+                FailStart(
+                    startVersion,
+                    "Camera did not provide a valid frame within " +
+                    Mathf.Max(1f, firstFrameTimeoutSeconds).ToString("0.#") + " seconds.",
+                    candidateTexture);
+            }
         }
 
         public void StopCamera()
         {
+            resumeCameraAfterPause = false;
+            StopCameraInternal(false);
+        }
+
+        private void StopCameraInternal(bool preserveResumeRequest)
+        {
+            var hadActiveRequest = isStarting || webCamTexture != null;
+            lifecycleVersion++;
+
             if (startCameraCoroutine != null)
             {
                 StopCoroutine(startCameraCoroutine);
@@ -149,21 +258,22 @@ namespace Rag.Healthcare.Camera
 
             isStarting = false;
 
-            if (webCamTexture == null)
+            if (!preserveResumeRequest)
             {
-                return;
+                resumeCameraAfterPause = false;
             }
 
-            if (webCamTexture.isPlaying)
+            var textureToRelease = DetachCurrentCamera();
+            if (hadActiveRequest)
             {
-                webCamTexture.Stop();
+                ScheduleRestartDelay();
             }
 
-            Destroy(webCamTexture);
-            webCamTexture = null;
-            activeDeviceName = string.Empty;
-            activeCameraIsFrontFacing = false;
-            PreviewTextureChanged?.Invoke(null);
+            if (textureToRelease != null)
+            {
+                NotifyPreviewTextureChanged(null);
+                ReleaseCameraTexture(textureToRelease);
+            }
         }
 
         public bool TryCaptureJpeg(out byte[] jpegBytes, int quality)
@@ -197,11 +307,11 @@ namespace Rag.Healthcare.Camera
             return true;
         }
 
-        private WebCamDevice ResolveCameraDevice()
+        private WebCamDevice ResolveCameraDevice(WebCamDevice[] devices)
         {
             if (!string.IsNullOrWhiteSpace(cameraDeviceName))
             {
-                foreach (var device in WebCamTexture.devices)
+                foreach (var device in devices)
                 {
                     if (string.Equals(device.name, cameraDeviceName, StringComparison.OrdinalIgnoreCase))
                     {
@@ -210,7 +320,7 @@ namespace Rag.Healthcare.Camera
                 }
             }
 
-            foreach (var device in WebCamTexture.devices)
+            foreach (var device in devices)
             {
                 if (device.isFrontFacing == preferFrontCamera)
                 {
@@ -218,7 +328,109 @@ namespace Rag.Healthcare.Camera
                 }
             }
 
-            return WebCamTexture.devices[0];
+            return devices[0];
+        }
+
+        private bool IsCurrentStart(int startVersion)
+        {
+            return isStarting && lifecycleVersion == startVersion;
+        }
+
+        private void CompleteStart(int startVersion)
+        {
+            if (lifecycleVersion != startVersion)
+            {
+                return;
+            }
+
+            isStarting = false;
+            startCameraCoroutine = null;
+        }
+
+        private void FailStart(int startVersion, string error, WebCamTexture candidateTexture)
+        {
+            if (lifecycleVersion != startVersion)
+            {
+                if (candidateTexture != null && candidateTexture != webCamTexture)
+                {
+                    ReleaseCameraTexture(candidateTexture);
+                }
+
+                return;
+            }
+
+            LastError = error;
+            Debug.LogWarning("[CameraCaptureSource] " + LastError);
+
+            var textureToRelease = webCamTexture == candidateTexture
+                ? DetachCurrentCamera()
+                : candidateTexture;
+
+            isStarting = false;
+            startCameraCoroutine = null;
+            ScheduleRestartDelay();
+
+            if (textureToRelease != null)
+            {
+                NotifyPreviewTextureChanged(null);
+                ReleaseCameraTexture(textureToRelease);
+            }
+        }
+
+        private WebCamTexture DetachCurrentCamera()
+        {
+            var detachedTexture = webCamTexture;
+            webCamTexture = null;
+            hasReceivedFirstFrame = false;
+            activeDeviceName = string.Empty;
+            activeCameraIsFrontFacing = false;
+            return detachedTexture;
+        }
+
+        private void ReleaseCameraTexture(WebCamTexture texture)
+        {
+            if (texture == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (texture.isPlaying)
+                {
+                    texture.Stop();
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[CameraCaptureSource] Camera stop failed: " + exception.Message);
+            }
+
+            Destroy(texture);
+        }
+
+        private void ScheduleRestartDelay()
+        {
+            nextAllowedStartTime = Mathf.Max(
+                nextAllowedStartTime,
+                Time.realtimeSinceStartup + Mathf.Max(0f, restartSettleDelaySeconds));
+        }
+
+        private void NotifyPreviewTextureChanged(Texture texture)
+        {
+            try
+            {
+                PreviewTextureChanged?.Invoke(texture);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception, this);
+            }
+        }
+
+        private static int NormalizeRotationAngle(int angle)
+        {
+            return ((angle % 360) + 360) % 360;
         }
 
         private void EnsureFrameTexture(int width, int height)

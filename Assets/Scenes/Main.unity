@@ -327,7 +327,7 @@ MonoBehaviour:
   minPoseDetectionConfidence: 0.5
   minPosePresenceConfidence: 0.5
   minTrackingConfidence: 0.5
-  imageRotationDegrees: 90
+  imageRotationDegrees: -1
   mirrorXOutput: 0
   invertYOutput: 0
   framePoolSize: 2
@@ -458,8 +458,8 @@ MonoBehaviour:
   applyMobilePerformanceDefaults: 1
   mobileCameraWidth: 640
   mobileCameraHeight: 480
-  mobileCameraFps: 24
-  mobilePoseFps: 12
+  mobileCameraFps: 20
+  mobilePoseFps: 8
   mobileTargetFrameRate: 30
 --- !u!4 &1954474665
 Transform:
