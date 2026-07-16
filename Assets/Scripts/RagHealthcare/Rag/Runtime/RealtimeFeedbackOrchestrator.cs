@@ -68,6 +68,13 @@ namespace Rag.Healthcare.Rag.Runtime
                 sessionLogger = gameObject.AddComponent<SessionJsonlLogger>();
             }
 
+#if UNITY_IOS && !UNITY_EDITOR
+            if (ruleSettings != null)
+            {
+                ruleSettings.landmarkSmoothingAlpha = 0.5f;
+            }
+#endif
+
             CreateWindowBuffer();
         }
 
