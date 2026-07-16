@@ -361,15 +361,11 @@ namespace Rag.Healthcare.Camera
                     int height = requestedHeight;
 #if UNITY_IOS && !UNITY_EDITOR
                     // iOS 기기 발열 방지 및 관절 인식 반응속도(CPU 복사 & GPU 추론) 극대화를 위해 해상도 제한
-                    if (width == 1280 && height == 720)
+                    // 640x480은 iOS 네이티브 표준 해상도로, 기기 회전각(videoRotationAngle)을 오류 없이 올바르게 가져옵니다.
+                    if (width > 640 || height > 480)
                     {
                         width = 640;
-                        height = 360; // 16:9 비율 유지
-                    }
-                    else if (width > 640 || height > 480)
-                    {
-                        width = 640;
-                        height = 480; // 4:3 또는 기타 비율 640 상한
+                        height = 480;
                     }
 #endif
 
