@@ -844,7 +844,7 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             "sourceHeight": submission.height,
             "mirrored": submission.mirrored,
             "rotationAngle": submission.rotationAngle,
-            "landmarks": normalizedLandmarkPayload(landmarks),
+            "landmarks": normalizedLandmarkPayload(landmarks, rotationAngle: submission.rotationAngle),
             // No runtime consumer uses world landmarks. Omitting their conversion
             // substantially reduces allocations and JSON work on every frame.
             "worldLandmarks": [],
@@ -855,19 +855,39 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         return jsonString(payload)
     }
 
-    private func normalizedLandmarkPayload(_ landmarks: [NormalizedLandmark]) -> [[String: Any]] {
+    private func normalizedLandmarkPayload(_ landmarks: [NormalizedLandmark], rotationAngle: Int) -> [[String: Any]] {
         let normalizedLandmarks = landmarks.prefix(landmarkNames.count)
         var payload: [[String: Any]] = []
         payload.reserveCapacity(normalizedLandmarks.count)
 
+        let normalizedAngle = ((rotationAngle % 360) + 360) % 360
+
         for (index, landmark) in normalizedLandmarks.enumerated() {
             let visibility = landmark.visibility?.floatValue ?? landmark.presence?.floatValue ?? 1.0
             let presence = landmark.presence?.floatValue ?? landmark.visibility?.floatValue ?? 1.0
+            
+            var rx = landmark.x
+            var ry = landmark.y
+            
+            switch normalizedAngle {
+            case 90:
+                rx = 1.0 - landmark.y
+                ry = landmark.x
+            case 180:
+                rx = 1.0 - landmark.x
+                ry = 1.0 - landmark.y
+            case 270:
+                rx = landmark.y
+                ry = 1.0 - landmark.x
+            default:
+                break
+            }
+
             payload.append([
                 "id": index,
                 "name": name(for: index),
-                "x": landmark.x,
-                "y": landmark.y,
+                "x": rx,
+                "y": ry,
                 "z": landmark.z,
                 "visibility": visibility,
                 "presence": presence
