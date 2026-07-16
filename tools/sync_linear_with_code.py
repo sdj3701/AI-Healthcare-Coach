@@ -84,9 +84,9 @@ if check_file("Assets/Scripts/RagHealthcare/Camera/CameraCaptureSource.cs"):
 if check_file("Assets/Scripts/RagHealthcare/Pose/JointTrackingController.cs"):
     completed_pbis.update(["PBI-018", "PBI-027"])
 
-# MediaPipe Android 네이티브 브리지
+# MediaPipe Android 및 iOS 네이티브 브리지 / 빌드 안정화
 if check_file("Assets/Scripts/RagHealthcare/Pose/Providers/MediaPipePoseTrackingProvider.cs"):
-    completed_pbis.add("PBI-025")
+    completed_pbis.update(["PBI-025", "PBI-026"])
 
 # 33개 랜드마크 오버레이 관련 (렌더러 폴더 스캔)
 rendering_dir = os.path.join(PROJECT_DIR, "Assets/Scripts/RagHealthcare/Pose/Rendering")
