@@ -356,9 +356,26 @@ namespace Rag.Healthcare.Camera
                     var selectedDevice = ResolveCameraDevice(devices);
                     activeCameraIsFrontFacing = selectedDevice.isFrontFacing;
                     activeDeviceName = selectedDevice.name;
+
+                    int width = requestedWidth;
+                    int height = requestedHeight;
+#if UNITY_IOS && !UNITY_EDITOR
+                    // iOS 기기 발열 방지 및 관절 인식 반응속도(CPU 복사 & GPU 추론) 극대화를 위해 해상도 제한
+                    if (width == 1280 && height == 720)
+                    {
+                        width = 640;
+                        height = 360; // 16:9 비율 유지
+                    }
+                    else if (width > 640 || height > 480)
+                    {
+                        width = 640;
+                        height = 480; // 4:3 또는 기타 비율 640 상한
+                    }
+#endif
+
                     candidateTexture = string.IsNullOrWhiteSpace(activeDeviceName)
-                        ? new WebCamTexture(Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps))
-                        : new WebCamTexture(activeDeviceName, Mathf.Max(16, requestedWidth), Mathf.Max(16, requestedHeight), Mathf.Max(1, requestedFps));
+                        ? new WebCamTexture(Mathf.Max(16, width), Mathf.Max(16, height), Mathf.Max(1, requestedFps))
+                        : new WebCamTexture(activeDeviceName, Mathf.Max(16, width), Mathf.Max(16, height), Mathf.Max(1, requestedFps));
 
                     if (!IsCurrentStart(startVersion))
                     {

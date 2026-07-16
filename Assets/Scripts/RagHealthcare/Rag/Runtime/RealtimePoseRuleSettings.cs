@@ -8,7 +8,11 @@ namespace Rag.Healthcare.Rag.Runtime
     {
         [Header("Landmark stability")]
         [Range(0f, 1f)] public float minimumVisibility = 0.45f;
+#if UNITY_IOS && !UNITY_EDITOR
+        [Range(0.05f, 1f)] public float landmarkSmoothingAlpha = 0.5f;
+#else
         [Range(0.05f, 1f)] public float landmarkSmoothingAlpha = 0.35f;
+#endif
         [Range(0.01f, 0.3f)] public float maximumNormalizedJointJump = 0.08f;
         [Range(0f, 0.5f)] public float lowConfidenceGraceSeconds = 0.2f;
         [Range(0, 4)] public int maximumConsecutiveOutlierFrames = 1;
