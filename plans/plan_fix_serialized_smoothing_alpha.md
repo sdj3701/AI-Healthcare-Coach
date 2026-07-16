@@ -4,12 +4,12 @@
 * Unity 씬에 직렬화되어 오버라이드된 `landmarkSmoothingAlpha` 값(0.35f)이 iOS 실기기 빌드 시 C# 컴파일 타임 기본값(0.5f)을 덮어쓰는 문제를 해결하여, iOS 실기기에서 반응 지연 최적화가 정상 적용되도록 강제 설정합니다.
 
 ## 2. 주요 작업 단계 (대표 작업 리스트)
-- [ ] **Step 1: RealtimeFeedbackOrchestrator.cs 내 Awake() 메서드 수정**
+- [x] **Step 1: RealtimeFeedbackOrchestrator.cs 내 Awake() 메서드 수정**
   * iOS 빌드 환경(`UNITY_IOS && !UNITY_EDITOR`)인 경우 `ruleSettings.landmarkSmoothingAlpha` 값을 `0.5f`로 강제 할당하는 런타임 예외 코드 추가
-- [ ] **Step 2: 빌드 및 컴파일 검증**
+- [x] **Step 2: 빌드 및 컴파일 검증**
   * 컴파일 에러가 없는지 검증
   * `git status` 및 `git diff`를 통한 변경 사항 점검
-- [ ] **Step 3: Linear 연동 및 작업 완료 확인**
+- [x] **Step 3: Linear 연동 및 작업 완료 확인**
   * `python tools/sync_linear_with_code.py` 실행을 통한 연동 확인
 
 ## 3. 예상 예외 사항 및 제약 조건과 코드 구현이유
