@@ -36,6 +36,21 @@ namespace AIHealthcareCoach.Editor
                 "  pod 'MediaPipeTasksVision'\n" +
                 "end\n\n" +
                 "target 'Unity-iPhone' do\n" +
+                "end\n\n" +
+                // Unity's libiPhone-lib.a and MediaPipe's static graph library both bundle
+                // their own copies of minizip/zlib (unzOpen/unzClose ...), ICU (ucasemap/UCaseMap ...)
+                // and internal threading (Thread::Thread) symbols. CocoaPods force-loads the
+                // MediaPipe graph library into the UnityFramework target where Unity is also linked,
+                // which produces "duplicate symbol" link errors. Rewriting -force_load to -load_hidden
+                // demotes the graph library's symbols to hidden visibility so they no longer clash
+                // with Unity's globals, while MediaPipe still resolves them internally.
+                "post_install do |installer|\n" +
+                "  support_files = File.join(installer.sandbox.root, 'Target Support Files', 'Pods-UnityFramework')\n" +
+                "  Dir.glob(File.join(support_files, '*.xcconfig')).each do |xcconfig|\n" +
+                "    contents = File.read(xcconfig)\n" +
+                "    updated = contents.gsub('-force_load', '-load_hidden')\n" +
+                "    File.write(xcconfig, updated) if updated != contents\n" +
+                "  end\n" +
                 "end\n";
 
             File.WriteAllText(podfilePath, content);
