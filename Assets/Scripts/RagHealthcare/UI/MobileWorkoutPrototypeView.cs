@@ -17,6 +17,7 @@ namespace Rag.Healthcare.UI
     [DisallowMultipleComponent]
     public sealed class MobileWorkoutPrototypeView : MonoBehaviour
     {
+        private const string PanelSettingsResourcePath = "UI/MobileWorkoutPanelSettings";
         private const string RuntimeThemeResourcePath = "UI/UnityDefaultRuntimeTheme";
         private const string BundledKoreanFontResourcePath = "Fonts/NotoSansKR-Regular";
         private const float BaseHorizontalPadding = 16f;
@@ -166,6 +167,9 @@ namespace Rag.Healthcare.UI
         private bool lastPreviewUsesCameraMetadata;
         private float lastPreviewFrameWidth = -1f;
         private float lastPreviewFrameHeight = -1f;
+        private bool rootVisualElementWarningLogged;
+        private bool buildUiSuccessLogged;
+        private bool missingThemeWarningLogged;
 #if UNITY_EDITOR
         private bool editorRebuildQueued;
 #endif
@@ -311,6 +315,12 @@ namespace Rag.Healthcare.UI
 
             if (document == null || document.rootVisualElement == null)
             {
+                if (!rootVisualElementWarningLogged)
+                {
+                    rootVisualElementWarningLogged = true;
+                    Debug.LogWarning("[MobileWorkoutPrototypeView] UIDocument rootVisualElement is unavailable; UI build was skipped.");
+                }
+
                 return;
             }
 
@@ -327,6 +337,11 @@ namespace Rag.Healthcare.UI
             }
 
             BuildUi();
+            if (!buildUiSuccessLogged)
+            {
+                buildUiSuccessLogged = true;
+                Debug.Log("[MobileWorkoutPrototypeView] UI Toolkit workout interface built successfully.");
+            }
 
             if (Application.isPlaying)
             {
@@ -363,10 +378,14 @@ namespace Rag.Healthcare.UI
 
             if (document.panelSettings == null)
             {
-                runtimePanelSettings = ScriptableObject.CreateInstance<PanelSettings>();
-                runtimePanelSettings.name = "Mobile Workout Runtime Panel Settings";
-                runtimePanelSettings.hideFlags = HideFlags.DontSave;
-                document.panelSettings = runtimePanelSettings;
+                document.panelSettings = Resources.Load<PanelSettings>(PanelSettingsResourcePath);
+                if (document.panelSettings == null)
+                {
+                    runtimePanelSettings = ScriptableObject.CreateInstance<PanelSettings>();
+                    runtimePanelSettings.name = "Mobile Workout Runtime Panel Settings";
+                    runtimePanelSettings.hideFlags = HideFlags.DontSave;
+                    document.panelSettings = runtimePanelSettings;
+                }
             }
 
             document.sortingOrder = 100;
@@ -386,7 +405,7 @@ namespace Rag.Healthcare.UI
             panelSettings.match = 0f;
             panelSettings.sortingOrder = 100;
             panelSettings.clearColor = true;
-            panelSettings.colorClearValue = new Color(0.035f, 0.045f, 0.06f, 1f);
+            panelSettings.colorClearValue = new Color(0.06f, 0.09f, 0.14f, 1f);
 
             var theme = Resources.Load<ThemeStyleSheet>(RuntimeThemeResourcePath);
 #if UNITY_EDITOR
@@ -395,6 +414,11 @@ namespace Rag.Healthcare.UI
             if (theme != null)
             {
                 panelSettings.themeStyleSheet = theme;
+            }
+            else if (!missingThemeWarningLogged)
+            {
+                missingThemeWarningLogged = true;
+                Debug.LogWarning("[MobileWorkoutPrototypeView] Runtime UI Toolkit theme could not be loaded.");
             }
         }
 

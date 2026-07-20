@@ -129,6 +129,8 @@
 - 따라서 정상 기동 직후에도 **카메라 프리뷰 없이 어두운 UI**가 먼저 보인다.
 - UI Toolkit이 그려지지 못하면(테마/폰트/예외) 진짜 완전 검정으로 남는다.
 
+조치: `Resources/UI/MobileWorkoutPanelSettings`를 런타임 기본 PanelSettings로 추가하고 기존 `UnityDefaultRuntimeTheme`을 명시적으로 연결했다. 코드 생성 PanelSettings는 자산 로드 실패 시에만 폴백하며, UI 루트·테마 누락과 UI 빌드 성공 여부를 1회 로그로 남기고 clear color도 조금 밝게 조정했다.
+
 에디터에서는 Game View 배경·레이아웃·즉시 리페인트 때문에 “앱이 살아 있다”는 느낌이 훨씬 강하다.
 
 ---
