@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.IO;
 using System.Threading.Tasks;
+using Unity.Profiling;
 using UnityEngine;
 
 #pragma warning disable 0414
@@ -41,6 +42,25 @@ namespace Rag.Healthcare.Pose.Providers
         [SerializeField, Min(0.25f)] private float asyncInferenceTimeoutSeconds = 3f;
 
 #if !AHC_USE_HOMULER_MEDIAPIPE
+        [Header("Inference Input")]
+        [SerializeField, Tooltip("Downscale only the pose inference input; the camera preview keeps its original resolution.")]
+        private bool enableInferenceDownscale = true;
+        [SerializeField, Min(16)] private int inferenceWidth = 480;
+        [SerializeField, Min(16)] private int inferenceHeight = 360;
+#endif
+
+        private static readonly ProfilerMarker ReadbackMarker =
+            new ProfilerMarker("AHC.Pose.GetPixels32OrFallbackReadback");
+        private static readonly ProfilerMarker MetadataMarker =
+            new ProfilerMarker("AHC.Pose.RotationMirrorMetadata");
+        private static readonly ProfilerMarker NativeSubmitMarker =
+            new ProfilerMarker("AHC.Pose.NativeSubmit");
+        private static readonly ProfilerMarker ResultPollMarker =
+            new ProfilerMarker("AHC.Pose.ResultPoll");
+        private static readonly ProfilerMarker BuildFrameMarker =
+            new ProfilerMarker("AHC.Pose.BuildFrame");
+
+#if !AHC_USE_HOMULER_MEDIAPIPE
         [Header("Editor Python Fallback")]
         [SerializeField] private bool useEditorPythonMediaPipeFallback = true;
         [SerializeField, Min(1)] private int targetPoseFps = 8;
@@ -62,6 +82,8 @@ namespace Rag.Healthcare.Pose.Providers
 #else
         private IPoseEstimator fallbackPoseEstimator;
         private Color32[] fallbackPixels;
+        private RenderTexture inferenceRenderTexture;
+        private Texture2D inferenceReadbackTexture;
         private Task<bool> fallbackInitializationTask;
         private Task<AsyncRecoveryOutcome> fallbackRecoveryTask;
         private float asyncBusyStartedAt = -1f;
@@ -78,6 +100,18 @@ namespace Rag.Healthcare.Pose.Providers
         public override bool IsReady => isReady;
         public int DroppedFrameCount { get; private set; }
         public float LastInferenceMilliseconds { get; private set; }
+        public float LastReadbackMilliseconds { get; private set; }
+        public float LastMetadataMilliseconds { get; private set; }
+        public float LastSubmitMilliseconds { get; private set; }
+        public float LastPollMilliseconds { get; private set; }
+        public float LastBuildFrameMilliseconds { get; private set; }
+
+        private void OnDestroy()
+        {
+#if !AHC_USE_HOMULER_MEDIAPIPE
+            ReleaseInferenceResources();
+#endif
+        }
 
         public override IEnumerator Initialize()
         {
@@ -96,6 +130,11 @@ namespace Rag.Healthcare.Pose.Providers
             LastError = string.Empty;
             DroppedFrameCount = 0;
             LastInferenceMilliseconds = 0f;
+            LastReadbackMilliseconds = 0f;
+            LastMetadataMilliseconds = 0f;
+            LastSubmitMilliseconds = 0f;
+            LastPollMilliseconds = 0f;
+            LastBuildFrameMilliseconds = 0f;
 
             if (!TryResolveModel(out resolvedModelPath, out var modelBytes))
             {
@@ -221,18 +260,35 @@ namespace Rag.Healthcare.Pose.Providers
 
                 yield return new WaitForEndOfFrame();
 
-                textureFrame.ReadTextureOnCPU(source);
+                var readbackStartedAt = Time.realtimeSinceStartupAsDouble;
+                using (ReadbackMarker.Auto())
+                {
+                    textureFrame.ReadTextureOnCPU(source);
+                }
+                LastReadbackMilliseconds = ElapsedMilliseconds(readbackStartedAt);
                 using var image = textureFrame.BuildCPUImage();
                 textureFrame.Release();
                 textureFrame = null;
 
                 var mediaPipeTimestamp = NormalizeTimestamp(timestampUnixMilliseconds);
-                UpdateImageProcessingOptions(source);
-                var success = poseLandmarker.TryDetectForVideo(
-                    image,
-                    mediaPipeTimestamp,
-                    imageProcessingOptions,
-                    ref resultBuffer);
+                var metadataStartedAt = Time.realtimeSinceStartupAsDouble;
+                using (MetadataMarker.Auto())
+                {
+                    UpdateImageProcessingOptions(source);
+                }
+                LastMetadataMilliseconds = ElapsedMilliseconds(metadataStartedAt);
+
+                bool success;
+                var submitStartedAt = Time.realtimeSinceStartupAsDouble;
+                using (NativeSubmitMarker.Auto())
+                {
+                    success = poseLandmarker.TryDetectForVideo(
+                        image,
+                        mediaPipeTimestamp,
+                        imageProcessingOptions,
+                        ref resultBuffer);
+                }
+                LastSubmitMilliseconds = ElapsedMilliseconds(submitStartedAt);
 
                 if (!success)
                 {
@@ -324,6 +380,7 @@ namespace Rag.Healthcare.Pose.Providers
             fallbackInitializationTask = null;
             fallbackRecoveryTask = null;
             fallbackPixels = null;
+            ReleaseInferenceResources();
             asyncBusyStartedAt = -1f;
             consecutiveAsyncRecoveryCount = 0;
 
@@ -537,14 +594,22 @@ namespace Rag.Healthcare.Pose.Providers
             }
 
             var mediaPipeTimestamp = NormalizeTimestamp(timestampUnixMilliseconds);
-            if (!asyncEstimator.TrySubmitFrame(
+            bool submitted;
+            string submitError;
+            var submitStartedAt = Time.realtimeSinceStartupAsDouble;
+            using (NativeSubmitMarker.Auto())
+            {
+                submitted = asyncEstimator.TrySubmitFrame(
                     pixels,
                     width,
                     height,
                     mediaPipeTimestamp,
                     verticallyMirrored,
                     rotationAngle,
-                    out var submitError))
+                    out submitError);
+            }
+            LastSubmitMilliseconds = ElapsedMilliseconds(submitStartedAt);
+            if (!submitted)
             {
                 // Never call the legacy blocking iOS API here. It waits on a native
                 // semaphore for up to one second per frame and starves every UI event.
@@ -591,9 +656,17 @@ namespace Rag.Healthcare.Pose.Providers
             var deadline = Time.realtimeSinceStartup + Mathf.Max(0.25f, asyncInferenceTimeoutSeconds);
             while (true)
             {
-                var status = asyncEstimator.TryGetLatestResult(
-                    out var landmarkFrame,
-                    out var resultError);
+                AsyncPoseResultStatus status;
+                LandmarkFrame landmarkFrame;
+                string resultError;
+                var pollStartedAt = Time.realtimeSinceStartupAsDouble;
+                using (ResultPollMarker.Auto())
+                {
+                    status = asyncEstimator.TryGetLatestResult(
+                        out landmarkFrame,
+                        out resultError);
+                }
+                LastPollMilliseconds = ElapsedMilliseconds(pollStartedAt);
                 if (status == AsyncPoseResultStatus.Waiting)
                 {
                     if (Time.realtimeSinceStartup < deadline)
@@ -788,16 +861,36 @@ namespace Rag.Healthcare.Pose.Providers
             pixels = null;
             width = 0;
             height = 0;
-            rotationAngle = ResolveImageRotation(source);
+            rotationAngle = 0;
             verticallyMirrored = false;
 
             if (source is WebCamTexture webCamTexture)
             {
-                width = webCamTexture.width;
-                height = webCamTexture.height;
-                if (!webCamTexture.isPlaying || width <= 16 || height <= 16)
+                var sourceWidth = webCamTexture.width;
+                var sourceHeight = webCamTexture.height;
+                if (!webCamTexture.isPlaying || sourceWidth <= 16 || sourceHeight <= 16)
                 {
                     return false;
+                }
+
+                var metadataStartedAt = Time.realtimeSinceStartupAsDouble;
+                using (MetadataMarker.Auto())
+                {
+                    rotationAngle = ResolveImageRotation(webCamTexture);
+                    verticallyMirrored = webCamTexture.videoVerticallyMirrored;
+                }
+                LastMetadataMilliseconds = ElapsedMilliseconds(metadataStartedAt);
+
+                if (enableInferenceDownscale)
+                {
+                    width = Mathf.Min(sourceWidth, Mathf.Max(16, inferenceWidth));
+                    height = Mathf.Min(sourceHeight, Mathf.Max(16, inferenceHeight));
+                    EnsureInferenceResources(width, height);
+                }
+                else
+                {
+                    width = sourceWidth;
+                    height = sourceHeight;
                 }
 
                 var requiredLength = width * height;
@@ -806,9 +899,35 @@ namespace Rag.Healthcare.Pose.Providers
                     fallbackPixels = new Color32[requiredLength];
                 }
 
-                pixels = webCamTexture.GetPixels32(fallbackPixels);
-                rotationAngle = ResolveImageRotation(webCamTexture);
-                verticallyMirrored = webCamTexture.videoVerticallyMirrored;
+                var readbackStartedAt = Time.realtimeSinceStartupAsDouble;
+                using (ReadbackMarker.Auto())
+                {
+                    if (enableInferenceDownscale)
+                    {
+                        var previousRenderTexture = RenderTexture.active;
+                        try
+                        {
+                            Graphics.Blit(webCamTexture, inferenceRenderTexture);
+                            RenderTexture.active = inferenceRenderTexture;
+                            inferenceReadbackTexture.ReadPixels(
+                                new Rect(0f, 0f, width, height),
+                                0,
+                                0,
+                                false);
+                            inferenceReadbackTexture.GetRawTextureData<Color32>().CopyTo(fallbackPixels);
+                            pixels = fallbackPixels;
+                        }
+                        finally
+                        {
+                            RenderTexture.active = previousRenderTexture;
+                        }
+                    }
+                    else
+                    {
+                        pixels = webCamTexture.GetPixels32(fallbackPixels);
+                    }
+                }
+                LastReadbackMilliseconds = ElapsedMilliseconds(readbackStartedAt);
                 return pixels != null && pixels.Length >= requiredLength;
             }
 
@@ -821,7 +940,19 @@ namespace Rag.Healthcare.Pose.Providers
                     return false;
                 }
 
-                pixels = texture2D.GetPixels32();
+                var metadataStartedAt = Time.realtimeSinceStartupAsDouble;
+                using (MetadataMarker.Auto())
+                {
+                    rotationAngle = ResolveImageRotation(texture2D);
+                }
+                LastMetadataMilliseconds = ElapsedMilliseconds(metadataStartedAt);
+
+                var readbackStartedAt = Time.realtimeSinceStartupAsDouble;
+                using (ReadbackMarker.Auto())
+                {
+                    pixels = texture2D.GetPixels32();
+                }
+                LastReadbackMilliseconds = ElapsedMilliseconds(readbackStartedAt);
                 return pixels != null && pixels.Length >= width * height;
             }
 
@@ -830,44 +961,103 @@ namespace Rag.Healthcare.Pose.Providers
 
         private JointTrackingFrame BuildFrame(LandmarkFrame result, long timestampUnixMilliseconds)
         {
-            if (result == null || result.landmarks == null || result.landmarks.Length < ExpectedLandmarkCount)
+            var startedAt = Time.realtimeSinceStartupAsDouble;
+            using (BuildFrameMarker.Auto())
             {
-                return null;
-            }
-
-            var joints = new TrackedJoint[ExpectedLandmarkCount];
-            var names = PoseJointNames.MediaPipe33;
-            for (var i = 0; i < ExpectedLandmarkCount; i++)
-            {
-                var landmark = result.landmarks[i];
-                var visibility = landmark.visibility > 0f ? landmark.visibility : landmark.presence;
-                if (visibility <= 0f)
+                if (result == null || result.landmarks == null || result.landmarks.Length < ExpectedLandmarkCount)
                 {
-                    visibility = 1f;
+                    LastBuildFrameMilliseconds = ElapsedMilliseconds(startedAt);
+                    return null;
                 }
 
-                var confidence = landmark.presence > 0f ? landmark.presence : visibility;
-                var x = mirrorXOutput ? 1f - landmark.x : landmark.x;
-                var y = invertYOutput ? 1f - landmark.y : landmark.y;
-
-                joints[i] = new TrackedJoint
+                var joints = new TrackedJoint[ExpectedLandmarkCount];
+                var names = PoseJointNames.MediaPipe33;
+                for (var i = 0; i < ExpectedLandmarkCount; i++)
                 {
-                    name = names[i],
-                    x = Mathf.Clamp01(x),
-                    y = Mathf.Clamp01(y),
-                    z = landmark.z,
-                    visibility = Mathf.Clamp01(visibility),
-                    confidence = Mathf.Clamp01(confidence)
+                    var landmark = result.landmarks[i];
+                    var visibility = landmark.visibility > 0f ? landmark.visibility : landmark.presence;
+                    if (visibility <= 0f)
+                    {
+                        visibility = 1f;
+                    }
+
+                    var confidence = landmark.presence > 0f ? landmark.presence : visibility;
+                    var x = mirrorXOutput ? 1f - landmark.x : landmark.x;
+                    var y = invertYOutput ? 1f - landmark.y : landmark.y;
+
+                    joints[i] = new TrackedJoint
+                    {
+                        name = names[i],
+                        x = Mathf.Clamp01(x),
+                        y = Mathf.Clamp01(y),
+                        z = landmark.z,
+                        visibility = Mathf.Clamp01(visibility),
+                        confidence = Mathf.Clamp01(confidence)
+                    };
+                }
+
+                var frame = new JointTrackingFrame
+                {
+                    id = Guid.NewGuid().ToString("N"),
+                    timestampUnixMilliseconds = timestampUnixMilliseconds,
+                    joints = joints,
+                    feedback = Array.Empty<PoseFeedbackMessage>()
                 };
+                LastBuildFrameMilliseconds = ElapsedMilliseconds(startedAt);
+                return frame;
+            }
+        }
+
+        private void EnsureInferenceResources(int width, int height)
+        {
+            if (inferenceRenderTexture != null &&
+                inferenceReadbackTexture != null &&
+                inferenceRenderTexture.width == width &&
+                inferenceRenderTexture.height == height &&
+                inferenceReadbackTexture.width == width &&
+                inferenceReadbackTexture.height == height)
+            {
+                return;
             }
 
-            return new JointTrackingFrame
+            ReleaseInferenceResources();
+            inferenceRenderTexture = new RenderTexture(
+                width,
+                height,
+                0,
+                RenderTextureFormat.ARGB32,
+                RenderTextureReadWrite.Default)
             {
-                id = Guid.NewGuid().ToString("N"),
-                timestampUnixMilliseconds = timestampUnixMilliseconds,
-                joints = joints,
-                feedback = Array.Empty<PoseFeedbackMessage>()
+                name = "AHC Pose Inference Downscale",
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp
             };
+            inferenceRenderTexture.Create();
+            inferenceReadbackTexture = new Texture2D(
+                width,
+                height,
+                TextureFormat.RGBA32,
+                false,
+                false)
+            {
+                name = "AHC Pose Inference Readback"
+            };
+        }
+
+        private void ReleaseInferenceResources()
+        {
+            if (inferenceRenderTexture != null)
+            {
+                inferenceRenderTexture.Release();
+                Destroy(inferenceRenderTexture);
+                inferenceRenderTexture = null;
+            }
+
+            if (inferenceReadbackTexture != null)
+            {
+                Destroy(inferenceReadbackTexture);
+                inferenceReadbackTexture = null;
+            }
         }
 #endif
 
@@ -913,45 +1103,53 @@ namespace Rag.Healthcare.Pose.Providers
 
         private JointTrackingFrame BuildFrame(PoseLandmarkerResult result, long timestampUnixMilliseconds)
         {
-            if (result.poseLandmarks == null || result.poseLandmarks.Count == 0)
+            var startedAt = Time.realtimeSinceStartupAsDouble;
+            using (BuildFrameMarker.Auto())
             {
-                return null;
-            }
-
-            var landmarks = result.poseLandmarks[0].landmarks;
-            if (landmarks == null || landmarks.Count != ExpectedLandmarkCount)
-            {
-                return null;
-            }
-
-            var joints = new TrackedJoint[ExpectedLandmarkCount];
-            var names = PoseJointNames.MediaPipe33;
-            for (var i = 0; i < ExpectedLandmarkCount; i++)
-            {
-                var landmark = landmarks[i];
-                var visibility = landmark.visibility ?? landmark.presence ?? 1f;
-                var confidence = landmark.presence ?? landmark.visibility ?? visibility;
-                var x = mirrorXOutput ? 1f - landmark.x : landmark.x;
-                var y = invertYOutput ? 1f - landmark.y : landmark.y;
-
-                joints[i] = new TrackedJoint
+                if (result.poseLandmarks == null || result.poseLandmarks.Count == 0)
                 {
-                    name = names[i],
-                    x = Mathf.Clamp01(x),
-                    y = Mathf.Clamp01(y),
-                    z = landmark.z,
-                    visibility = Mathf.Clamp01(visibility),
-                    confidence = Mathf.Clamp01(confidence)
-                };
-            }
+                    LastBuildFrameMilliseconds = ElapsedMilliseconds(startedAt);
+                    return null;
+                }
 
-            return new JointTrackingFrame
-            {
-                id = Guid.NewGuid().ToString("N"),
-                timestampUnixMilliseconds = timestampUnixMilliseconds,
-                joints = joints,
-                feedback = Array.Empty<PoseFeedbackMessage>()
-            };
+                var landmarks = result.poseLandmarks[0].landmarks;
+                if (landmarks == null || landmarks.Count != ExpectedLandmarkCount)
+                {
+                    LastBuildFrameMilliseconds = ElapsedMilliseconds(startedAt);
+                    return null;
+                }
+
+                var joints = new TrackedJoint[ExpectedLandmarkCount];
+                var names = PoseJointNames.MediaPipe33;
+                for (var i = 0; i < ExpectedLandmarkCount; i++)
+                {
+                    var landmark = landmarks[i];
+                    var visibility = landmark.visibility ?? landmark.presence ?? 1f;
+                    var confidence = landmark.presence ?? landmark.visibility ?? visibility;
+                    var x = mirrorXOutput ? 1f - landmark.x : landmark.x;
+                    var y = invertYOutput ? 1f - landmark.y : landmark.y;
+
+                    joints[i] = new TrackedJoint
+                    {
+                        name = names[i],
+                        x = Mathf.Clamp01(x),
+                        y = Mathf.Clamp01(y),
+                        z = landmark.z,
+                        visibility = Mathf.Clamp01(visibility),
+                        confidence = Mathf.Clamp01(confidence)
+                    };
+                }
+
+                var frame = new JointTrackingFrame
+                {
+                    id = Guid.NewGuid().ToString("N"),
+                    timestampUnixMilliseconds = timestampUnixMilliseconds,
+                    joints = joints,
+                    feedback = Array.Empty<PoseFeedbackMessage>()
+                };
+                LastBuildFrameMilliseconds = ElapsedMilliseconds(startedAt);
+                return frame;
+            }
         }
 #endif
 
@@ -965,6 +1163,11 @@ namespace Rag.Healthcare.Pose.Providers
             return source is WebCamTexture webCamTexture
                 ? NormalizeRotation(webCamTexture.videoRotationAngle)
                 : 0;
+        }
+
+        private static float ElapsedMilliseconds(double startedAt)
+        {
+            return (float)((Time.realtimeSinceStartupAsDouble - startedAt) * 1000d);
         }
     }
 }

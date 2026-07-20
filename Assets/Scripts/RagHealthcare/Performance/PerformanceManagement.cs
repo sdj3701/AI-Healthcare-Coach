@@ -38,10 +38,33 @@ namespace Rag.Healthcare.Performance
         {
             Current = mode == DevicePerformanceMode.LowSpec
                 ? new PerformanceProfile { mode = mode, cameraWidth = 640, cameraHeight = 480, cameraFps = 20, poseFps = 10, onDeviceLlmEnabled = false, maximumSessionMinutes = 8 }
-                : new PerformanceProfile { mode = mode, cameraWidth = 1280, cameraHeight = 720, cameraFps = 30, poseFps = 15, onDeviceLlmEnabled = true, maximumSessionMinutes = 15 };
+                : CreateStandardProfile(mode);
             cameraSource?.ConfigureCapture(Current.cameraWidth, Current.cameraHeight, Current.cameraFps);
             trackingController?.ConfigureSamplingRate(Current.poseFps);
             return Current;
+        }
+
+        private static PerformanceProfile CreateStandardProfile(DevicePerformanceMode mode)
+        {
+#if UNITY_IOS && !UNITY_EDITOR
+            // Keep the profile request aligned with CameraCaptureSource's iOS clamp.
+            // 640x480 avoids known WebCamTexture rotation metadata issues.
+            const int cameraWidth = 640;
+            const int cameraHeight = 480;
+#else
+            const int cameraWidth = 1280;
+            const int cameraHeight = 720;
+#endif
+            return new PerformanceProfile
+            {
+                mode = mode,
+                cameraWidth = cameraWidth,
+                cameraHeight = cameraHeight,
+                cameraFps = 30,
+                poseFps = 15,
+                onDeviceLlmEnabled = true,
+                maximumSessionMinutes = 15
+            };
         }
     }
 

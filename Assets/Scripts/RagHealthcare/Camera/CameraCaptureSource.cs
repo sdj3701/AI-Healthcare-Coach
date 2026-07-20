@@ -8,9 +8,9 @@ namespace Rag.Healthcare.Camera
     {
         [Header("Camera")]
         [SerializeField] private string cameraDeviceName = string.Empty;
-        [SerializeField] private int requestedWidth = 1280;
-        [SerializeField] private int requestedHeight = 720;
-        [SerializeField] private int requestedFps = 30;
+        [SerializeField] private int requestedWidth = 640;
+        [SerializeField] private int requestedHeight = 480;
+        [SerializeField] private int requestedFps = 20;
         [SerializeField] private bool preferFrontCamera = true;
         [SerializeField] private bool playOnStart = true;
 
@@ -36,6 +36,7 @@ namespace Rag.Healthcare.Camera
         private bool hasExplicitCameraSelection;
         private bool explicitCameraIsFrontFacing;
         private string explicitCameraDeviceName = string.Empty;
+        private bool hasLoggedIosResolutionClamp;
 
         public event Action<Texture> PreviewTextureChanged;
 
@@ -364,6 +365,15 @@ namespace Rag.Healthcare.Camera
                     // 640x480은 iOS 네이티브 표준 해상도로, 기기 회전각(videoRotationAngle)을 오류 없이 올바르게 가져옵니다.
                     if (width > 640 || height > 480)
                     {
+                        if (!hasLoggedIosResolutionClamp)
+                        {
+                            Debug.LogWarning(
+                                $"[CameraCaptureSource] iOS camera resolution was clamped from " +
+                                $"{width}x{height} to 640x480 to preserve rotation metadata reliability.",
+                                this);
+                            hasLoggedIosResolutionClamp = true;
+                        }
+
                         width = 640;
                         height = 480;
                     }
