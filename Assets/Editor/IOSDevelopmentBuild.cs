@@ -10,10 +10,13 @@ namespace AIHealthcareCoach.Editor
 {
     public static class IOSDevelopmentBuild
     {
-        private const string MenuPath = "AI Healthcare Coach/Build/iOS Development Build";
+        private const string DevelopmentMenuPath =
+            "AI Healthcare Coach/Build/iOS Development Build";
+        private const string ReleaseMenuPath =
+            "AI Healthcare Coach/Build/iOS Release Build";
         private const string DeveloperTeamId = "VBT88ZWM6D";
 
-        [MenuItem(MenuPath)]
+        [MenuItem(DevelopmentMenuPath)]
         public static void BuildFromMenu()
         {
             Build();
@@ -21,9 +24,29 @@ namespace AIHealthcareCoach.Editor
 
         public static void Build()
         {
+            BuildInternal(BuildOptions.Development, "iOS", "development");
+        }
+
+        [MenuItem(ReleaseMenuPath)]
+        public static void BuildReleaseFromMenu()
+        {
+            BuildRelease();
+        }
+
+        public static void BuildRelease()
+        {
+            BuildInternal(BuildOptions.None, "iOS-Release", "release");
+        }
+
+        private static void BuildInternal(
+            BuildOptions extraOptions,
+            string outputSubdir,
+            string label)
+        {
             EnsureIOSBuildTarget();
             ConfigureSigning();
-            ForceStableProfilerSettings();
+            ForceStableProfilerSettings(
+                (extraOptions & BuildOptions.Development) != 0);
 
             var scenes = EditorBuildSettings.scenes
                 .Where(scene => scene.enabled)
@@ -36,41 +59,39 @@ namespace AIHealthcareCoach.Editor
             }
 
             var outputPath = Path.GetFullPath(
-                Path.Combine(Application.dataPath, "..", "Build", "iOS"));
+                Path.Combine(Application.dataPath, "..", "Build", outputSubdir));
 
             if (Directory.Exists(outputPath))
             {
                 Directory.Delete(outputPath, true);
             }
 
-            // Keep Development + AllowDebugging, but never bake Autoconnect Profiler
-            // (BuildOptions.ConnectWithProfiler) into the player. That path sets Flags 19,
-            // waits for the editor, and hangs/black-screens on iPhone XS Max + iOS 18.7.9.
+            // Development keeps profiler support without Script Debugging. Profiler
+            // autoconnect and debugger waits stay off; Metal Validation is disabled
+            // separately in ProjectSettings.asset for stable physical-device startup.
             var options = new BuildPlayerOptions
             {
                 scenes = scenes,
                 locationPathName = outputPath,
                 target = BuildTarget.iOS,
                 targetGroup = BuildTargetGroup.iOS,
-                options =
-                    BuildOptions.Development |
-                    BuildOptions.AllowDebugging
+                options = extraOptions
             };
 
             Debug.Log(
-                "Starting iOS development build with Profiler discovery and script debugging. " +
-                "Profiler autoconnect is forced OFF (no ConnectWithProfiler / no wait-for-debugger). " +
-                "Deep Profiling is intentionally disabled.");
+                $"Starting iOS {label} build. Profiler autoconnect, Deep Profiling, " +
+                "Script Debugging, and debugger waits are OFF. Metal Validation is OFF " +
+                "in ProjectSettings.asset.");
 
             var report = BuildPipeline.BuildPlayer(options);
             if (report.summary.result != BuildResult.Succeeded)
             {
                 throw new InvalidOperationException(
-                    $"iOS development build failed: {report.summary.result} " +
+                    $"iOS {label} build failed: {report.summary.result} " +
                     $"({report.summary.totalErrors} errors)");
             }
 
-            Debug.Log($"iOS development build completed: {outputPath}");
+            Debug.Log($"iOS {label} build completed: {outputPath}");
         }
 
         private static void EnsureIOSBuildTarget()
@@ -95,13 +116,14 @@ namespace AIHealthcareCoach.Editor
             PlayerSettings.iOS.appleEnableAutomaticSigning = true;
         }
 
-        private static void ForceStableProfilerSettings()
+        private static void ForceStableProfilerSettings(bool development)
         {
             EditorUserBuildSettings.connectProfiler = false;
             EditorUserBuildSettings.buildWithDeepProfilingSupport = false;
             EditorUserBuildSettings.waitForManagedDebugger = false;
+            EditorUserBuildSettings.allowDebugging = false;
             EditorUserBuildSettings.explicitNullChecks = true;
-            EditorUserBuildSettings.development = true;
+            EditorUserBuildSettings.development = development;
         }
     }
 }
