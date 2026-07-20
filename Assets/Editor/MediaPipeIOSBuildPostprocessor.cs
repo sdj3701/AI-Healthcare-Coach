@@ -85,17 +85,21 @@ namespace AIHealthcareCoach.Editor
             try
             {
                 var command = "cd " + ShellQuote(pathToBuiltProject) + " && pod install";
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = "/bin/bash",
+                    Arguments = "-lc " + ShellQuote(command),
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                startInfo.EnvironmentVariables["LANG"] = "en_US.UTF-8";
+                startInfo.EnvironmentVariables["LC_ALL"] = "en_US.UTF-8";
+
                 var process = new Process
                 {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = "/bin/bash",
-                        Arguments = "-lc " + ShellQuote(command),
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
+                    StartInfo = startInfo
                 };
 
                 process.Start();
