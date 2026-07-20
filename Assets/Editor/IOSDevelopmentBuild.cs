@@ -23,6 +23,7 @@ namespace AIHealthcareCoach.Editor
         {
             EnsureIOSBuildTarget();
             ConfigureSigning();
+            ForceStableProfilerSettings();
 
             var scenes = EditorBuildSettings.scenes
                 .Where(scene => scene.enabled)
@@ -42,6 +43,9 @@ namespace AIHealthcareCoach.Editor
                 Directory.Delete(outputPath, true);
             }
 
+            // Keep Development + AllowDebugging, but never bake Autoconnect Profiler
+            // (BuildOptions.ConnectWithProfiler) into the player. That path sets Flags 19,
+            // waits for the editor, and hangs/black-screens on iPhone XS Max + iOS 18.7.9.
             var options = new BuildPlayerOptions
             {
                 scenes = scenes,
@@ -55,8 +59,8 @@ namespace AIHealthcareCoach.Editor
 
             Debug.Log(
                 "Starting iOS development build with Profiler discovery and script debugging. " +
-                "Profiler autoconnect is disabled because it crashes Unity 6000.3.18f1 " +
-                "on the iPhone XS Max running iOS 18.7.9. Deep Profiling is intentionally disabled.");
+                "Profiler autoconnect is forced OFF (no ConnectWithProfiler / no wait-for-debugger). " +
+                "Deep Profiling is intentionally disabled.");
 
             var report = BuildPipeline.BuildPlayer(options);
             if (report.summary.result != BuildResult.Succeeded)
@@ -89,6 +93,15 @@ namespace AIHealthcareCoach.Editor
         {
             PlayerSettings.iOS.appleDeveloperTeamID = DeveloperTeamId;
             PlayerSettings.iOS.appleEnableAutomaticSigning = true;
+        }
+
+        private static void ForceStableProfilerSettings()
+        {
+            EditorUserBuildSettings.connectProfiler = false;
+            EditorUserBuildSettings.buildWithDeepProfilingSupport = false;
+            EditorUserBuildSettings.waitForManagedDebugger = false;
+            EditorUserBuildSettings.explicitNullChecks = true;
+            EditorUserBuildSettings.development = true;
         }
     }
 }
