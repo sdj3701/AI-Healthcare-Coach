@@ -135,15 +135,25 @@
 
 ---
 
-### 4.5 링크 Duplicate symbol (검은 화면 원인 아님)
+### 4.5 링크 Duplicate symbol vs MediaPipe graph 등록
 
 Xcode Issue Navigator에 `unzOpen`, `UCaseMap`, `Thread::Thread` 중복이 많이 보여도, 이는 보통 **링크 경고**이며 스플래시 후 검정과 직접 원인은 아니다.
 
 - Unity `libiPhone-lib.a`와 MediaPipe `libMediaPipeTasksCommon_*_graph.a`가 같은 심볼을 포함
-- CocoaPods가 graph lib를 `-force_load` 하던 것이 충돌 방아쇠
-- 조치: Podfile `post_install`에서 `-force_load` → `-load_hidden` (`16db291`)
+- CocoaPods는 graph lib를 `-force_load` 한다 (계산기 등록 TU를 모두 링크하기 위함)
+- `-force_load` → `-load_hidden`으로 바꾸면 중복 경고는 줄지만, `PoseLandmarkerGraph` / `FlowLimiterCalculator` 등록이 빠져  
+  런타임에 `NOT_FOUND: Unable to find Calculator ...PoseLandmarkerGraph` 가 난다
+- **현재 정책:** `-force_load` 유지. duplicate symbol은 warning으로 허용
 
 `.pcm: No such file` ModuleCache 오류는 DerivedData/ModuleCache 손상으로, **Clean Build Folder**로 해결한다.
+
+### 4.6 잘못된 Xcode 산출물 (`/Users/sindongju/aibuild`)
+
+`aibuild` 같은 별도 export가 Autoconnect/`Connect` 모드로 남아 있으면 기기에 `[Flags] 19` + `Remaining time` 빌드가 다시 설치된다.
+
+- 일반 실행·UI 확인: `Build/iOS-Release` 의 `.xcworkspace`
+- 프로파일링: `Build/iOS` 의 `.xcworkspace` (Flags 2, Listen)
+- `aibuild` 로 Run 하지 말 것
 
 ## 5. 원인 → 증상 매핑 체크리스트
 
@@ -155,7 +165,9 @@ Xcode Issue Navigator에 `unzOpen`, `UCaseMap`, `Thread::Thread` 중복이 많�
 | `[Flags] 2`, `applicationDidBecomeActive`, Metal 정상인데도 검정 | Metal Validation / Debug 경로 의심 | Validation OFF, AllowDebugging OFF |
 | `player-connection-debug=1` | Script Debugging 활성 | Development만 유지, Debugging OFF |
 | CPU/RAM 움직임 + 완전 검정 | 프로세스 생존, 렌더/UI 미표시 | 위 설정 + UI/카메라 시작 여부 확인 |
-| `duplicate symbol '_unz…'` | MediaPipe↔Unity 링크 경고 | `-load_hidden` 패치, 검은 화면과 별개 |
+| `duplicate symbol '_unz…'` | MediaPipe↔Unity 링크 경고 | `-force_load` 유지(경고 허용). `-load_hidden` 금지 |
+| `Unable to find Calculator ...PoseLandmarkerGraph` | graph 등록 TU 미링크 | Podfile에서 `-force_load` 복구 |
+| `[Flags] 19` + `aibuild` EditorId | 잘못된 export 설치 | `Build/iOS-Release` 또는 `Build/iOS`만 사용 |
 | `.pcm: No such file` | ModuleCache 손상 | DerivedData / ModuleCache 삭제 |
 
 ## 6. 올바른 빌드·프로파일링 방법 (현재 권장)
@@ -196,7 +208,9 @@ Xcode는 반드시 **`Unity-iPhone.xcworkspace`** 로 연다 (`.xcodeproj` 단�
 | `Assets/Editor/IOSDevelopmentBuild.cs` | 안정화된 Development/Release iOS 빌드 |
 | `Assets/Editor/IOSStableBuildSettings.cs` | 에디터 로드 시 Autoconnect/디버깅 OFF 강제 |
 | `ProjectSettings/ProjectSettings.asset` | `metalAPIValidation`, Team ID, Automatic Signing |
-| `Assets/Editor/MediaPipeIOSBuildPostprocessor.cs` | Podfile + `-load_hidden` post_install |
+| `Assets/Editor/MediaPipeIOSBuildPostprocessor.cs` | Podfile (`-force_load` 유지) |
+| `Assets/Scripts/RagHealthcare/Diagnostics/IOSBootDiagnostics.cs` | 기기 콘솔용 시작 breadcrumb |
+| `Build/iOS-Release/` | 일반 실행용 Release export |
 | `Assets/Scenes/Main.unity` | 카메라/추적 자동 시작 OFF |
 | `Assets/Scripts/RagHealthcare/UI/MobileWorkoutPrototypeView.cs` | 런타임 UI Toolkit (어두운 clearColor) |
 | `Build/iOS/Data/boot.config` | `player-connection-*`, debugger 대기 플래그 확인용 |
