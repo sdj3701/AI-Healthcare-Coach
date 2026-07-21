@@ -211,7 +211,7 @@ namespace Rag.Healthcare.Pose
                     yield break;
                 }
 
-                if (!trackingProvider.IsReady)
+                if (trackingProvider.NeedsReinitialize)
                 {
                     yield return trackingProvider.Initialize();
                 }
@@ -266,7 +266,7 @@ namespace Rag.Healthcare.Pose
                     yield break;
                 }
 
-                if (!trackingProvider.IsReady)
+                if (trackingProvider.NeedsReinitialize)
                 {
                     yield return trackingProvider.Initialize();
                 }

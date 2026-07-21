@@ -7,6 +7,7 @@ namespace Rag.Healthcare.Pose.Providers
     {
         public abstract PoseTrackingBackend Backend { get; }
         public abstract bool IsReady { get; }
+        public virtual bool NeedsReinitialize => !IsReady;
         public string LastError { get; protected set; } = string.Empty;
 
         public abstract IEnumerator Initialize();

@@ -70,6 +70,7 @@ namespace Rag.Healthcare.Pose.Providers
 
         private bool isReady;
         private bool isProcessingFrame;
+        private bool requireNativeSessionReset;
         private string resolvedModelPath;
         private long lastTimestampUnixMilliseconds;
 
@@ -98,6 +99,7 @@ namespace Rag.Healthcare.Pose.Providers
 
         public override PoseTrackingBackend Backend => PoseTrackingBackend.LocalMediaPipe;
         public override bool IsReady => isReady;
+        public override bool NeedsReinitialize => !IsReady || requireNativeSessionReset;
         public int DroppedFrameCount { get; private set; }
         public float LastInferenceMilliseconds { get; private set; }
         public float LastReadbackMilliseconds { get; private set; }
@@ -360,6 +362,11 @@ namespace Rag.Healthcare.Pose.Providers
 
         public override void Dispose()
         {
+            // Capture before CancelPendingEstimate(): Stop already sets this flag so the
+            // next Initialize hard-resets the native graph. Dispose-only scene handoff
+            // must keep AbandonManagedResources and must not treat cancel-from-dispose
+            // as a session boundary.
+            var hardResetNativeSession = requireNativeSessionReset;
             CancelPendingEstimate();
 #if AHC_USE_HOMULER_MEDIAPIPE
             poseLandmarker?.Close();
@@ -399,7 +406,14 @@ namespace Rag.Healthcare.Pose.Providers
                             {
                                 if (estimatorToDispose is IOSMediaPipePoseEstimator iosEstimator)
                                 {
-                                    iosEstimator.AbandonManagedResources();
+                                    if (hardResetNativeSession)
+                                    {
+                                        iosEstimator.Dispose();
+                                    }
+                                    else
+                                    {
+                                        iosEstimator.AbandonManagedResources();
+                                    }
                                 }
                                 else
                                 {
@@ -418,10 +432,16 @@ namespace Rag.Healthcare.Pose.Providers
                 {
                     if (estimatorToDispose is IOSMediaPipePoseEstimator iosEstimator)
                     {
-                        // The Swift bridge owns one process-wide graph. A provider
-                        // leaving a scene must not tear down a graph that a newer
-                        // provider may already be reusing.
-                        iosEstimator.AbandonManagedResources();
+                        // Stop→Start needs AHC_PoseDispose so the next Initialize does
+                        // not reuse a stuck warm graph. Scene handoff keeps Abandon.
+                        if (hardResetNativeSession)
+                        {
+                            iosEstimator.Dispose();
+                        }
+                        else
+                        {
+                            iosEstimator.AbandonManagedResources();
+                        }
                     }
                     else
                     {
@@ -451,6 +471,10 @@ namespace Rag.Healthcare.Pose.Providers
             if ((fallbackInitializationTask != null && !fallbackInitializationTask.IsCompleted) ||
                 (fallbackRecoveryTask != null && !fallbackRecoveryTask.IsCompleted))
             {
+                requireNativeSessionReset = true;
+#if UNITY_IOS && !UNITY_EDITOR
+                isReady = false;
+#endif
                 return;
             }
 
@@ -458,6 +482,14 @@ namespace Rag.Healthcare.Pose.Providers
             {
                 asyncEstimator.CancelPendingFrame();
             }
+
+#if UNITY_IOS && !UNITY_EDITOR
+            // Keep the managed provider warm, but force the next Start through
+            // Initialize→AHC_PoseDispose so a cancelled detectAsync cannot stick
+            // to the shared PoseLandmarker across sessions.
+            requireNativeSessionReset = true;
+            isReady = false;
+#endif
 #endif
         }
 
@@ -562,6 +594,7 @@ namespace Rag.Healthcare.Pose.Providers
         private void MarkFallbackInitialized()
         {
             isReady = true;
+            requireNativeSessionReset = false;
             LastError = string.Empty;
             asyncBusyStartedAt = -1f;
             consecutiveAsyncRecoveryCount = 0;
@@ -711,9 +744,10 @@ namespace Rag.Healthcare.Pose.Providers
             string reason,
             Action<string> onError)
         {
-            const int maximumConsecutiveRecoveries = 1;
+            const int maximumConsecutiveRecoveries = 2;
             if (consecutiveAsyncRecoveryCount >= maximumConsecutiveRecoveries)
             {
+                requireNativeSessionReset = true;
                 isReady = false;
                 LastError = reason +
                             "; automatic recovery was already attempted. Stop and Start tracking to retry safely.";
