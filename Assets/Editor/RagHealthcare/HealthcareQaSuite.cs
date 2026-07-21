@@ -14,6 +14,7 @@ using Rag.Healthcare.Qa;
 using Rag.Healthcare.Rag.Runtime;
 using Rag.Healthcare.Rag.Rules;
 using Rag.Healthcare.Replay;
+using Rag.Healthcare.Reports;
 using Rag.Healthcare.Tts;
 using Rag.Healthcare.UI;
 using UnityEditor;
@@ -83,6 +84,7 @@ namespace Rag.Healthcare.Editor
             VerifyBundledKoreanFont(failures);
             VerifyMobileUiStructure(failures);
             VerifyPosePreviewCoordinateMapping(failures);
+            VerifySafetyConstrainedPrompt(failures);
 
             var acceptance = PerformanceAcceptanceEvaluator.Evaluate(new PerformanceBenchmarkResult
             {
@@ -94,6 +96,71 @@ namespace Rag.Healthcare.Editor
             Check(mediaPipe.success, mediaPipe.message, failures);
             foreach (var failure in failures) Debug.LogError("[QA] " + failure);
             return failures;
+        }
+
+        private static void VerifySafetyConstrainedPrompt(ICollection<string> failures)
+        {
+            const string leakedFeedbackId = "FREE_TEXT_LEAK_MARKER_do_not_inject";
+            var summary = new PoseSessionSummary
+            {
+                sessionId = "session-leak-check",
+                exercise = "squat-free-text-must-not-appear",
+                durationSeconds = 120.5f,
+                feedbackCount = 4,
+                warningFeedbackCount = 2,
+                criticalFeedbackCount = 1,
+                averagePoseFps = 15.25f,
+                averageVisibility = 0.854f,
+                topFeedbackIds = new[] { leakedFeedbackId }
+            };
+
+            string first;
+            try
+            {
+                first = SafetyConstrainedPromptTemplate.Build(summary);
+            }
+            catch (Exception ex)
+            {
+                Check(false, "SafetyConstrainedPromptTemplate.Build must not throw for a valid summary: " + ex.Message, failures);
+                return;
+            }
+
+            var second = SafetyConstrainedPromptTemplate.Build(summary);
+            Check(first == second, "SafetyConstrainedPromptTemplate.Build must be deterministic for the same summary.", failures);
+
+            var nullRejected = false;
+            try
+            {
+                SafetyConstrainedPromptTemplate.Build(null);
+            }
+            catch (ArgumentNullException)
+            {
+                nullRejected = true;
+            }
+
+            Check(nullRejected, "SafetyConstrainedPromptTemplate.Build must reject a null summary.", failures);
+            Check(!string.IsNullOrEmpty(SafetyConstrainedPromptTemplate.SafetyDirectives),
+                "SafetyDirectives must be a non-empty public constant.", failures);
+
+            Check(first.IndexOf("diagnose", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                  first.IndexOf("prescribe", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                  first.IndexOf("diseases", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                  first.IndexOf("invent facts", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                  first.IndexOf("Korean", StringComparison.OrdinalIgnoreCase) >= 0,
+                "Prompt must include safety constraint keywords (diagnose/prescribe/diseases/invent/Korean).", failures);
+
+            Check(first.Contains("duration=120.5s") &&
+                  first.Contains("feedback=4") &&
+                  first.Contains("warnings=2") &&
+                  first.Contains("critical=1") &&
+                  first.Contains("pose_fps=15.3") &&
+                  first.Contains("visibility=0.85"),
+                "Prompt must include InvariantCulture whitelist numeric tokens.", failures);
+
+            Check(first.IndexOf(leakedFeedbackId, StringComparison.Ordinal) < 0 &&
+                  first.IndexOf(summary.sessionId, StringComparison.Ordinal) < 0 &&
+                  first.IndexOf(summary.exercise, StringComparison.Ordinal) < 0,
+                "Prompt must not leak free-text fields such as topFeedbackIds, sessionId, or exercise.", failures);
         }
 
         private static void Check(bool condition, string failure, ICollection<string> failures)

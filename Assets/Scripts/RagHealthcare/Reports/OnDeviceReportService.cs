@@ -97,10 +97,7 @@ namespace Rag.Healthcare.Reports
 
         private static string BuildConstrainedPrompt(PoseSessionSummary summary)
         {
-            return "SYSTEM: You are an offline fitness posture coach. Use only the supplied numeric summary. " +
-                   "Do not diagnose, prescribe treatment, mention diseases, or invent facts. Respond in Korean in 3 short sentences.\n" +
-                   $"SESSION: duration={summary.durationSeconds:0.0}s, feedback={summary.feedbackCount}, warnings={summary.warningFeedbackCount}, " +
-                   $"critical={summary.criticalFeedbackCount}, pose_fps={summary.averagePoseFps:0.0}, visibility={summary.averageVisibility:0.00}.";
+            return SafetyConstrainedPromptTemplate.Build(summary);
         }
 
         private static bool IsSafe(string text)
