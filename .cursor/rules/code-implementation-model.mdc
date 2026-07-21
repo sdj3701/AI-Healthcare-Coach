@@ -1,21 +1,35 @@
 ---
-description: Date-based model assignment for code implementation work
+description: Date-based model assignment for code and documentation work
 alwaysApply: true
 ---
 
-# 코드 작업 모델 지정
+# 코드·문서 작업 모델 지정
 
-기능 구현·버그 수정·리팩터 등 **코드 변경 작업**을 할 때, 아래 일정에 맞는 모델만 사용한다.
-계획 작성(Claude Opus 4.8)과 조사·질문 응답에는 이 규칙을 적용하지 않는다.
+기능 구현·버그 수정·리팩터 등 **코드 변경 작업**과, `docs/`·계획서·매트릭스 등 **문서 작성·갱신 작업**에 아래 일정 모델을 사용한다.
+
+계획 작성(기능 개발 승인용)과 단순 조사·질문 응답에는 이 규칙을 적용하지 않는다.
+기능 개발의 구현 전 계획 작성은 `feature-development-workflow.mdc`에 따라 Claude Opus 4.8을 유지한다.
+
+## 코드 작업
 
 | 기간 (KST 기준) | 코드 작업 모델 | Task/subagent `model` 값 |
 | --- | --- | --- |
 | ~ 2026-07-21 (포함) | Grok 4.5 High Fast | `cursor-grok-4.5-high-fast` |
 | 2026-07-22 이후 | Composer 2.5 Fast | `composer-2.5-fast` |
 
+## 문서 작업
+
+`docs/**`, 제품/QA/거버넌스 문서, 구현 매트릭스, 계획서 갱신 등 **문서 산출물 작성·수정**에 적용한다.
+
+| 기간 (KST 기준) | 문서 작업 모델 | Task/subagent `model` 값 |
+| --- | --- | --- |
+| ~ 2026-07-21 (포함) | Grok 4.5 High Fast | `cursor-grok-4.5-high-fast` |
+| 2026-07-22 이후 | Claude Opus 4.8 | `claude-opus-4-8-thinking-high` |
+
 ## 적용 방식
 
-1. 코드 작업은 가능하면 Task 도구로 위임하고, 위 표의 `model` 값을 명시한다.
-2. 부모 에이전트가 직접 코드를 수정해야 할 때도 동일 일정 모델을 우선한다.
+1. 코드·문서 작업은 가능하면 Task 도구로 위임하고, 위 표의 `model` 값을 명시한다.
+2. 부모 에이전트가 직접 수정해야 할 때도 동일 일정 모델을 우선한다.
 3. 사용자가 특정 모델을 명시적으로 지정하면 그 요청을 우선한다.
-4. `feature-development-workflow.mdc`의 승인 절차는 그대로 유지한다. 이 규칙은 **승인 이후 코드 구현에 쓰는 모델만** 바꾼다.
+4. `feature-development-workflow.mdc`의 승인 절차는 그대로 유지한다. 이 규칙은 **승인 이후 실행(코드·문서)에 쓰는 모델**만 지정한다.
+5. 한 작업에 코드와 문서가 함께 있으면, 각 산출물에 해당하는 일정 모델을 따른다. 불가피하게 하나만 쓸 때는 해당 날짜의 코드 작업 모델을 우선하되, 2026-07-22 이후 문서 전용 작업은 Opus를 사용한다.
