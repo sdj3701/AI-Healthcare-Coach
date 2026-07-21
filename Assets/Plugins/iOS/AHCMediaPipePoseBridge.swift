@@ -135,10 +135,20 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         stateLock.lock()
         defer { stateLock.unlock() }
 
-        // Starting and stopping a workout should not rebuild the native graph when
-        // the same bridge instance is already ready.
+        // Warm reuse: keep the live PoseLandmarker, but clear any stuck session
+        // slot left after Stop so a later Start can submit again. Preserve
+        // lastSubmittedTimestamp so live-stream timestamps stay monotonic.
         if poseLandmarker != nil {
+            preparingLegacyWaiter?.complete(with: -16)
+            inFlightSubmission?.legacyWaiter?.complete(with: -16)
+            advanceGenerationLocked()
+            preparingGeneration = nil
+            preparingLegacyWaiter = nil
+            inFlightSubmission = nil
+            cancelRequested = false
+            resultStatus = 0
             lastError = ""
+            latestJson = "{}"
             return 0
         }
 
@@ -261,24 +271,20 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         stateLock.lock()
         let hadPendingWork = preparingGeneration != nil || inFlightSubmission != nil
 
-        // MediaPipe does not expose cancellation for a submitted live-stream
-        // frame. Keep the managed request waiting until preparation or the callback
-        // has physically drained the one-frame slot. Publishing cancellation here
-        // would let a new Start race the still-busy native graph.
+        // MediaPipe has no live-stream cancel API, so invalidate the generation and
+        // clear the logical one-frame slot. Late callbacks are discarded by the
+        // finishDetection generation/slot guards. Keep lastSubmittedTimestamp so a
+        // warm reused graph still submits monotonic timestamps.
         preparingLegacyWaiter?.complete(with: -16)
         inFlightSubmission?.legacyWaiter?.complete(with: -16)
         if hadPendingWork {
-            cancelRequested = true
-            resultStatus = 0
-            latestJson = "{}"
-            lastError = ""
-        } else {
-            cancelRequested = false
-            // The native callback may have published Ready just before Stop while
-            // Unity has not consumed it yet. Replace any terminal result with
-            // cancellation so the managed request always wakes and discards it.
-            publishCancellationLocked()
+            advanceGenerationLocked()
+            preparingGeneration = nil
+            preparingLegacyWaiter = nil
+            inFlightSubmission = nil
         }
+        cancelRequested = false
+        publishCancellationLocked()
         stateLock.unlock()
     }
 
