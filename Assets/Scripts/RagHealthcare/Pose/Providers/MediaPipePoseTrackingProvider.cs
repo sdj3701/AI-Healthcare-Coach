@@ -598,7 +598,16 @@ namespace Rag.Healthcare.Pose.Providers
             LastError = string.Empty;
             asyncBusyStartedAt = -1f;
             consecutiveAsyncRecoveryCount = 0;
+            DrainStaleNativeResults();
             Debug.Log("[MediaPipePoseTrackingProvider] Using " + fallbackPoseEstimator.BackendName + " fallback.");
+        }
+
+        private void DrainStaleNativeResults()
+        {
+            if (fallbackPoseEstimator is IOSMediaPipePoseEstimator iosEstimator)
+            {
+                iosEstimator.DiscardPendingResults();
+            }
         }
 
         private IEnumerator ProcessAsyncFallbackFrame(

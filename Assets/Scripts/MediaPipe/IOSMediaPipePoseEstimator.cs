@@ -170,6 +170,9 @@ namespace AIHealthcareCoach.MediaPipe
                 {
                     lastInitializationSettings = initializationSettings;
                     hasInitializationSettings = true;
+                    // Warm initialize clears native slots, but drain any Ready/Failed that
+                    // may have raced in so Stop→Start cannot consume a previous pose.
+                    DiscardPendingResultsLocked();
                 }
                 LastError = isReady ? string.Empty : ReadLastError();
                 return isReady;
@@ -383,6 +386,8 @@ namespace AIHealthcareCoach.MediaPipe
             {
                 try
                 {
+                    // Do not drain here: an in-flight managed poll still needs the
+                    // PROCESS_CANCELLED Failed status to exit without timing out.
                     AHC_PoseCancelPending();
                 }
                 catch (EntryPointNotFoundException)
@@ -396,6 +401,52 @@ namespace AIHealthcareCoach.MediaPipe
             }
 #endif
         }
+
+        /// <summary>
+        /// Consumes any Ready/Failed native result left after cancel or warm initialize
+        /// so the next session cannot treat a previous pose JSON as current.
+        /// </summary>
+        public void DiscardPendingResults()
+        {
+#if UNITY_IOS && !UNITY_EDITOR
+            if (!asyncApiAvailable || !Monitor.TryEnter(NativeLifecycleGate))
+            {
+                return;
+            }
+
+            try
+            {
+                DiscardPendingResultsLocked();
+            }
+            finally
+            {
+                Monitor.Exit(NativeLifecycleGate);
+            }
+#endif
+        }
+
+#if UNITY_IOS && !UNITY_EDITOR
+        private void DiscardPendingResultsLocked()
+        {
+            const int maximumDrainAttempts = 8;
+            pendingTimestampMs = 0;
+            for (var attempt = 0; attempt < maximumDrainAttempts; attempt++)
+            {
+                try
+                {
+                    if (AHC_PoseTryConsumeLatest() == 0)
+                    {
+                        break;
+                    }
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    asyncApiAvailable = false;
+                    break;
+                }
+            }
+        }
+#endif
 
         public bool TryRecoverFromTimeout(out string errorMessage)
         {
@@ -424,6 +475,7 @@ namespace AIHealthcareCoach.MediaPipe
                     asyncApiAvailable = true;
                     if (isReady)
                     {
+                        DiscardPendingResultsLocked();
                         LastError = string.Empty;
                         return true;
                     }

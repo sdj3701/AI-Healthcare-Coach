@@ -999,6 +999,7 @@ namespace Rag.Healthcare.UI
             poseOverlay.style.top = 0f;
             poseOverlay.style.width = Length.Percent(100f);
             poseOverlay.style.height = Length.Percent(100f);
+            poseOverlay.style.visibility = Visibility.Hidden;
             poseOverlay.generateVisualContent += OnGeneratePoseOverlayContent;
             frame.Add(poseOverlay);
 
@@ -1491,6 +1492,10 @@ namespace Rag.Healthcare.UI
                 ApplyTargetCount();
                 previewMode = PreviewMode.Camera;
                 replayPlayer?.StopReplay();
+                // Stop→Start must not keep the previous session's pose mesh. UI Toolkit
+                // generateVisualContent early-returns leave the last drawn content, so hide
+                // until the first live frame of this session arrives.
+                HidePoseOverlay();
                 cameraOperationError = string.Empty;
                 RefreshPreviewTexture();
 
@@ -1652,7 +1657,7 @@ namespace Rag.Healthcare.UI
             coachTts ??= FindFirstObjectByType<CoachTtsController>();
             coachTts?.EndSession();
             trackingController?.StopTracking();
-            poseOverlay?.MarkDirtyRepaint();
+            HidePoseOverlay();
         }
 
         private void SwitchCamera()
@@ -1703,7 +1708,7 @@ namespace Rag.Healthcare.UI
                 coachTts ??= FindFirstObjectByType<CoachTtsController>();
                 coachTts?.Suspend();
                 trackingController?.StopTracking();
-                poseOverlay?.MarkDirtyRepaint();
+                HidePoseOverlay();
                 var trackingBecameIdle = false;
                 yield return WaitForTrackingRequestToFinish(value => trackingBecameIdle = value);
 
@@ -2318,6 +2323,12 @@ namespace Rag.Healthcare.UI
             if (workoutRunning && frame != null)
             {
                 currentSessionReceivedPoseFrame = true;
+                // Reveal only after a live frame for the current workout session so a
+                // Stop→Start transition cannot flash the previous overlay mesh.
+                if (poseOverlay != null)
+                {
+                    poseOverlay.style.visibility = Visibility.Visible;
+                }
             }
 
             if (previewImage != null && poseOverlay != null)
@@ -2327,6 +2338,17 @@ namespace Rag.Healthcare.UI
             }
         }
 
+        private void HidePoseOverlay()
+        {
+            if (poseOverlay == null)
+            {
+                return;
+            }
+
+            poseOverlay.style.visibility = Visibility.Hidden;
+            poseOverlay.MarkDirtyRepaint();
+        }
+
         private void OnGeneratePoseOverlayContent(MeshGenerationContext mgc)
         {
             if (previewMode != PreviewMode.Camera ||
@@ -2334,6 +2356,7 @@ namespace Rag.Healthcare.UI
                 poseOverlay == null ||
                 trackingController == null ||
                 !trackingController.IsTracking ||
+                poseOverlay.resolvedStyle.visibility == Visibility.Hidden ||
                 (cameraSource != null && cameraSource.IsSwitchingCamera))
             {
                 return;

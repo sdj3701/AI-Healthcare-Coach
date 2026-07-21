@@ -284,6 +284,9 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
             inFlightSubmission = nil
         }
         cancelRequested = false
+        // Always replace any leftover Ready pose JSON. PROCESS_CANCELLED also lets
+        // an in-flight managed poll exit quickly instead of waiting for a timeout.
+        // The next Initialize / DiscardPendingResults drain clears this Failed slot.
         publishCancellationLocked()
         stateLock.unlock()
     }

@@ -132,6 +132,9 @@ namespace Rag.Healthcare.Pose
                 AdvanceTrackingEpoch();
             }
 
+            // Drop any managed pose from the previous session before the startup
+            // coroutine can yield; overlay/UI must not see a stale LatestFrame.
+            LatestFrame = null;
             IsStopping = false;
             startCoroutine = StartCoroutine(StartTrackingRoutine());
         }
@@ -187,11 +190,13 @@ namespace Rag.Healthcare.Pose
         {
             // StartCoroutine advances an iterator immediately. Yield once so the
             // returned handle is assigned before any startup path can fail or exit.
+            LatestFrame = null;
             yield return null;
 
             var trackingLoopStarted = false;
             try
             {
+                LatestFrame = null;
                 if (!trackingRequested)
                 {
                     yield break;
