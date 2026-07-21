@@ -204,7 +204,7 @@ Pose 8 FPS에서 `GetPixels32`가 통과시키는 관리 배열 데이터량:
 - `Main.unity` 459~462행: 동일 값이 씬에 직렬화됨.
 
 **제안 (저위험, 의미 불변).**
-- 모바일 성능 값을 단일 원천(기존 `PerformanceManagement`/performance profile, `PerformanceManagement.cs` 42행이 이미 `ConfigureCapture`를 호출)에서 관리하고, `CameraCaptureSource`의 SerializeField 기본값을 실제 모바일 기본과 모순되지 않게 정리하거나 주석으로 "런타임 override 대상"임을 명시.
+- 모바일 성능 값을 단일 원천(기존 `RuntimeQualityController`/performance profile, `RuntimeQualityController.cs`의 `Apply`가 이미 `ConfigureCapture`를 호출)에서 관리하고, `CameraCaptureSource`의 SerializeField 기본값을 실제 모바일 기본과 모순되지 않게 정리하거나 주석으로 "런타임 override 대상"임을 명시.
 - iOS 하드 클램프는 유지하되, "요청값이 클램프와 다를 때 로그로 한 번 알림" 정도만 추가해 원천 불일치를 관측 가능하게 함.
 - `remaining-optimization-plan.md`의 FPS 단일화(발견 2)와 정합. 단, 그 문서는 Pose/analysis FPS를, 이 문서는 카메라 해상도/FPS를 다룬다.
 
