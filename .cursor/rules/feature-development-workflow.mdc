@@ -8,7 +8,9 @@ alwaysApply: true
 사용자가 기능 개발 또는 기능 변경을 요청하면 다음 절차를 반드시 따른다.
 
 1. 코드나 프로젝트 파일을 변경하지 않는다.
-2. Claude Opus 4.8로 기능 구현 계획을 먼저 작성한다.
+2. `code-implementation-model.mdc`의 **기능 계획** 일정 모델로 구현 계획을 먼저 작성한다.
+   - ~2026-07-21: Grok 4.5 High Fast (`cursor-grok-4.5-high-fast`)
+   - 2026-07-22~: Claude Opus 4.8 (`claude-opus-4-8-thinking-high`)
 3. 계획을 사용자에게 제시하고 명시적인 수락을 기다린다.
 4. 사용자가 계획을 수정하거나 거절하면 코드를 변경하지 않고 계획만 수정한다.
 5. 사용자가 계획을 명시적으로 수락한 후에만, `code-implementation-model.mdc`에 지정된 모델로 코드·문서 작업을 시작한다.
