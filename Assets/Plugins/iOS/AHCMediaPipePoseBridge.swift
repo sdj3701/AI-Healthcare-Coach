@@ -80,10 +80,15 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
     private var inFlightSubmission: AHCPoseSubmission?
     private var cancelRequested = false
     private var lastSubmittedTimestamp = -1
+    private var sessionSubmitBusySlotsCount = 0
+    private var sessionSubmitBusyCapacityCount = 0
+    private var sessionGenDiscardCount = 0
+    private var loggedFirstSubmitOk = false
 
     private let maximumImageDimension = 8_192
     private let maximumFrameByteCount = 256 * 1_024 * 1_024
     private let legacyWaitTimeoutSeconds: TimeInterval = 1.0
+    private let capacityBarrierTimeout: DispatchTimeInterval = .milliseconds(500)
 
     private let landmarkNames = [
         "nose",
@@ -288,7 +293,14 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         // an in-flight managed poll exit quickly instead of waiting for a timeout.
         // The next Initialize / DiscardPendingResults drain clears this Failed slot.
         publishCancellationLocked()
+        resetSessionCountersLocked()
         stateLock.unlock()
+        logLifecycle("cancel")
+
+        // Probe the physical submission-queue capacity outside stateLock so a
+        // draining prepareAndSubmit can finish without deadlocking. On success,
+        // release immediately — never hold the semaphore across Stop/Start.
+        waitForSubmissionQueueCapacityBarrier()
     }
 
     func dispose() {
@@ -307,7 +319,9 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         resultStatus = 0
         latestJson = "{}"
         lastError = ""
+        resetSessionCountersLocked()
         stateLock.unlock()
+        logLifecycle("hard_dispose")
 
         // PoseLandmarker teardown may wait for its delegate/graph worker. Releasing
         // the final bridge-owned strong reference while stateLock is held can then
@@ -376,7 +390,10 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         // One active frame is intentional. MediaPipe live-stream mode may silently
         // drop a second frame while busy, so explicit backpressure is safer.
         guard preparingGeneration == nil, inFlightSubmission == nil else {
+            sessionSubmitBusySlotsCount += 1
+            let count = sessionSubmitBusySlotsCount
             stateLock.unlock()
+            logLifecycle("submit_-14_slots", "count=\(count)")
             return -14
         }
 
@@ -384,7 +401,10 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         // conversion is still draining. A non-blocking capacity gate keeps the
         // serial queue bounded to one physical preparation task in that case.
         guard submissionQueueCapacity.wait(timeout: DispatchTime.now()) == .success else {
+            sessionSubmitBusyCapacityCount += 1
+            let count = sessionSubmitBusyCapacityCount
             stateLock.unlock()
+            logLifecycle("submit_-14_capacity", "count=\(count)")
             return -14
         }
 
@@ -395,7 +415,15 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         cancelRequested = false
         resultStatus = 0
         lastError = ""
+        let shouldLogFirstSubmit = !loggedFirstSubmitOk
+        if shouldLogFirstSubmit {
+            loggedFirstSubmitOk = true
+        }
         stateLock.unlock()
+
+        if shouldLogFirstSubmit {
+            logLifecycle("first_submit_ok")
+        }
 
         // Unity only guarantees that its pinned Color32[] is valid until this C
         // call returns. Keep this one native copy synchronous; image allocation,
@@ -588,8 +616,11 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
 
         guard submission.generation == generation else {
             inFlightSubmission = nil
+            sessionGenDiscardCount += 1
+            let count = sessionGenDiscardCount
             submission.legacyWaiter?.complete(with: -16)
             stateLock.unlock()
+            logLifecycle("gen_discard", "count=\(count) source=finish_detection")
             return
         }
 
@@ -955,6 +986,35 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         generation &+= 1
         if generation == 0 {
             generation = 1
+        }
+    }
+
+    private func resetSessionCountersLocked() {
+        sessionSubmitBusySlotsCount = 0
+        sessionSubmitBusyCapacityCount = 0
+        sessionGenDiscardCount = 0
+        loggedFirstSubmitOk = false
+    }
+
+    private func waitForSubmissionQueueCapacityBarrier() {
+        // Must not run under stateLock: prepareAndSubmit may need that lock before
+        // its defer signal() runs. Only signal when wait acquired the semaphore.
+        let waitResult = submissionQueueCapacity.wait(
+            timeout: DispatchTime.now() + capacityBarrierTimeout
+        )
+        if waitResult == .success {
+            submissionQueueCapacity.signal()
+            logLifecycle("capacity_barrier_ok")
+        } else {
+            logLifecycle("capacity_barrier_timeout")
+        }
+    }
+
+    private func logLifecycle(_ event: String, _ detail: String = "") {
+        if detail.isEmpty {
+            NSLog("[AHCPoseLifecycle] %@", event)
+        } else {
+            NSLog("[AHCPoseLifecycle] %@ %@", event, detail)
         }
     }
 

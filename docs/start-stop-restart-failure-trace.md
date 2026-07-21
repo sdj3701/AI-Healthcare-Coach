@@ -2,9 +2,9 @@
 
 작성일: 2026-07-21  
 범위: Unity iOS 실기기, 운동 세션 UI의 Start→Stop→Start 관절 추적 수명주기  
-상태: **사용자 보고 기준 아직 미해결** (아래 증상은 잔존 가능 증상으로 취급)
+상태: **P0 복구 코드 반영됨 — 실기기 재검증 필요** (아래 증상은 잔존 가능 증상으로 취급)
 
-이 문서는 버그 수정이 아니라, 대화·커밋·기존 문서·현재 코드를 교차해 **무엇이 시도됐고 왜 아직 깨질 수 있는지**를 남긴다.
+이 문서는 대화·커밋·기존 문서·현재 코드를 교차해 **무엇이 시도됐고 왜 아직 깨질 수 있는지**를 남긴다.
 
 ---
 
@@ -17,7 +17,7 @@
 | 초기 | 첫 Start만 추적 OK, Stop 후 재Start 실패 | `120611c` (stuck `-14` / 슬롯 정리) | 잔존 가능 |
 | 이후 | 1번째 OK → 2번째는 활성화되다가 멈춤 → 3번째부터 비활성 | `30fa667` (세션 리셋 / Dispose / recovery 한도) | 잔존 가능 |
 | 이후 | 2번째 Start 시 마지막 Stop 관절 포인트 위치에 고정되어 안 움직임 | `9f5997b` (overlay hide + stale drain) | 잔존 가능 |
-| 현재(2026-07-21) | 사용자: 여전히 미해결 (어느 형태인지는 재확인 필요) | — | **잔존** |
+| 현재(2026-07-21) | 사용자: 여전히 미해결 → P0 복구 구현 | (본 문서 §8) | **실기기 재검증 대기** |
 
 ### 잔존 가능 증상 (재현 시 분류용)
 
@@ -208,4 +208,43 @@ UI Start/Stop
 5. **실기기 합격 기준을 코드 머지 조건에 명시**  
    Start→Stop→Start 10회 + 빠른 토글 20회에서 유효 Pose frame 연속 수신, recovery latch 0.
 
-이 문서는 조사 기록이다. 위 제안의 구현은 별도 승인·작업에서 진행한다.
+---
+
+## 8. P0 복구 구현 요지 (2026-07-21, 수락 계획 반영)
+
+조사 §7의 P0 항목을 코드에 반영했다. **Unity iOS 실기기 Start→Stop→Start 합격은 아직 사용자 확인이 필요하다.**
+
+### P0-1 — `requireNativeSessionReset` 수명 (`MediaPipePoseTrackingProvider.cs`)
+
+- `IsReady`는 `requireNativeSessionReset`이 켜져 있는 동안 true가 되지 않는다.
+- init task 재부착/`CompleteFallbackInitialization` 성공 시에도 reset이 미이행이면 `MarkFallbackInitialized` 금지 → hard `Dispose` → `Initialize` 재진입.
+- `MarkFallbackInitialized`는 Cancel이 bump한 `nativeLifecycleEpoch`와 init 시작 epoch가 어긋난 stale init에서 가드+`reset_cleared_blocked`. reset clear는 현재 epoch의 성공적인 fresh init Mark에서만.
+- Cancel 중 init/recovery early-return은 `requireNativeSessionReset=true` 유지.
+
+### P0-2 — Swift capacity barrier (`AHCMediaPipePoseBridge.swift`)
+
+- `cancelPending`이 `stateLock`을 푼 뒤 `submissionQueueCapacity.wait(timeout: 500ms)` 프로브. 성공 시 즉시 `signal()`(점유하지 않음). timeout이면 로그만 하고 진행.
+- `submitRgba`의 `-14`를 slots busy / capacity busy로 분리 카운트·로그.
+- barrier는 Swift cancel 경로에만 두어 C#에서 별도 장시간 대기를 추가하지 않음. wait 성공 시에만 signal(이중 방출 방지).
+
+### P0-3 — 계측 `[AHCPoseLifecycle]`
+
+- 이벤트: `cancel`, `capacity_barrier_ok|timeout`, `submit_-14_slots`, `submit_-14_capacity`, `gen_discard`, `reset_set`, `reset_cleared_blocked|allowed`, `hard_dispose`, `first_submit_ok`.
+- 세션 카운터는 Stop/Cancel(`cancelPending` / provider Cancel)에서 리셋.
+
+### 제외 (이번 범위 밖)
+
+- overlay 대규모 변경, 가림 규칙, warm/hard 전면 리팩터.
+- `JointTrackingController`: Stopping 중 Start는 기존 TrackingLoop 재진입 큐잉으로 충분해 추가 변경 없음.
+
+### 실기기 재검증 (필수)
+
+§6 시나리오를 그대로 사용. 추가로 Xcode/Unity 로그에서 `[AHCPoseLifecycle]` 시퀀스를 확인한다.
+
+기대 시퀀스(요지): Stop → `cancel` → `capacity_barrier_ok`(또는 timeout 후 다음 Start에서 capacity `-14`가 지속되지 않음) → Start → `hard_dispose` / `reset_cleared_allowed` → `first_submit_ok` → 관절 프레임 연속.
+
+- [ ] 콜드 런치 후 Start→Stop→Start 10회
+- [ ] 빠른 토글·init 중 Stop→Start
+- [ ] 2번째 Start에서 포즈가 고정이 아니라 살아 있는지
+- [ ] recovery latch / `-14` 지속 없음
+- [ ] 커밋 해시와 iOS export bridge가 일치

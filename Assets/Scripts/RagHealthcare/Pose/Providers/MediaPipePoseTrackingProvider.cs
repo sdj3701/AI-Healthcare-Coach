@@ -71,6 +71,10 @@ namespace Rag.Healthcare.Pose.Providers
         private bool isReady;
         private bool isProcessingFrame;
         private bool requireNativeSessionReset;
+        // Bumped on Cancel/Stop. An init task started before the bump must not Mark.
+        private int nativeLifecycleEpoch;
+        private int fallbackInitEpoch;
+        private bool loggedFirstSubmitOk;
         private string resolvedModelPath;
         private long lastTimestampUnixMilliseconds;
 
@@ -98,7 +102,8 @@ namespace Rag.Healthcare.Pose.Providers
 #endif
 
         public override PoseTrackingBackend Backend => PoseTrackingBackend.LocalMediaPipe;
-        public override bool IsReady => isReady;
+        // Never report ready while a Stop→Start native hard reset is still outstanding.
+        public override bool IsReady => isReady && !requireNativeSessionReset;
         public override bool NeedsReinitialize => !IsReady || requireNativeSessionReset;
         public int DroppedFrameCount { get; private set; }
         public float LastInferenceMilliseconds { get; private set; }
@@ -120,7 +125,9 @@ namespace Rag.Healthcare.Pose.Providers
 #if !AHC_USE_HOMULER_MEDIAPIPE
             // A stopped Start coroutine does not cancel native graph creation. Reattach
             // to that task on the next Start instead of disposing an estimator that is
-            // still inside MediaPipe initialization.
+            // still inside MediaPipe initialization. If Stop requested a native reset
+            // while that task was in flight, CompleteFallbackInitialization must not
+            // MarkFallbackInitialized — it hard-disposes and re-enters Initialize.
             if (fallbackInitializationTask != null)
             {
                 yield return CompleteFallbackInitialization();
@@ -203,6 +210,7 @@ namespace Rag.Healthcare.Pose.Providers
 
 #if UNITY_IOS && !UNITY_EDITOR
             var estimatorToInitialize = fallbackPoseEstimator;
+            fallbackInitEpoch = nativeLifecycleEpoch;
             fallbackInitializationTask = Task.Run(() => estimatorToInitialize.Initialize(settings));
             yield return CompleteFallbackInitialization();
 #else
@@ -213,6 +221,7 @@ namespace Rag.Healthcare.Pose.Providers
                 yield break;
             }
 
+            fallbackInitEpoch = nativeLifecycleEpoch;
             MarkFallbackInitialized();
 #endif
 #endif
@@ -368,6 +377,12 @@ namespace Rag.Healthcare.Pose.Providers
             // as a session boundary.
             var hardResetNativeSession = requireNativeSessionReset;
             CancelPendingEstimate();
+#if !AHC_USE_HOMULER_MEDIAPIPE
+            if (hardResetNativeSession)
+            {
+                LogPoseLifecycle("hard_dispose");
+            }
+#endif
 #if AHC_USE_HOMULER_MEDIAPIPE
             poseLandmarker?.Close();
             poseLandmarker = null;
@@ -390,6 +405,7 @@ namespace Rag.Healthcare.Pose.Providers
             ReleaseInferenceResources();
             asyncBusyStartedAt = -1f;
             consecutiveAsyncRecoveryCount = 0;
+            loggedFirstSubmitOk = false;
 
             if (estimatorToDispose != null)
             {
@@ -464,14 +480,20 @@ namespace Rag.Healthcare.Pose.Providers
             // session's timeout window or consume its only recovery attempt.
             asyncBusyStartedAt = -1f;
             consecutiveAsyncRecoveryCount = 0;
+            loggedFirstSubmitOk = false;
+            // Invalidate any in-flight init that began before this Stop/Cancel.
+            nativeLifecycleEpoch++;
+            LogPoseLifecycle("cancel");
 
             // Initialization and timeout recovery may be creating a GPU graph on a
             // worker thread. Calling into the bridge here would wait on its state lock
             // and freeze Unity, so let that operation finish naturally.
+            // Keep requireNativeSessionReset=true so a later CompleteFallbackInitialization
+            // cannot MarkFallbackInitialized on a cancelled warm graph.
             if ((fallbackInitializationTask != null && !fallbackInitializationTask.IsCompleted) ||
                 (fallbackRecoveryTask != null && !fallbackRecoveryTask.IsCompleted))
             {
-                requireNativeSessionReset = true;
+                SetRequireNativeSessionReset(true);
 #if UNITY_IOS && !UNITY_EDITOR
                 isReady = false;
 #endif
@@ -487,7 +509,7 @@ namespace Rag.Healthcare.Pose.Providers
             // Keep the managed provider warm, but force the next Start through
             // Initialize→AHC_PoseDispose so a cancelled detectAsync cannot stick
             // to the shared PoseLandmarker across sessions.
-            requireNativeSessionReset = true;
+            SetRequireNativeSessionReset(true);
             isReady = false;
 #endif
 #endif
@@ -588,18 +610,61 @@ namespace Rag.Healthcare.Pose.Providers
                 yield break;
             }
 
+            // Stop/Cancel bumped the lifecycle epoch while this init task was still
+            // running. Never mark that cancelled warm graph ready — hard dispose and
+            // start a fresh init under the current epoch.
+            if (requireNativeSessionReset && fallbackInitEpoch != nativeLifecycleEpoch)
+            {
+                LogPoseLifecycle("reset_cleared_blocked", "source=complete_fallback_init");
+                Dispose();
+                yield return Initialize();
+                yield break;
+            }
+
             MarkFallbackInitialized();
         }
 
         private void MarkFallbackInitialized()
         {
+            if (requireNativeSessionReset && fallbackInitEpoch != nativeLifecycleEpoch)
+            {
+                // Callers must Dispose→fresh Initialize instead. Clearing the reset
+                // flag here would leave a cancelled warm graph marked ready.
+                LogPoseLifecycle("reset_cleared_blocked", "source=mark_fallback_initialized");
+                isReady = false;
+                return;
+            }
+
             isReady = true;
-            requireNativeSessionReset = false;
+            SetRequireNativeSessionReset(false);
             LastError = string.Empty;
             asyncBusyStartedAt = -1f;
             consecutiveAsyncRecoveryCount = 0;
+            loggedFirstSubmitOk = false;
             DrainStaleNativeResults();
             Debug.Log("[MediaPipePoseTrackingProvider] Using " + fallbackPoseEstimator.BackendName + " fallback.");
+        }
+
+        private void SetRequireNativeSessionReset(bool value)
+        {
+            if (requireNativeSessionReset == value)
+            {
+                return;
+            }
+
+            requireNativeSessionReset = value;
+            LogPoseLifecycle(value ? "reset_set" : "reset_cleared_allowed");
+        }
+
+        private static void LogPoseLifecycle(string eventName, string detail = null)
+        {
+            if (string.IsNullOrEmpty(detail))
+            {
+                Debug.Log("[AHCPoseLifecycle] " + eventName);
+                return;
+            }
+
+            Debug.Log("[AHCPoseLifecycle] " + eventName + " " + detail);
         }
 
         private void DrainStaleNativeResults()
@@ -693,6 +758,12 @@ namespace Rag.Healthcare.Pose.Providers
                 yield break;
             }
 
+            if (!loggedFirstSubmitOk)
+            {
+                loggedFirstSubmitOk = true;
+                LogPoseLifecycle("first_submit_ok");
+            }
+
             asyncBusyStartedAt = -1f;
 
             var deadline = Time.realtimeSinceStartup + Mathf.Max(0.25f, asyncInferenceTimeoutSeconds);
@@ -756,7 +827,7 @@ namespace Rag.Healthcare.Pose.Providers
             const int maximumConsecutiveRecoveries = 2;
             if (consecutiveAsyncRecoveryCount >= maximumConsecutiveRecoveries)
             {
-                requireNativeSessionReset = true;
+                SetRequireNativeSessionReset(true);
                 isReady = false;
                 LastError = reason +
                             "; automatic recovery was already attempted. Stop and Start tracking to retry safely.";
@@ -798,7 +869,12 @@ namespace Rag.Healthcare.Pose.Providers
                 };
             }
 
-            isReady = outcome.Recovered && ReferenceEquals(estimator, fallbackPoseEstimator) && estimator.IsReady;
+            // A concurrent Stop may have latched requireNativeSessionReset while recovery
+            // was running. Do not raise isReady until the next hard Dispose→Initialize.
+            isReady = !requireNativeSessionReset &&
+                      outcome.Recovered &&
+                      ReferenceEquals(estimator, fallbackPoseEstimator) &&
+                      estimator.IsReady;
             asyncBusyStartedAt = -1f;
             if (isReady)
             {
