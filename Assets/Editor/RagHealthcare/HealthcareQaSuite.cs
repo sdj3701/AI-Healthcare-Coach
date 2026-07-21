@@ -93,6 +93,15 @@ namespace Rag.Healthcare.Editor
             });
             Check(acceptance.passed, "Nominal performance fixture should pass.", failures);
 
+            var shortSmoke = PerformanceAcceptanceEvaluator.Evaluate(new PerformanceBenchmarkResult
+            {
+                durationSeconds = 60f, averagePoseFps = 15f, averageInferenceMs = 45f, droppedFrames = 0
+            });
+            Check(!shortSmoke.passed, "60s-style short result must not pass 10m acceptance.", failures);
+            Check(shortSmoke.failures != null &&
+                  Array.Exists(shortSmoke.failures, reason => reason.IndexOf("10-minute", StringComparison.OrdinalIgnoreCase) >= 0),
+                "60s-style short result must fail on duration.", failures);
+
             var mediaPipe = MediaPipeInstallationVerifier.Verify();
             Check(mediaPipe.success, mediaPipe.message, failures);
             foreach (var failure in failures) Debug.LogError("[QA] " + failure);

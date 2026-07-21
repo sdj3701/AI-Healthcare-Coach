@@ -75,7 +75,7 @@
 | PBI-082 | coach request 로컬 export | 코치 운영·전송 채널 |
 | PBI-083 | lunge profile + reusable lower-body evaluator | 런지 데이터/전문가 검수 |
 | PBI-084 | versioned challenge catalog | 전문가 승인 |
-| PBI-085 | `DevicePerformanceProfiler` | 지원 단말 측정 |
+| PBI-085 | `DevicePerformanceProfiler` + 세션 화면 벤치 UI(60s/10m)·JSON 저장 하네스 (`docs/qa/device-performance-profiling-harness.md`) | 지원 단말 매트릭스 실측·외부 증거 여전히 필요 |
 | PBI-086 | 640×480/10 FPS/LLM-off 저사양 모드 | 저사양 단말 |
 | PBI-087 | 지속 FPS 저하·메모리·세션 시간 경고 | 실제 발열 측정 |
 | PBI-088 | model memory budget/load/unload/idle policy | 실제 runtime |

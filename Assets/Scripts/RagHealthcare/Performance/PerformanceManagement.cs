@@ -85,32 +85,90 @@ namespace Rag.Healthcare.Performance
         public bool lowMemorySignalReceived;
     }
 
+    [Serializable]
+    public sealed class PerformanceAcceptanceReport
+    {
+        public bool applicable;
+        public bool passed;
+        public string[] reasons;
+    }
+
+    [Serializable]
+    public sealed class PerformanceBenchReport
+    {
+        public int schemaVersion;
+        public string pbi;
+        public string benchKind;
+        public string deviceModel;
+        public string operatingSystem;
+        public string unityVersion;
+        public PerformanceBenchmarkResult result;
+        public PerformanceAcceptanceReport acceptance;
+        public string savedAtUtc;
+        public string savedPath;
+    }
+
     public sealed class DevicePerformanceProfiler : MonoBehaviour
     {
+        public const string BenchKind60s = "60s";
+        public const string BenchKind10m = "10m";
+        public const float Duration60sSeconds = 60f;
+        public const float Duration10mSeconds = 600f;
+
         [SerializeField] private JointTrackingController trackingController;
-        [SerializeField, Min(10f)] private float benchmarkSeconds = 600f;
+        [SerializeField, Min(10f)] private float benchmarkSeconds = Duration10mSeconds;
 
         private float startedAt;
         private float frameFpsTotal;
         private float poseFpsTotal;
         private float inferenceTotal;
+        private float lastPoseFps;
+        private float lastInferenceMs;
         private int samples;
         private long memoryPeak;
         private float batteryStart;
         private bool running;
         private bool lowMemory;
+        private string benchKind = BenchKind10m;
 
         public event Action<PerformanceBenchmarkResult> Completed;
+
+        public bool IsRunning => running;
+        public string BenchKind => benchKind;
+        public float TargetSeconds => benchmarkSeconds;
+        public float ElapsedSeconds => running ? Mathf.Max(0f, Time.realtimeSinceStartup - startedAt) : 0f;
+        public float RemainingSeconds => running ? Mathf.Max(0f, benchmarkSeconds - ElapsedSeconds) : 0f;
+        public float LivePoseFps => lastPoseFps;
+        public float LiveInferenceMs => lastInferenceMs;
+        public long LiveMemoryPeakBytes => memoryPeak;
+        public string LastSavedPath { get; private set; }
+        public PerformanceBenchReport LastReport { get; private set; }
 
         private void Awake() => trackingController ??= FindFirstObjectByType<JointTrackingController>();
         private void OnEnable() => Application.lowMemory += HandleLowMemory;
         private void OnDisable() => Application.lowMemory -= HandleLowMemory;
 
+        public void BeginBench(string kind)
+        {
+            benchKind = NormalizeBenchKind(kind);
+            Begin(ResolveDurationSeconds(benchKind));
+        }
+
         public void Begin(float durationSeconds = -1f)
         {
-            benchmarkSeconds = durationSeconds > 0f ? durationSeconds : benchmarkSeconds;
+            if (durationSeconds > 0f)
+            {
+                benchmarkSeconds = durationSeconds;
+                benchKind = InferBenchKind(durationSeconds);
+            }
+            else if (string.IsNullOrWhiteSpace(benchKind))
+            {
+                benchKind = InferBenchKind(benchmarkSeconds);
+            }
+
             startedAt = Time.realtimeSinceStartup;
             frameFpsTotal = poseFpsTotal = inferenceTotal = 0f;
+            lastPoseFps = lastInferenceMs = 0f;
             samples = 0;
             memoryPeak = 0;
             batteryStart = SystemInfo.batteryLevel;
@@ -122,8 +180,10 @@ namespace Rag.Healthcare.Performance
         {
             if (!running) return;
             frameFpsTotal += 1f / Mathf.Max(0.0001f, Time.unscaledDeltaTime);
-            poseFpsTotal += trackingController == null ? 0f : trackingController.PoseFps;
-            inferenceTotal += trackingController == null ? 0f : trackingController.LastInferenceMilliseconds;
+            lastPoseFps = trackingController == null ? 0f : trackingController.PoseFps;
+            lastInferenceMs = trackingController == null ? 0f : trackingController.LastInferenceMilliseconds;
+            poseFpsTotal += lastPoseFps;
+            inferenceTotal += lastInferenceMs;
             memoryPeak = Math.Max(memoryPeak, GC.GetTotalMemory(false));
             samples++;
             if (Time.realtimeSinceStartup - startedAt >= benchmarkSeconds) Finish();
@@ -131,6 +191,11 @@ namespace Rag.Healthcare.Performance
 
         public PerformanceBenchmarkResult Finish()
         {
+            if (!running)
+            {
+                return LastReport == null ? null : LastReport.result;
+            }
+
             running = false;
             var batteryEnd = SystemInfo.batteryLevel;
             var result = new PerformanceBenchmarkResult
@@ -148,8 +213,122 @@ namespace Rag.Healthcare.Performance
                 batteryDrop = batteryStart < 0f || batteryEnd < 0f ? -1f : Mathf.Max(0f, batteryStart - batteryEnd),
                 lowMemorySignalReceived = lowMemory
             };
+
+            var report = BuildAndSaveReport(result);
+            LastReport = report;
+            LastSavedPath = report == null ? string.Empty : report.savedPath;
             Completed?.Invoke(result);
             return result;
+        }
+
+        private PerformanceBenchReport BuildAndSaveReport(PerformanceBenchmarkResult result)
+        {
+            var acceptance = BuildAcceptance(benchKind, result);
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            var deviceModel = SanitizeFileToken(SystemInfo.deviceModel);
+            var fileName = "perf_bench_" + benchKind + "_" + timestamp + "_" + deviceModel + ".json";
+            var directory = Path.Combine(Application.persistentDataPath, "performance");
+            Directory.CreateDirectory(directory);
+            var savedPath = Path.Combine(directory, fileName);
+
+            var report = new PerformanceBenchReport
+            {
+                schemaVersion = 1,
+                pbi = "PBI-085",
+                benchKind = benchKind,
+                deviceModel = SystemInfo.deviceModel,
+                operatingSystem = SystemInfo.operatingSystem,
+                unityVersion = Application.unityVersion,
+                result = result,
+                acceptance = acceptance,
+                savedAtUtc = DateTime.UtcNow.ToString("o"),
+                savedPath = savedPath
+            };
+
+            try
+            {
+                File.WriteAllText(savedPath, JsonUtility.ToJson(report, true));
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[DevicePerformanceProfiler] Failed to save bench report: " + exception.Message);
+                report.savedPath = string.Empty;
+            }
+
+            return report;
+        }
+
+        private static PerformanceAcceptanceReport BuildAcceptance(string kind, PerformanceBenchmarkResult result)
+        {
+            if (string.Equals(kind, BenchKind10m, StringComparison.Ordinal))
+            {
+                var evaluated = PerformanceAcceptanceEvaluator.Evaluate(result);
+                return new PerformanceAcceptanceReport
+                {
+                    applicable = true,
+                    passed = evaluated.passed,
+                    reasons = evaluated.failures ?? Array.Empty<string>()
+                };
+            }
+
+            return new PerformanceAcceptanceReport
+            {
+                applicable = false,
+                passed = false,
+                reasons = new[] { "60s smoke bench; 10m acceptance not applied" }
+            };
+        }
+
+        public static string NormalizeBenchKind(string kind)
+        {
+            if (string.Equals(kind, BenchKind10m, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(kind, "10min", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(kind, "600", StringComparison.OrdinalIgnoreCase))
+            {
+                return BenchKind10m;
+            }
+
+            return BenchKind60s;
+        }
+
+        public static float ResolveDurationSeconds(string kind)
+        {
+            return string.Equals(NormalizeBenchKind(kind), BenchKind10m, StringComparison.Ordinal)
+                ? Duration10mSeconds
+                : Duration60sSeconds;
+        }
+
+        private static string InferBenchKind(float durationSeconds)
+        {
+            if (durationSeconds >= 590f)
+            {
+                return BenchKind10m;
+            }
+
+            return BenchKind60s;
+        }
+
+        private static string SanitizeFileToken(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return "unknown-device";
+            }
+
+            var chars = value.Trim().ToCharArray();
+            for (var i = 0; i < chars.Length; i++)
+            {
+                var c = chars[i];
+                if (char.IsLetterOrDigit(c) || c == '-' || c == '_')
+                {
+                    continue;
+                }
+
+                chars[i] = '_';
+            }
+
+            var sanitized = new string(chars);
+            return string.IsNullOrWhiteSpace(sanitized) ? "unknown-device" : sanitized;
         }
 
         private void HandleLowMemory() => lowMemory = true;

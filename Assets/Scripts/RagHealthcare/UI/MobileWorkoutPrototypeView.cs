@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using Rag.Healthcare.Camera;
+using Rag.Healthcare.Performance;
 using Rag.Healthcare.Pose;
 using Rag.Healthcare.Pose.Rendering;
 using Rag.Healthcare.Rag.Runtime;
@@ -113,6 +114,10 @@ namespace Rag.Healthcare.UI
         [SerializeField, Range(15, 120)] private int mobileTargetFrameRate = 30;
         [SerializeField, Min(1f)] private float trackingStartupTimeoutSeconds = 15f;
 
+        [Header("Performance Bench")]
+        [SerializeField] private DevicePerformanceProfiler performanceProfiler;
+        [SerializeField] private bool showPerformanceBenchControls = true;
+
         private UIDocument document;
         private PanelSettings runtimePanelSettings;
         private Font runtimeFont;
@@ -136,8 +141,11 @@ namespace Rag.Healthcare.UI
         private Label feedbackLabel;
         private Label cameraStateLabel;
         private Label replayStateLabel;
+        private Label performanceBenchStatusLabel;
         private TextField repsField;
         private TextField setsField;
+        private string performanceBenchStatusText = "Perf bench: idle";
+        private bool performanceBenchSubscribed;
 
         private ScreenStep currentStep = ScreenStep.Exercise;
         private string selectedExerciseId = "squat";
@@ -217,6 +225,8 @@ namespace Rag.Healthcare.UI
                 {
                     trackingController.TrackingFrameReceived += HandleTrackingFrameReceived;
                 }
+
+                SubscribePerformanceProfiler();
             }
         }
 
@@ -241,6 +251,8 @@ namespace Rag.Healthcare.UI
                 trackingController.TrackingFrameReceived -= HandleTrackingFrameReceived;
             }
 
+            UnsubscribePerformanceProfiler();
+
             if (!Application.isPlaying && document != null)
             {
                 document.rootVisualElement?.Clear();
@@ -249,6 +261,8 @@ namespace Rag.Healthcare.UI
 
         private void OnDestroy()
         {
+            UnsubscribePerformanceProfiler();
+
             if (runtimePanelSettings != null)
             {
                 DestroyPanelSettings();
@@ -361,10 +375,21 @@ namespace Rag.Healthcare.UI
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
             coachTts ??= FindFirstObjectByType<CoachTtsController>();
             replayPlayer ??= FindFirstObjectByType<PoseJsonReplayPlayer>();
+            performanceProfiler ??= FindFirstObjectByType<DevicePerformanceProfiler>();
 
             if (Application.isPlaying && replayPlayer == null)
             {
                 replayPlayer = gameObject.AddComponent<PoseJsonReplayPlayer>();
+            }
+
+            if (Application.isPlaying && performanceProfiler == null)
+            {
+                performanceProfiler = gameObject.AddComponent<DevicePerformanceProfiler>();
+            }
+
+            if (Application.isPlaying)
+            {
+                SubscribePerformanceProfiler();
             }
         }
 
@@ -966,6 +991,128 @@ namespace Rag.Healthcare.UI
                 30f,
                 () => LeaveSession(ScreenStep.Exercise)));
             contentRoot.Add(resetRow);
+
+            if (showPerformanceBenchControls)
+            {
+                contentRoot.Add(BuildPerformanceBenchRow());
+            }
+        }
+
+        private VisualElement BuildPerformanceBenchRow()
+        {
+            var block = new VisualElement { name = "perf-bench-block" };
+            block.style.marginTop = 8f;
+            block.style.flexShrink = 0f;
+
+            var row = Row("perf-bench-row", 28f, 6f);
+            row.Add(ActionButton("60초", ColorFromHex(0x1E293B), ColorFromHex(0x94A3B8), 28f, () => StartPerformanceBench(DevicePerformanceProfiler.BenchKind60s), 56f));
+            row.Add(ActionButton("10분", ColorFromHex(0x1E293B), ColorFromHex(0x94A3B8), 28f, () => StartPerformanceBench(DevicePerformanceProfiler.BenchKind10m), 56f));
+            row.Add(ActionButton("중지", ColorFromHex(0x1E293B), ColorFromHex(0xF87171), 28f, StopPerformanceBench, 48f));
+            block.Add(row);
+
+            performanceBenchStatusLabel = Label(performanceBenchStatusText, 9, ColorFromHex(0x64748B));
+            performanceBenchStatusLabel.style.marginTop = 4f;
+            performanceBenchStatusLabel.style.height = 28f;
+            performanceBenchStatusLabel.style.whiteSpace = WhiteSpace.Normal;
+            block.Add(performanceBenchStatusLabel);
+            return block;
+        }
+
+        private void StartPerformanceBench(string benchKind)
+        {
+            if (!Application.isPlaying)
+            {
+                return;
+            }
+
+            ResolveReferences();
+            if (performanceProfiler == null)
+            {
+                performanceBenchStatusText = "Perf bench: profiler missing";
+                RefreshPerformanceBenchStatus();
+                return;
+            }
+
+            performanceProfiler.BeginBench(benchKind);
+            performanceBenchStatusText = "Perf bench: " + benchKind + " running";
+            RefreshPerformanceBenchStatus();
+        }
+
+        private void StopPerformanceBench()
+        {
+            if (!Application.isPlaying || performanceProfiler == null || !performanceProfiler.IsRunning)
+            {
+                return;
+            }
+
+            performanceProfiler.Finish();
+        }
+
+        private void SubscribePerformanceProfiler()
+        {
+            if (performanceProfiler == null || performanceBenchSubscribed)
+            {
+                return;
+            }
+
+            performanceProfiler.Completed += HandlePerformanceBenchCompleted;
+            performanceBenchSubscribed = true;
+        }
+
+        private void UnsubscribePerformanceProfiler()
+        {
+            if (performanceProfiler == null || !performanceBenchSubscribed)
+            {
+                return;
+            }
+
+            performanceProfiler.Completed -= HandlePerformanceBenchCompleted;
+            performanceBenchSubscribed = false;
+        }
+
+        private void HandlePerformanceBenchCompleted(PerformanceBenchmarkResult _)
+        {
+            var report = performanceProfiler == null ? null : performanceProfiler.LastReport;
+            if (report == null)
+            {
+                performanceBenchStatusText = "Perf bench: finished (no report)";
+                RefreshPerformanceBenchStatus();
+                return;
+            }
+
+            var fileName = string.IsNullOrWhiteSpace(report.savedPath)
+                ? "(unsaved)"
+                : System.IO.Path.GetFileName(report.savedPath);
+            var acceptance = report.acceptance;
+            var verdict = acceptance == null || !acceptance.applicable
+                ? "SMOKE"
+                : acceptance.passed
+                    ? "PASS"
+                    : "FAIL";
+            performanceBenchStatusText = "Saved " + fileName + " · " + verdict;
+            RefreshPerformanceBenchStatus();
+        }
+
+        private void RefreshPerformanceBenchStatus()
+        {
+            if (performanceBenchStatusLabel == null)
+            {
+                return;
+            }
+
+            if (performanceProfiler != null && performanceProfiler.IsRunning)
+            {
+                var elapsed = Mathf.FloorToInt(performanceProfiler.ElapsedSeconds);
+                var memoryMb = performanceProfiler.LiveMemoryPeakBytes / (1024f * 1024f);
+                performanceBenchStatusText =
+                    performanceProfiler.BenchKind + " " +
+                    (elapsed / 60).ToString("00") + ":" + (elapsed % 60).ToString("00") +
+                    " · pose " + performanceProfiler.LivePoseFps.ToString("0.0") +
+                    " · inf " + performanceProfiler.LiveInferenceMs.ToString("0.0") + "ms" +
+                    " · mem " + memoryMb.ToString("0.0") + "MB";
+            }
+
+            performanceBenchStatusLabel.text = performanceBenchStatusText;
         }
 
         private VisualElement BuildPreviewPanel()
@@ -1245,6 +1392,11 @@ namespace Rag.Healthcare.UI
             if (replayStateLabel != null)
             {
                 replayStateLabel.text = BuildReplayStateText();
+            }
+
+            if (showPerformanceBenchControls && performanceBenchStatusLabel != null)
+            {
+                RefreshPerformanceBenchStatus();
             }
         }
 
@@ -2086,6 +2238,7 @@ namespace Rag.Healthcare.UI
             feedbackLabel = null;
             cameraStateLabel = null;
             replayStateLabel = null;
+            performanceBenchStatusLabel = null;
             repsField = null;
             setsField = null;
         }

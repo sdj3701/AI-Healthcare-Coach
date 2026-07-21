@@ -1,6 +1,7 @@
 #if UNITY_EDITOR
 using System.Linq;
 using Rag.Healthcare.Camera;
+using Rag.Healthcare.Performance;
 using Rag.Healthcare.Pose;
 using Rag.Healthcare.Pose.Providers;
 using Rag.Healthcare.Pose.Rendering;
@@ -65,6 +66,7 @@ namespace Rag.Healthcare.Editor
             var orchestrator = runtime.AddComponent<RealtimeFeedbackOrchestrator>();
             var replayPlayer = runtime.AddComponent<PoseJsonReplayPlayer>();
             var debugView = runtime.AddComponent<CameraPreviewDebugView>();
+            var performanceProfiler = runtime.AddComponent<DevicePerformanceProfiler>();
             var mobileView = runtime.AddComponent<MobileWorkoutPrototypeView>();
 
             SetObject(trackingController, "cameraSource", cameraSource);
@@ -90,12 +92,17 @@ namespace Rag.Healthcare.Editor
 
             SetObject(replayPlayer, "sessionLogger", sessionLogger);
 
+            SetObject(performanceProfiler, "trackingController", trackingController);
+            SetFloat(performanceProfiler, "benchmarkSeconds", DevicePerformanceProfiler.Duration10mSeconds);
+
             SetObject(mobileView, "cameraSource", cameraSource);
             SetObject(mobileView, "trackingController", trackingController);
             SetObject(mobileView, "feedbackReceiver", feedbackReceiver);
             SetObject(mobileView, "feedbackOrchestrator", orchestrator);
             SetObject(mobileView, "replayPlayer", replayPlayer);
+            SetObject(mobileView, "performanceProfiler", performanceProfiler);
             SetBool(mobileView, "showUiInEditMode", true);
+            SetBool(mobileView, "showPerformanceBenchControls", true);
 
             CreateUi(cameraSource, trackingController, feedbackReceiver, orchestrator);
 

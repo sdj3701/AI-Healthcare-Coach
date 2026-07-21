@@ -230,6 +230,7 @@ GameObject:
   - component: {fileID: 1954474671}
   - component: {fileID: 1954474672}
   - component: {fileID: 1954474673}
+  - component: {fileID: 1954474674}
   m_Layer: 0
   m_Name: Coach Runtime
   m_TagString: Untagged
@@ -462,6 +463,23 @@ MonoBehaviour:
   mobileCameraFps: 20
   mobilePoseFps: 8
   mobileTargetFrameRate: 30
+  trackingStartupTimeoutSeconds: 15
+  performanceProfiler: {fileID: 1954474674}
+  showPerformanceBenchControls: 1
+--- !u!114 &1954474674
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1954474662}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 07b1aacea9b2f0c438af34dd1dc4b792, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Rag.Healthcare.Performance.DevicePerformanceProfiler
+  trackingController: {fileID: 1954474667}
+  benchmarkSeconds: 600
 --- !u!4 &1954474665
 Transform:
   m_ObjectHideFlags: 0
