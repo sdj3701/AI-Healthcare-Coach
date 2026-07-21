@@ -87,20 +87,23 @@
 
 | 설정 | 현재값 | 의미 |
 | --- | ---: | --- |
-| `analysisWindowSeconds` | `1.2` | 최근 1.2초 프레임을 보고 판단 |
+| `analysisWindowSeconds` | `0.8` | 최근 0.8초 프레임을 보고 판단 |
 | `expectedPoseFps` | `15` | 분석 창 capacity 계산 기준 FPS |
-| `minimumVisibility` | `0.5` | 관절 사용 최소 신뢰도 |
-| `minimumValidCoreFrameRatio` | `0.55` | 핵심 자세가 잡힌 프레임 최소 비율 |
-| `minimumViolationRatio` | `0.45` | 오류가 반복됐다고 볼 최소 비율 |
-| `maximumKneeValgusOffset` | `0.08` | 무릎 정렬 이탈 허용치 |
+| `minimumVisibility` | `0.45` | 관절 사용 최소 신뢰도 |
+| `lowConfidenceGraceSeconds` | `0.35` | 저신뢰도 시 마지막 유효 좌표 유지 시간 |
+| `maximumConsecutiveOutlierFrames` | `3` | 연속 이상치로 허용하는 최대 프레임 |
+| `minimumValidCoreFrameRatio` | `0.45` | 핵심 자세가 잡힌 프레임 최소 비율 |
+| `minimumViolationRatio` | `0.35` | 오류가 반복됐다고 볼 최소 비율 |
+| `maximumKneeValgusOffset` | `0.10` | 무릎 정렬 이탈 허용치 |
+| `minimumKneeObservationRatio` | `0.5` | 좌/우 무릎 정렬·대칭 평가에 필요한 최소 관찰 비율 |
 | `standingKneeAngle` | `160` | 서 있는 phase 기준 무릎 각도 |
-| `bottomKneeAngle` | `110` | 바닥 phase 진입 기준 무릎 각도 |
+| `bottomKneeAngle` | `125` | 바닥 phase 진입 기준 무릎 각도 |
 | `maximumBottomKneeAngle` | `135` | 바닥 자세에서 이보다 크면 얕음 |
 | `minimumBottomKneeAngle` | `55` | 바닥 자세에서 이보다 작으면 너무 깊음 |
 | `maximumLeftRightKneeAngleDelta` | `18` | 좌우 무릎 각도 차이 허용치 |
 | `maximumTorsoTiltDegrees` | `35` | 상체 기울기 허용 각도 |
 | `maximumCenterBalanceOffset` | `0.12` | 중심 쏠림 허용치 |
-| `phaseVelocityDeadZoneDegreesPerSecond` | `8` | phase 변화 무시 구간 |
+| `phaseVelocityDeadZoneDegreesPerSecond` | `12` | phase 변화 무시 구간 |
 | `duplicateCooldownSeconds` | `3` | 같은 피드백 반복 제한 |
 | `minimumGlobalFeedbackIntervalSeconds` | `1.5` | 전체 피드백 최소 간격 |
 
@@ -120,7 +123,7 @@ Reliable squat core 조건:
 
 각 무릎에 대해 `hip -> ankle` 선과 knee 사이의 2D 거리를 계산한다.
 
-최근 관찰 중 이 값이 `maximumKneeValgusOffset`보다 큰 비율이 `minimumViolationRatio` 이상이면 무릎 정렬 피드백을 낸다.
+좌우를 독립적으로 평가한다. 해당 측의 관찰 비율(`Left/RightKneeObservationRatio`)이 `minimumKneeObservationRatio` 이상이고, 해당 측의 정렬 위반 비율이 `minimumViolationRatio` 이상일 때만 그 측 경고를 낸다. 양쪽이 모두 조건을 만족하면 offset이 더 큰 쪽 1건만 낸다. 한쪽 다리가 팔에 가려져 관찰이 부족하면 그 측은 평가하지 않는다.
 
 ### 3. 상체 과도한 기울기
 
@@ -138,7 +141,7 @@ Reliable squat core 조건:
 
 좌우 무릎 각도의 차이 평균을 계산한다.
 
-이 값이 `maximumLeftRightKneeAngleDelta`보다 크면 좌우 무릎 굽힘이 다르다는 피드백을 낸다.
+양쪽 무릎 관찰 비율이 모두 `minimumKneeObservationRatio` 이상일 때만 평가한다. 한쪽이 불안정하면 대칭 판정을 건너뛴다. 양쪽이 충분히 관찰되고 각도 차이가 `maximumLeftRightKneeAngleDelta`보다 크며 위반 비율이 `minimumViolationRatio` 이상이면 좌우 무릎 굽힘이 다르다는 피드백을 낸다.
 
 ### 6. 스쿼트 깊이
 
@@ -258,7 +261,8 @@ Stop 이후에는 `CameraPreviewDebugView`가 카메라 프리뷰 대신 `PoseJs
 
 - landmark EMA: `0.35`
 - 단일 관절 최대 이동: `0.08`
-- 저신뢰도 grace: `0.2초`
+- 저신뢰도 grace: `0.35초`
+- 연속 이상치 허용: `3`프레임
 - 분석 창: `0.8초`
 - 최소 visibility: `0.45`
 - 최소 규칙 평가 프레임: `6`
@@ -270,9 +274,29 @@ Stop 이후에는 `CameraPreviewDebugView`가 카메라 프리뷰 대신 `PoseJs
 - 기본 Bottom: `125도`
 - 인식 가능한 Bottom 최대: `145도`
 - 정상 깊이 최대: `135도`
+- 무릎 valgus 허용: `0.10`
+- 무릎 최소 관찰 비율: `0.5`
 - 속도 dead zone: `12도/초`
 
 깊이 판정은 분석 창의 평균 각도가 아니라 최소 무릎 각도를 사용한다. 직전 Standing 프레임이 창에 남아 있어도 실제로 충분히 내려갔다면 얕은 스쿼트로 오판정하지 않는다.
+
+## 2026-07-21 팔-다리 가림 오판정 완화
+
+팔이 다리를 가리거나 한쪽 무릎 landmark가 잠깐 흔들릴 때 무릎 정렬/대칭 오판정이 나오던 문제를 완화했다.
+
+### 변경 요지
+
+1. 저신뢰도 grace를 `0.2초 → 0.35초`, 연속 이상치 허용을 `1 → 3`으로 늘려 짧은 가림에 좌표를 더 오래 유지한다.
+2. 무릎 valgus 허용치를 `0.08 → 0.10`으로 완화한다.
+3. `minimumKneeObservationRatio=0.5`를 추가한다. 좌/우 무릎 정렬은 해당 측 관찰 비율과 위반 비율을 모두 만족할 때만 경고한다.
+4. 무릎 대칭은 양쪽 관찰 비율이 모두 충분할 때만 평가하고, 한쪽이 불안정하면 스킵한다.
+5. torso / center balance / squat depth / visibility 게이트 임계값은 변경하지 않았다.
+6. `TestRagSysten.unity`, `Main.unity`의 `ruleSettings`를 코드 기본값과 동기화했다.
+
+### 기대 효과
+
+- 팔이 한쪽 무릎을 가려 landmark가 불안정해도, 관찰이 부족한 측으로는 정렬/대칭 경고를 내지 않는다.
+- 실제 무릎 내전(valgus)이 지속되는 경우에는 기존처럼 해당 측 경고를 유지한다.
 
 ### 장점
 

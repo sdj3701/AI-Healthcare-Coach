@@ -14,8 +14,8 @@ namespace Rag.Healthcare.Rag.Runtime
         [Range(0.05f, 1f)] public float landmarkSmoothingAlpha = 0.35f;
 #endif
         [Range(0.01f, 0.3f)] public float maximumNormalizedJointJump = 0.08f;
-        [Range(0f, 0.5f)] public float lowConfidenceGraceSeconds = 0.2f;
-        [Range(0, 4)] public int maximumConsecutiveOutlierFrames = 1;
+        [Range(0f, 0.5f)] public float lowConfidenceGraceSeconds = 0.35f;
+        [Range(0, 4)] public int maximumConsecutiveOutlierFrames = 3;
 
         [Header("Temporal evidence")]
         [Range(0f, 1f)] public float minimumValidCoreFrameRatio = 0.45f;
@@ -27,7 +27,8 @@ namespace Rag.Healthcare.Rag.Runtime
         [Range(1, 5)] public int minimumCriticalFrames = 2;
 
         [Header("Pose thresholds")]
-        [Range(0f, 0.5f)] public float maximumKneeValgusOffset = 0.08f;
+        [Range(0f, 0.5f)] public float maximumKneeValgusOffset = 0.10f;
+        [Range(0f, 1f)] public float minimumKneeObservationRatio = 0.5f;
         [Range(0f, 180f)] public float standingKneeAngle = 160f;
         [Range(0f, 180f)] public float standingExitKneeAngle = 150f;
         [Range(0f, 180f)] public float bottomKneeAngle = 125f;
@@ -45,6 +46,7 @@ namespace Rag.Healthcare.Rag.Runtime
         public float MinimumValidCoreFrameRatio => minimumValidCoreFrameRatio;
         public float MinimumViolationRatio => minimumViolationRatio;
         public float MaximumKneeValgusOffset => maximumKneeValgusOffset;
+        public float MinimumKneeObservationRatio => minimumKneeObservationRatio;
         public float StandingKneeAngle => standingKneeAngle;
         public float BottomKneeAngle => bottomKneeAngle;
         public float MaximumBottomKneeAngle => maximumBottomKneeAngle;

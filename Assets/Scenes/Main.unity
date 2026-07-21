@@ -394,8 +394,8 @@ MonoBehaviour:
     minimumVisibility: 0.45
     landmarkSmoothingAlpha: 0.35
     maximumNormalizedJointJump: 0.08
-    lowConfidenceGraceSeconds: 0.2
-    maximumConsecutiveOutlierFrames: 1
+    lowConfidenceGraceSeconds: 0.35
+    maximumConsecutiveOutlierFrames: 3
     minimumValidCoreFrameRatio: 0.45
     minimumViolationRatio: 0.35
     minimumRuleEvaluationFrames: 6
@@ -403,7 +403,8 @@ MonoBehaviour:
     minimumRepViolationRatio: 0.35
     immediateViolationPersistenceRatio: 0.75
     minimumCriticalFrames: 2
-    maximumKneeValgusOffset: 0.08
+    maximumKneeValgusOffset: 0.1
+    minimumKneeObservationRatio: 0.5
     standingKneeAngle: 160
     standingExitKneeAngle: 150
     bottomKneeAngle: 125

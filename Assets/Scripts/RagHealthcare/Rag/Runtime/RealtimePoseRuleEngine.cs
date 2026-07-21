@@ -61,17 +61,27 @@ namespace Rag.Healthcare.Rag.Runtime
             ExercisePhaseState phaseState,
             RealtimePoseRuleSettings settings)
         {
-            if (stats.KneeAlignmentViolationRatio < settings.minimumViolationRatio)
+            var leftQualifies =
+                stats.LeftKneeObservationRatio >= settings.MinimumKneeObservationRatio &&
+                stats.LeftKneeAlignmentViolationRatio >= settings.MinimumViolationRatio;
+            var rightQualifies =
+                stats.RightKneeObservationRatio >= settings.MinimumKneeObservationRatio &&
+                stats.RightKneeAlignmentViolationRatio >= settings.MinimumViolationRatio;
+
+            if (!leftQualifies && !rightQualifies)
             {
                 return;
             }
 
             var left = feature.HasLeftKneeValgus ? feature.LeftKneeValgusOffset : 0f;
             var right = feature.HasRightKneeValgus ? feature.RightKneeValgusOffset : 0f;
-            var useLeft = left >= right;
+            var useLeft = leftQualifies && (!rightQualifies || left >= right);
             var side = useLeft ? "left" : "right";
             var joint = useLeft ? PoseJointNames.LeftKnee : PoseJointNames.RightKnee;
             var offset = useLeft ? left : right;
+            var persistenceRatio = useLeft
+                ? stats.LeftKneeAlignmentViolationRatio
+                : stats.RightKneeAlignmentViolationRatio;
 
             AddEvent(
                 useLeft ? "squat_left_knee_alignment" : "squat_right_knee_alignment",
@@ -80,7 +90,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 side,
                 FeedbackSeverity.Warning,
                 ConfidenceFromOffset(offset, settings.MaximumKneeValgusOffset),
-                stats.KneeAlignmentViolationRatio,
+                persistenceRatio,
                 feature.TimestampUnixMilliseconds,
                 useLeft
                     ? "왼쪽 무릎이 발끝 방향에서 벗어납니다. 무릎과 발끝을 같은 방향으로 맞춰 주세요."
@@ -152,6 +162,12 @@ namespace Rag.Healthcare.Rag.Runtime
             ExercisePhaseState phaseState,
             RealtimePoseRuleSettings settings)
         {
+            if (stats.LeftKneeObservationRatio < settings.MinimumKneeObservationRatio ||
+                stats.RightKneeObservationRatio < settings.MinimumKneeObservationRatio)
+            {
+                return;
+            }
+
             if (!feature.HasLeftKneeAngle ||
                 !feature.HasRightKneeAngle ||
                 stats.KneeSymmetryViolationRatio < settings.minimumViolationRatio ||

@@ -15,6 +15,10 @@ namespace Rag.Healthcare.Rag.Runtime
         public float AverageRightKneeValgusOffset;
         public float AverageKneeSymmetryDelta;
         public float KneeSymmetryViolationRatio;
+        public float LeftKneeObservationRatio;
+        public float RightKneeObservationRatio;
+        public float LeftKneeAlignmentViolationRatio;
+        public float RightKneeAlignmentViolationRatio;
         public float KneeAlignmentViolationRatio;
         public float TorsoTiltViolationRatio;
         public float CenterBalanceViolationRatio;
@@ -45,7 +49,8 @@ namespace Rag.Healthcare.Rag.Runtime
             var rightValgusCount = 0;
             var symmetryCount = 0;
             var symmetryViolations = 0;
-            var kneeAlignmentViolations = 0;
+            var leftKneeAlignmentViolations = 0;
+            var rightKneeAlignmentViolations = 0;
             var torsoViolations = 0;
             var balanceViolations = 0;
 
@@ -99,7 +104,7 @@ namespace Rag.Healthcare.Rag.Runtime
                     leftValgusCount++;
                     if (frame.LeftKneeValgusOffset > settings.MaximumKneeValgusOffset)
                     {
-                        kneeAlignmentViolations++;
+                        leftKneeAlignmentViolations++;
                     }
                 }
 
@@ -109,7 +114,7 @@ namespace Rag.Healthcare.Rag.Runtime
                     rightValgusCount++;
                     if (frame.RightKneeValgusOffset > settings.MaximumKneeValgusOffset)
                     {
-                        kneeAlignmentViolations++;
+                        rightKneeAlignmentViolations++;
                     }
                 }
 
@@ -129,6 +134,8 @@ namespace Rag.Healthcare.Rag.Runtime
             {
                 stats.ValidCoreFrameRatio = stats.ValidCoreFrameCount / (float)stats.FrameCount;
                 stats.AverageValidityScore /= stats.FrameCount;
+                stats.LeftKneeObservationRatio = leftValgusCount / (float)stats.FrameCount;
+                stats.RightKneeObservationRatio = rightValgusCount / (float)stats.FrameCount;
             }
 
             if (kneeAngleCount > 0)
@@ -153,14 +160,17 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             var valgusObservationCount = leftValgusCount + rightValgusCount;
+            var kneeAlignmentViolations = leftKneeAlignmentViolations + rightKneeAlignmentViolations;
             if (leftValgusCount > 0)
             {
                 stats.AverageLeftKneeValgusOffset /= leftValgusCount;
+                stats.LeftKneeAlignmentViolationRatio = leftKneeAlignmentViolations / (float)leftValgusCount;
             }
 
             if (rightValgusCount > 0)
             {
                 stats.AverageRightKneeValgusOffset /= rightValgusCount;
+                stats.RightKneeAlignmentViolationRatio = rightKneeAlignmentViolations / (float)rightValgusCount;
             }
 
             if (valgusObservationCount > 0)
@@ -190,6 +200,10 @@ namespace Rag.Healthcare.Rag.Runtime
             AverageRightKneeValgusOffset = 0f;
             AverageKneeSymmetryDelta = 0f;
             KneeSymmetryViolationRatio = 0f;
+            LeftKneeObservationRatio = 0f;
+            RightKneeObservationRatio = 0f;
+            LeftKneeAlignmentViolationRatio = 0f;
+            RightKneeAlignmentViolationRatio = 0f;
             KneeAlignmentViolationRatio = 0f;
             TorsoTiltViolationRatio = 0f;
             CenterBalanceViolationRatio = 0f;
