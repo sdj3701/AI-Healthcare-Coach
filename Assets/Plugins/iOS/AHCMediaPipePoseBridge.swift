@@ -90,41 +90,8 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
     private let legacyWaitTimeoutSeconds: TimeInterval = 1.0
     private let capacityBarrierTimeout: DispatchTimeInterval = .milliseconds(500)
 
-    private let landmarkNames = [
-        "nose",
-        "left_eye_inner",
-        "left_eye",
-        "left_eye_outer",
-        "right_eye_inner",
-        "right_eye",
-        "right_eye_outer",
-        "left_ear",
-        "right_ear",
-        "mouth_left",
-        "mouth_right",
-        "left_shoulder",
-        "right_shoulder",
-        "left_elbow",
-        "right_elbow",
-        "left_wrist",
-        "right_wrist",
-        "left_pinky",
-        "right_pinky",
-        "left_index",
-        "right_index",
-        "left_thumb",
-        "right_thumb",
-        "left_hip",
-        "right_hip",
-        "left_knee",
-        "right_knee",
-        "left_ankle",
-        "right_ankle",
-        "left_heel",
-        "right_heel",
-        "left_foot_index",
-        "right_foot_index"
-    ]
+    /// MediaPipe Pose landmarker count. C# maps by index via PoseJointNames.MediaPipe33.
+    private let mediaPipeLandmarkCount = 33
 
     private override init() {
         super.init()
@@ -896,7 +863,8 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
     }
 
     private func normalizedLandmarkPayload(_ landmarks: [NormalizedLandmark], rotationAngle: Int) -> [[String: Any]] {
-        let normalizedLandmarks = landmarks.prefix(landmarkNames.count)
+        // Omit landmark "name": C# BuildFrame maps by index (PoseJointNames.MediaPipe33).
+        let normalizedLandmarks = landmarks.prefix(mediaPipeLandmarkCount)
         var payload: [[String: Any]] = []
         payload.reserveCapacity(normalizedLandmarks.count)
 
@@ -925,7 +893,6 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
 
             payload.append([
                 "id": index,
-                "name": name(for: index),
                 "x": rx,
                 "y": ry,
                 "z": landmark.z,
@@ -935,14 +902,6 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         }
 
         return payload
-    }
-
-    private func name(for index: Int) -> String {
-        guard index >= 0 && index < landmarkNames.count else {
-            return "unknown"
-        }
-
-        return landmarkNames[index]
     }
 
     private func errorJson(

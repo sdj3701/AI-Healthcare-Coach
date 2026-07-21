@@ -55,6 +55,7 @@ namespace Rag.Healthcare.Editor
             VerifyHotPathObjectReuse(failures);
             VerifyPhaseReversalRecognition(failures);
             VerifyDepthUsesMinimumAngle(failures);
+            VerifyAnalysisWindowUsesTimestamps(failures);
             VerifyTemporalRepQuality(failures);
 
             var darkPixels = new Color32[100];
@@ -556,6 +557,37 @@ namespace Rag.Healthcare.Editor
                 "Depth evaluation must retain the minimum knee angle in the analysis window.", failures);
             Check(!hasShallowError,
                 "Standing frames in the analysis window must not make a sufficiently deep squat look shallow.", failures);
+        }
+
+        private static void VerifyAnalysisWindowUsesTimestamps(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var buffer = new PoseWindowBuffer(8);
+            // Old deep frame outside a 1.2s window should not affect minimum knee angle.
+            buffer.Add(ReliableFeature(90f, 1000L));
+            for (var i = 0; i < 4; i++)
+            {
+                buffer.Add(ReliableFeature(170f, 3000L + i * 100L));
+            }
+
+            buffer.Add(ReliableFeature(150f, 3400L));
+            var reusable = new PoseWindowStats();
+            var stats = PoseWindowStats.Calculate(buffer, settings, reusable, 1.2f);
+            Check(ReferenceEquals(reusable, stats),
+                "Timed window statistics must support caller-owned result reuse.", failures);
+            Check(stats.FrameCount == 5,
+                "Pose window stats must exclude frames older than analysisWindowSeconds.", failures);
+            Check(Mathf.Approximately(stats.MinimumKneeAngle, 150f),
+                "Minimum knee angle must ignore samples outside the analysis time window.", failures);
+
+            var shortBuffer = new PoseWindowBuffer(4);
+            shortBuffer.Add(ReliableFeature(100f, 1000L));
+            shortBuffer.Add(ReliableFeature(160f, 4000L));
+            var shortStats = PoseWindowStats.Calculate(shortBuffer, settings, new PoseWindowStats(), 0.5f);
+            Check(shortStats.FrameCount == 2,
+                "Timed window must keep available newest samples when fewer than the minimum sample floor exist.", failures);
+            Check(Mathf.Approximately(shortStats.MinimumKneeAngle, 100f),
+                "Sparse timed windows must expand to the newest minimum samples even if older than the cutoff.", failures);
         }
 
         private static PoseFeatureFrame PhaseFeature(float kneeAngle, float velocity, long timestamp)

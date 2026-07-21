@@ -146,7 +146,11 @@ namespace Rag.Healthcare.Rag.Runtime
                 sessionLogger?.LogPhase(phaseState);
             }
 
-            LatestStats = PoseWindowStats.Calculate(windowBuffer, ruleSettings, reusableStats);
+            LatestStats = PoseWindowStats.Calculate(
+                windowBuffer,
+                ruleSettings,
+                reusableStats,
+                analysisWindowSeconds);
             var candidates = ruleEngine.Evaluate(feature, LatestStats, phaseState, ruleSettings);
             UpdateCorrectRepCount(previousPhase, previousRepCount, phaseState, feature, candidates);
             if (!prioritizer.TrySelect(candidates, duplicateCooldownSeconds, minimumGlobalFeedbackIntervalSeconds, out var selected))
@@ -273,6 +277,8 @@ namespace Rag.Healthcare.Rag.Runtime
 
         private void CreateWindowBuffer()
         {
+            // capacity / expectedPoseFps only size the ring buffer.
+            // PoseWindowStats.Calculate filters by analysisWindowSeconds (timestamp) as the real window.
             var capacity = Mathf.CeilToInt(Mathf.Max(0.5f, analysisWindowSeconds) * Mathf.Max(5, expectedPoseFps));
             windowBuffer = new PoseWindowBuffer(capacity);
         }

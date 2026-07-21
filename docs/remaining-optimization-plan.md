@@ -13,7 +13,7 @@
 
 핵심 요약: **하류(post-processing) 경로는 이미 zero-alloc이지만, 그 바로 앞단인 provider 경계에서 매 프레임 대량 할당이 남아 있고, FPS 설정 불일치가 분석 window의 시간 범위를 왜곡한다.**
 
-이 문서에 적힌 구현은 아직 코드에 반영되지 않았다. 반영은 사용자 승인 후 별도로 진행한다.
+발견 2 방식 1(시간 window)과 발견 1 단계 A(iOS landmark `name` 생략)는 반영됐다. 나머지 항목은 사용자 승인 후 별도로 진행한다.
 
 ---
 
@@ -21,8 +21,8 @@
 
 | # | 항목 | 성격 | 현재 상태 | 우선순위 |
 | --- | --- | --- | --- | --- |
-| 1 | provider 경계 할당(JSON 파싱 + BuildFrame) | GC 압력 | 미착수(문서상 §5.1 인지) | 높음(계측 후) |
-| 2 | FPS 3중 불일치 → 분석 window 시간 왜곡 | 정확도 + 성능 | 미착수 | 높음(저위험) |
+| 1 | provider 경계 할당(JSON 파싱 + BuildFrame) | GC 압력 | 단계 A 완료(iOS JSON `name` 생략). B/C 미착수 | 높음(계측 후 B/C) |
+| 2 | FPS 3중 불일치 → 분석 window 시간 왜곡 | 정확도 + 성능 | 방식 1 완료(`PoseWindowStats` timestamp 필터). 방식 2(단일 FPS 원천) 미착수 | 높음(저위험) |
 | 3 | JSONL 최종 줄 문자열과 Escape 할당 | I/O/GC | 계획만 있음 | 중간 |
 | 4 | rep 카운트 TTS, FindFirstObjectByType, UI 문자열 | 소규모 GC | 미착수 | 낮음 |
 
@@ -59,10 +59,11 @@ iOS 결과 파싱:
 
 ### 2.4 구현 방식 (제안, 3단계)
 
-단계 A — 관절 이름 제거 (가장 저렴, 1순위):
+단계 A — 관절 이름 제거 (가장 저렴, 1순위): ✅ 완료
 
 - Swift/JSON에서 `name`을 보내지 않거나 파싱하지 않고, C#은 `PoseJointNames.MediaPipe33` 고정 index 매핑만 사용한다.
 - `BuildFrame`은 이미 `names[i]`를 static 배열에서 참조하므로, JSON name 파싱만 제거하면 관절 이름 문자열 33개/프레임이 사라진다.
+- 반영: `AHCMediaPipePoseBridge.swift` landmark payload에서 `"name"` 생략.
 
 단계 B — 프레임/관절 풀링:
 
@@ -125,11 +126,12 @@ window 용량 계산:
 
 ### 3.4 구현 방식 (제안)
 
-방식 1 — window를 timestamp 기준으로 계산 (권장):
+방식 1 — window를 timestamp 기준으로 계산 (권장): ✅ 완료
 
 - `PoseWindowBuffer`/`PoseWindowStats`가 프레임 개수가 아니라 각 프레임의 timestamp를 기준으로 `analysisWindowSeconds` 범위만 통계에 포함한다.
 - capacity는 최대 예상 FPS 기준으로 넉넉히 잡되, 통계는 시간창으로 필터링한다.
 - 이렇게 하면 실제 FPS가 8이든 12든 분석 시간 범위가 항상 1.2초로 일정하다.
+- 반영: `PoseWindowStats.Calculate(..., analysisWindowSeconds)` + orchestrator 전달. 최소 샘플 3개 하한 유지.
 
 방식 2 — 단일 설정 원천:
 

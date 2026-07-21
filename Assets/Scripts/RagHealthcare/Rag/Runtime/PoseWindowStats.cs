@@ -4,6 +4,12 @@ namespace Rag.Healthcare.Rag.Runtime
 {
     public sealed class PoseWindowStats
     {
+        /// <summary>
+        /// When the time filter would leave too few frames (e.g. cold start / very low FPS),
+        /// keep at least this many newest samples so rule ratios stay defined.
+        /// </summary>
+        public const int MinimumSampleCount = 3;
+
         public int FrameCount;
         public int ValidCoreFrameCount;
         public float ValidCoreFrameRatio;
@@ -27,13 +33,22 @@ namespace Rag.Healthcare.Rag.Runtime
 
         public static PoseWindowStats Calculate(PoseWindowBuffer buffer, RealtimePoseRuleSettings settings)
         {
-            return Calculate(buffer, settings, new PoseWindowStats());
+            return Calculate(buffer, settings, new PoseWindowStats(), float.PositiveInfinity);
         }
 
         public static PoseWindowStats Calculate(
             PoseWindowBuffer buffer,
             RealtimePoseRuleSettings settings,
             PoseWindowStats stats)
+        {
+            return Calculate(buffer, settings, stats, float.PositiveInfinity);
+        }
+
+        public static PoseWindowStats Calculate(
+            PoseWindowBuffer buffer,
+            RealtimePoseRuleSettings settings,
+            PoseWindowStats stats,
+            float analysisWindowSeconds)
         {
             stats ??= new PoseWindowStats();
             stats.Reset();
@@ -54,7 +69,9 @@ namespace Rag.Healthcare.Rag.Runtime
             var torsoViolations = 0;
             var balanceViolations = 0;
 
-            for (var i = 0; i < buffer.Count; i++)
+            var startIndex = ResolveAnalysisStartIndex(buffer, analysisWindowSeconds);
+
+            for (var i = startIndex; i < buffer.Count; i++)
             {
                 var frame = buffer.GetChronological(i);
                 if (frame == null)
@@ -185,6 +202,61 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             return stats;
+        }
+
+        /// <summary>
+        /// Time filter is authoritative: only frames within
+        /// [latestTimestamp - analysisWindowSeconds, latestTimestamp] are kept.
+        /// Buffer capacity / expectedPoseFps only size the ring; they do not define the window.
+        /// If the time window would leave fewer than <see cref="MinimumSampleCount"/> frames,
+        /// the newest MinimumSampleCount samples are retained.
+        /// </summary>
+        private static int ResolveAnalysisStartIndex(PoseWindowBuffer buffer, float analysisWindowSeconds)
+        {
+            if (buffer.Count <= 0)
+            {
+                return 0;
+            }
+
+            if (float.IsInfinity(analysisWindowSeconds) || analysisWindowSeconds >= float.MaxValue / 4f)
+            {
+                return 0;
+            }
+
+            long latestTimestamp = 0L;
+            for (var i = buffer.Count - 1; i >= 0; i--)
+            {
+                var frame = buffer.GetChronological(i);
+                if (frame == null)
+                {
+                    continue;
+                }
+
+                latestTimestamp = frame.TimestampUnixMilliseconds;
+                break;
+            }
+
+            var windowMs = (long)(Mathf.Max(0f, analysisWindowSeconds) * 1000f);
+            var cutoff = latestTimestamp - windowMs;
+
+            var inWindowStart = buffer.Count;
+            for (var i = 0; i < buffer.Count; i++)
+            {
+                var frame = buffer.GetChronological(i);
+                if (frame != null && frame.TimestampUnixMilliseconds >= cutoff)
+                {
+                    inWindowStart = i;
+                    break;
+                }
+            }
+
+            var inWindowCount = buffer.Count - inWindowStart;
+            if (inWindowCount >= MinimumSampleCount)
+            {
+                return inWindowStart;
+            }
+
+            return Mathf.Max(0, buffer.Count - MinimumSampleCount);
         }
 
         public void Reset()
