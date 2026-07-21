@@ -313,6 +313,10 @@ namespace Rag.Healthcare.Pose.Rendering
         public void RenderFrame(JointTrackingFrame frame)
         {
             EnsureMaterials();
+            if (leftMaterial == null)
+            {
+                return;
+            }
 
             if (frame == null || frame.joints == null)
             {
@@ -537,6 +541,11 @@ namespace Rag.Healthcare.Pose.Rendering
             }
 
             leftMaterial = CreateMaterial("3D Avatar Left", leftColor);
+            if (leftMaterial == null)
+            {
+                return;
+            }
+
             rightMaterial = CreateMaterial("3D Avatar Right", rightColor);
             centerMaterial = CreateMaterial("3D Avatar Center", centerColor);
             boneMaterial = CreateMaterial("3D Avatar Bone", boneColor);
@@ -545,10 +554,17 @@ namespace Rag.Healthcare.Pose.Rendering
 
         private static Material CreateMaterial(string name, Color color)
         {
-            var shader = Shader.Find("Universal Render Pipeline/Lit");
+            var shader = Shader.Find("Universal Render Pipeline/Lit")
+                ?? Shader.Find("Standard")
+                ?? Shader.Find("Unlit/Color")
+                ?? Shader.Find("UI/Default");
+
             if (shader == null)
             {
-                shader = Shader.Find("Standard");
+                Debug.LogWarning(
+                    "[PoseAvatar3DRenderer] No usable shader found (URP Lit / Standard / Unlit/Color / UI/Default). " +
+                    "Skipping avatar material creation to avoid IL2CPP Shader.Find null ArgumentNullException.");
+                return null;
             }
 
             var material = new Material(shader)

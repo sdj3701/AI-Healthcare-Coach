@@ -64,9 +64,19 @@ namespace Rag.Healthcare.Pose.Rendering
 
             LastReplayPath = path;
             LoadedFrameCount = frames.Count;
-            EnsureAvatarPreview();
-            avatarPreview?.RenderFrame(frames[0]);
-            replayCoroutine = StartCoroutine(ReplayRoutine(frames));
+
+            try
+            {
+                EnsureAvatarPreview();
+                avatarPreview?.RenderFrame(frames[0]);
+                replayCoroutine = StartCoroutine(ReplayRoutine(frames));
+            }
+            catch (Exception ex)
+            {
+                LastReplayStatus = "Replay preview failed: " + ex.Message;
+                Debug.LogWarning(
+                    "[PoseJsonReplayPlayer] Failed to start avatar replay preview without aborting stop routine: " + ex);
+            }
         }
 
         public void StopReplay()
