@@ -44,7 +44,7 @@ PBI-109는 "세션 단위 상태 머신"이라는 **신규 관심사**를 추가
 | `FloorReferenceEstimator` | `Pose/Calibration/FloorReferenceEstimator.cs` | 바닥 기준선 추정. | 캘리브레이션 프로필 보강에 선택적으로 활용(변경 없음). |
 | `RealtimeFeedbackOrchestrator` | `Rag/Runtime/RealtimeFeedbackOrchestrator.cs` | 프레임마다 quality 평가 → 분석/피드백. `Start`에서 즉시 tracking 가능. `WorkoutTrackingState` 없음. | **연동 대상**. 분석 파이프라인을 상태 머신 게이트 뒤로 이동(`InWorkout`일 때만 규칙 평가). |
 | `PoseStatusIndicator` | `Pose/Rendering/PoseStatusIndicator.cs` | `Searching/Ready/AdjustCamera/Warning/Pause` 아이콘. | **재사용/확장**. 캘리브레이션 단계별 아이콘·문구 매핑에 활용. |
-| `MobileWorkoutPrototypeView` | `UI/MobileWorkoutPrototypeView.cs` | UI Toolkit 3-step 플로우, `workoutRunning` bool, `SessionTransitionKind`. Ready/Countdown 상태 없음. | **연동 대상**. 세션 스텝에 캘리브레이션 오버레이(실루엣·카운트다운) 추가, START → `ReadyForCalibration` 진입. |
+| `MobileWorkoutPrototypeView` | `UI/MobileWorkoutPrototypeView.cs` | UI Toolkit 플로우(+ `ScreenStep.Calibration`), `workoutRunning`, 전용 캘리브 화면 후 운동. | **연동 대상**. 프로필→캘리브→운동, START 시 캘리브 스킵 가능. |
 
 **핵심 분리 원칙**
 - `PoseTrackingQualityEvaluator`는 "이 프레임을 분석해도 되는가?"(analysis-ready)를 판단한다. 기본 임계(0.45)를 그대로 유지한다.
@@ -192,7 +192,10 @@ public sealed class WorkoutSessionStateMachine
 
 ## 11. UI 오버레이 설계 (`CalibrationOverlayView` + `MobileWorkoutPrototypeView` 연동)
 
-`MobileWorkoutPrototypeView.RenderSessionStep()`의 `BuildPreviewPanel()`(프리뷰 프레임) 위에 캘리브레이션 오버레이 레이어를 추가합니다.
+`MobileWorkoutPrototypeView`에는 프로필 이후 **전용 `ScreenStep.Calibration` 화면**이 있습니다. 흐름은 **프로필 → 전신 캘리브레이션 → 운동 선택/세션**입니다. 이번 실행에서 캘리브가 완료되면 운동 START 시 Ready/Countdown을 건너뛰고 `InWorkout`로 바로 진입합니다. 세션 스텝의 `BuildPreviewPanel()` 위에는 기존과 같이 캘리브레이션 오버레이 레이어가 있습니다.
+
+- [x] 전용 `ScreenStep.Calibration` (프로필 완료 후 / 이번 실행 캘리브 미완료 시)
+- [x] 캘리브 완료 CTA → `ScreenStep.Exercise`, START 시 `BeginCalibratedSession` 스킵 경로
 
 | 상태 | 실루엣 가이드 | 안내 문구(예시) | `PoseStatusIcon` 매핑 |
 | --- | --- | --- | --- |

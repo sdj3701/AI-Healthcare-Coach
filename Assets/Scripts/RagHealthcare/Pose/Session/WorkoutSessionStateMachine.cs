@@ -64,6 +64,17 @@ namespace Rag.Healthcare.Pose.Session
             SetState(WorkoutTrackingState.ReadyForCalibration);
         }
 
+        /// <summary>Dedicated calibration already done; start analysis immediately.</summary>
+        public void BeginCalibratedSession()
+        {
+            sessionActive = true;
+            calibrationConfirmedFired = true;
+            outOfFrameElapsed = 0f;
+            pausedElapsed = 0f;
+            CountdownRemainingSeconds = 0f;
+            SetState(WorkoutTrackingState.InWorkout);
+        }
+
         public void EndSession()
         {
             sessionActive = false;

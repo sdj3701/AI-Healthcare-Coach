@@ -124,11 +124,18 @@ namespace Rag.Healthcare.Rag.Runtime
             }
         }
 
-        public void BeginWorkoutSession()
+        public void BeginWorkoutSession(bool skipCalibration = false)
         {
             ApplyPersonalizedRomFromProfile();
             sessionState.Configure(calibrationSettings);
-            sessionState.BeginSession();
+            if (skipCalibration)
+            {
+                sessionState.BeginCalibratedSession();
+            }
+            else
+            {
+                sessionState.BeginSession();
+            }
         }
 
         public void EndWorkoutSession()

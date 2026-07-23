@@ -45,6 +45,7 @@ namespace Rag.Healthcare.UI
 
         private enum ScreenStep
         {
+            Calibration = 0,
             Exercise = 1,
             Target = 2,
             Session = 3
@@ -150,10 +151,16 @@ namespace Rag.Healthcare.UI
         private CalibrationOverlayView calibrationOverlay;
         private OnboardingStatusManager profileStatus;
         private bool showingProfileOnboarding;
+        private bool hasCompletedCalibrationThisLaunch;
+        private bool calibrationFlowRunning;
+        private bool calibrationSucceededThisFlow;
+        private Label calibrationStatusLabel;
+        private Button calibrationContinueButton;
+        private Coroutine calibrationFlowCoroutine;
         private string performanceBenchStatusText = "Perf bench: idle";
         private bool performanceBenchSubscribed;
 
-        private ScreenStep currentStep = ScreenStep.Exercise;
+        private ScreenStep currentStep = ScreenStep.Calibration;
         private string selectedExerciseId = "squat";
         private string selectedCategory = "하체";
         private int repsPerSet = 15;
@@ -243,6 +250,14 @@ namespace Rag.Healthcare.UI
 
         private void OnDisable()
         {
+            if (calibrationFlowCoroutine != null)
+            {
+                StopCoroutine(calibrationFlowCoroutine);
+                calibrationFlowCoroutine = null;
+            }
+
+            calibrationFlowRunning = false;
+
             if (sessionTransitionCoroutine != null)
             {
                 StopCoroutine(sessionTransitionCoroutine);
@@ -803,6 +818,9 @@ namespace Rag.Healthcare.UI
 
             switch (currentStep)
             {
+                case ScreenStep.Calibration:
+                    RenderCalibrationStep();
+                    break;
                 case ScreenStep.Exercise:
                     RenderExerciseStep();
                     break;
@@ -838,11 +856,70 @@ namespace Rag.Healthcare.UI
                 () =>
                 {
                     showingProfileOnboarding = false;
-                    currentStep = ScreenStep.Exercise;
+                    currentStep = ScreenStep.Calibration;
+                    hasCompletedCalibrationThisLaunch = false;
+                    calibrationSucceededThisFlow = false;
                     RenderCurrentStep();
                 },
                 ResolveRuntimeFont());
             onboarding.Bind(contentRoot);
+        }
+
+        private void RenderCalibrationStep()
+        {
+            AddHeader(
+                "전신 캘리브레이션",
+                "카메라에 전신이 들어오도록 맞춘 뒤 안정화되면 운동을 시작할 수 있어요.");
+
+            contentRoot.Add(BuildPreviewPanel());
+
+            calibrationStatusLabel = Label(
+                "측정 시작을 누르면 전신 인식이 시작됩니다.",
+                12,
+                ColorFromHex(0xCBD5E1),
+                FontStyle.Normal);
+            calibrationStatusLabel.style.marginTop = 10f;
+            calibrationStatusLabel.style.whiteSpace = WhiteSpace.Normal;
+            contentRoot.Add(calibrationStatusLabel);
+
+            contentRoot.Add(Label(
+                "전신이 보이도록 서서 잠시 기다려 주세요. 의료적 진단이 아닌 운동 준비용 측정입니다.",
+                10,
+                ColorFromHex(0x8F9AAF),
+                FontStyle.Normal));
+
+            contentRoot.Add(Spacer(12f));
+            var row = Row("calibration-buttons", 52f, 8f);
+            row.Add(ActionButton(
+                "측정 시작",
+                ColorFromHex(0x14B8A6),
+                Color.black,
+                52f,
+                StartCalibrationFlow));
+            row.Add(ActionButton(
+                "다시 측정",
+                ColorFromHex(0x161B22),
+                Color.white,
+                52f,
+                RestartCalibrationFlow));
+            contentRoot.Add(row);
+
+            contentRoot.Add(Spacer(8f));
+            calibrationContinueButton = ActionButton(
+                "운동 선택으로",
+                ColorFromHex(0x22C55E),
+                ColorFromHex(0x07110C),
+                52f,
+                CompleteCalibrationAndGoExercise);
+            calibrationContinueButton.SetEnabled(false);
+            contentRoot.Add(calibrationContinueButton);
+
+            if (Application.isPlaying && previewMode == PreviewMode.Camera)
+            {
+                cameraSource?.StartCamera();
+            }
+
+            RefreshCalibrationUiState();
         }
 
         private void RenderExerciseStep()
@@ -985,6 +1062,15 @@ namespace Rag.Healthcare.UI
             }));
             row.Add(ActionButton("운동 화면으로", ColorFromHex(0x22C55E), ColorFromHex(0x07110C), 52f, () =>
             {
+                if (!hasCompletedCalibrationThisLaunch)
+                {
+                    previewMode = PreviewMode.None;
+                    replayPlayer?.StopReplay();
+                    currentStep = ScreenStep.Calibration;
+                    RenderCurrentStep();
+                    return;
+                }
+
                 ApplyTargetCountFromFields();
                 previewMode = PreviewMode.Camera;
                 currentStep = ScreenStep.Session;
@@ -1452,11 +1538,13 @@ namespace Rag.Healthcare.UI
                 replayStateLabel.text = BuildReplayStateText();
             }
 
-            if (workoutRunning &&
-                feedbackOrchestrator != null &&
-                calibrationOverlay != null &&
-                feedbackOrchestrator.SessionStateMachine != null &&
-                feedbackOrchestrator.SessionStateMachine.IsSessionActive)
+            var showCalibUi = feedbackOrchestrator != null &&
+                              feedbackOrchestrator.SessionStateMachine != null &&
+                              feedbackOrchestrator.SessionStateMachine.IsSessionActive &&
+                              (workoutRunning ||
+                               calibrationFlowRunning ||
+                               currentStep == ScreenStep.Calibration);
+            if (showCalibUi && calibrationOverlay != null)
             {
                 calibrationOverlay.Update(
                     feedbackOrchestrator.SessionState,
@@ -1468,9 +1556,79 @@ namespace Rag.Healthcare.UI
                 calibrationOverlay.SetVisible(false);
             }
 
+            RefreshCalibrationUiState();
+
             if (showPerformanceBenchControls && performanceBenchStatusLabel != null)
             {
                 RefreshPerformanceBenchStatus();
+            }
+        }
+
+        private void RefreshCalibrationUiState()
+        {
+            if (currentStep != ScreenStep.Calibration)
+            {
+                return;
+            }
+
+            var sessionMachine = feedbackOrchestrator?.SessionStateMachine;
+            var sessionState = feedbackOrchestrator?.SessionState ?? WorkoutTrackingState.ReadyForCalibration;
+
+            // Freeze success and stop analysis so coaching does not start here.
+            if (calibrationFlowRunning &&
+                !calibrationSucceededThisFlow &&
+                sessionMachine != null &&
+                sessionMachine.IsSessionActive &&
+                sessionState == WorkoutTrackingState.InWorkout)
+            {
+                calibrationSucceededThisFlow = true;
+                feedbackOrchestrator?.EndWorkoutSession();
+                calibrationFlowRunning = false;
+            }
+
+            if (calibrationContinueButton != null)
+            {
+                calibrationContinueButton.SetEnabled(calibrationSucceededThisFlow);
+            }
+
+            if (calibrationStatusLabel == null)
+            {
+                return;
+            }
+
+            if (calibrationSucceededThisFlow)
+            {
+                calibrationStatusLabel.text = "전신 감지 완료! 운동 선택으로 이동할 수 있어요.";
+                return;
+            }
+
+            if (!calibrationFlowRunning || sessionMachine == null || !sessionMachine.IsSessionActive)
+            {
+                calibrationStatusLabel.text = "측정 시작을 누르면 전신 인식이 시작됩니다.";
+                return;
+            }
+
+            switch (sessionState)
+            {
+                case WorkoutTrackingState.ReadyForCalibration:
+                    var guidance = feedbackOrchestrator.LatestCalibration?.GuidanceReason;
+                    calibrationStatusLabel.text = string.IsNullOrWhiteSpace(guidance)
+                        ? "전신이 보이도록 맞추고 잠시 유지해 주세요."
+                        : guidance;
+                    break;
+                case WorkoutTrackingState.CountingDown:
+                    var seconds = Mathf.Max(1, Mathf.CeilToInt(feedbackOrchestrator.CountdownRemaining));
+                    calibrationStatusLabel.text = "전신 감지 완료! " + seconds + "초 후 측정이 확정됩니다.";
+                    break;
+                case WorkoutTrackingState.InWorkout:
+                    calibrationStatusLabel.text = "전신 측정이 완료되었어요. 운동 선택으로 이동할 수 있습니다.";
+                    break;
+                case WorkoutTrackingState.PausedOutOfFrame:
+                    calibrationStatusLabel.text = "전신이 화면을 벗어났어요. 다시 프레임 안으로 들어와 주세요.";
+                    break;
+                default:
+                    calibrationStatusLabel.text = "전신 측정을 진행 중입니다.";
+                    break;
             }
         }
 
@@ -1660,6 +1818,11 @@ namespace Rag.Healthcare.UI
                 return;
             }
 
+            if (calibrationFlowCoroutine != null || calibrationFlowRunning)
+            {
+                return;
+            }
+
             if (sessionTransitionCoroutine != null)
             {
                 // STOP, reset, and camera switching are asynchronous on iOS. Keep
@@ -1768,7 +1931,7 @@ namespace Rag.Healthcare.UI
                 coachTts ??= FindFirstObjectByType<CoachTtsController>();
                 coachTts?.BeginSession();
                 feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
-                feedbackOrchestrator?.BeginWorkoutSession();
+                feedbackOrchestrator?.BeginWorkoutSession(skipCalibration: hasCompletedCalibrationThisLaunch);
                 sessionStartedAt = Time.unscaledTime;
                 workoutRunning = true;
                 RefreshPreviewTexture();
@@ -1777,6 +1940,173 @@ namespace Rag.Healthcare.UI
             {
                 CompleteSessionTransition();
             }
+        }
+
+        private void StartCalibrationFlow()
+        {
+            if (!Application.isPlaying || currentStep != ScreenStep.Calibration)
+            {
+                return;
+            }
+
+            if (sessionTransitionCoroutine != null)
+            {
+                return;
+            }
+
+            if (calibrationFlowCoroutine != null)
+            {
+                return;
+            }
+
+            calibrationSucceededThisFlow = false;
+            calibrationFlowCoroutine = StartCoroutine(StartCalibrationRoutine());
+        }
+
+        private void RestartCalibrationFlow()
+        {
+            if (!Application.isPlaying || currentStep != ScreenStep.Calibration)
+            {
+                return;
+            }
+
+            if (sessionTransitionCoroutine != null)
+            {
+                return;
+            }
+
+            if (calibrationFlowCoroutine != null)
+            {
+                StopCoroutine(calibrationFlowCoroutine);
+                calibrationFlowCoroutine = null;
+            }
+
+            StopCalibrationTrackingOnly();
+            calibrationSucceededThisFlow = false;
+            calibrationFlowCoroutine = StartCoroutine(StartCalibrationRoutine());
+        }
+
+        private IEnumerator StartCalibrationRoutine()
+        {
+            yield return null;
+            try
+            {
+                previewMode = PreviewMode.Camera;
+                replayPlayer?.StopReplay();
+                HidePoseOverlay();
+                cameraOperationError = string.Empty;
+                workoutRunning = false;
+                calibrationSucceededThisFlow = false;
+                RefreshPreviewTexture();
+
+                var cameraReady = false;
+                var cameraError = string.Empty;
+                if (cameraSource == null)
+                {
+                    cameraError = "카메라 소스가 없습니다.";
+                }
+                else
+                {
+                    yield return cameraSource.EnsureCameraReady((success, error) =>
+                    {
+                        cameraReady = success;
+                        cameraError = error;
+                    });
+                }
+
+                if (!cameraReady)
+                {
+                    cameraOperationError = string.IsNullOrWhiteSpace(cameraError)
+                        ? "카메라를 준비하지 못했습니다."
+                        : cameraError;
+                    calibrationFlowRunning = false;
+                    RefreshPreviewTexture();
+                    RefreshCalibrationUiState();
+                    yield break;
+                }
+
+                if (trackingController == null)
+                {
+                    cameraOperationError = "관절 추적 컨트롤러가 없습니다.";
+                    calibrationFlowRunning = false;
+                    RefreshCalibrationUiState();
+                    yield break;
+                }
+
+                trackingController.StartTracking();
+                var trackingDeadline = Time.realtimeSinceStartup + Mathf.Max(1f, trackingStartupTimeoutSeconds);
+                while (trackingController.IsStartRequested &&
+                       !trackingController.IsTracking &&
+                       Time.realtimeSinceStartup < trackingDeadline)
+                {
+                    yield return null;
+                }
+
+                if (!trackingController.IsTracking)
+                {
+                    var trackingError = trackingController.LastTrackingError;
+                    trackingController.StopTracking();
+                    cameraOperationError = string.IsNullOrWhiteSpace(trackingError)
+                        ? "관절 추적을 제한 시간 안에 시작하지 못했습니다."
+                        : trackingError;
+                    calibrationFlowRunning = false;
+                    RefreshPreviewTexture();
+                    RefreshCalibrationUiState();
+                    yield break;
+                }
+
+                feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
+                feedbackOrchestrator?.BeginWorkoutSession(skipCalibration: false);
+                calibrationFlowRunning = true;
+                workoutRunning = false;
+                RefreshPreviewTexture();
+                RefreshCalibrationUiState();
+            }
+            finally
+            {
+                calibrationFlowCoroutine = null;
+            }
+        }
+
+        private void StopCalibrationTrackingOnly()
+        {
+            calibrationFlowRunning = false;
+            feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
+            feedbackOrchestrator?.EndWorkoutSession();
+            trackingController?.StopTracking();
+            HidePoseOverlay();
+            calibrationOverlay?.SetVisible(false);
+        }
+
+        private void CompleteCalibrationAndGoExercise()
+        {
+            if (!Application.isPlaying)
+            {
+                return;
+            }
+
+            if (!calibrationSucceededThisFlow && !hasCompletedCalibrationThisLaunch)
+            {
+                return;
+            }
+
+            if (calibrationFlowCoroutine != null)
+            {
+                StopCoroutine(calibrationFlowCoroutine);
+                calibrationFlowCoroutine = null;
+            }
+
+            hasCompletedCalibrationThisLaunch = true;
+            calibrationFlowRunning = false;
+            feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
+            feedbackOrchestrator?.EndWorkoutSession();
+            trackingController?.StopTracking();
+            HidePoseOverlay();
+            calibrationOverlay?.SetVisible(false);
+            previewMode = PreviewMode.None;
+            replayPlayer?.StopReplay();
+            currentStep = ScreenStep.Exercise;
+            RenderCurrentStep();
         }
 
         private void StopWorkoutAndReplay()
@@ -2257,7 +2587,28 @@ namespace Rag.Healthcare.UI
 
         private void UpdateProgress()
         {
-            var step = (int)currentStep;
+            if (currentStep == ScreenStep.Calibration)
+            {
+                if (stepLabel != null)
+                {
+                    stepLabel.text = "CALIBRATION";
+                }
+
+                if (progressPips == null)
+                {
+                    return;
+                }
+
+                for (var i = 0; i < progressPips.Length; i++)
+                {
+                    progressPips[i].style.width = 18f;
+                    progressPips[i].style.backgroundColor = ColorFromHex(0x334155);
+                }
+
+                return;
+            }
+
+            var step = Mathf.Max(1, (int)currentStep);
             if (stepLabel != null)
             {
                 stepLabel.text = "STEP " + step + " / 3";
@@ -2282,6 +2633,8 @@ namespace Rag.Healthcare.UI
             previewImage = null;
             poseOverlay = null;
             calibrationOverlay = null;
+            calibrationStatusLabel = null;
+            calibrationContinueButton = null;
             InvalidatePreviewLayout();
             previewPlaceholder = null;
             timerLabel = null;
@@ -2334,7 +2687,7 @@ namespace Rag.Healthcare.UI
                 return "인식 오류: " + Trim(trackingController.LastTrackingError, 58);
             }
 
-            if (workoutRunning &&
+            if ((workoutRunning || calibrationFlowRunning) &&
                 feedbackOrchestrator != null &&
                 feedbackOrchestrator.SessionStateMachine != null &&
                 feedbackOrchestrator.SessionStateMachine.IsSessionActive)
