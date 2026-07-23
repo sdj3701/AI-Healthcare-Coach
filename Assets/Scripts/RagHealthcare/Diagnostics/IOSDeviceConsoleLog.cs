@@ -12,10 +12,11 @@ namespace Rag.Healthcare.Diagnostics
     [Preserve]
     public static class IOSDeviceConsoleLog
     {
+#if UNITY_IOS && !UNITY_EDITOR
         private static bool forwarderInstalled;
-
         [ThreadStatic]
         private static bool suppressForwarder;
+#endif
 
 #if UNITY_IOS && !UNITY_EDITOR
         [DllImport("__Internal")]
@@ -42,9 +43,13 @@ namespace Rag.Healthcare.Diagnostics
             }
 #endif
 
+#if UNITY_IOS && !UNITY_EDITOR
             suppressForwarder = true;
+#endif
             Debug.Log(message);
+#if UNITY_IOS && !UNITY_EDITOR
             suppressForwarder = false;
+#endif
         }
 
         private static void EnsureForwarderInstalled()

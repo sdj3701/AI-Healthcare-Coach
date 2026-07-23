@@ -89,6 +89,7 @@ namespace Rag.Healthcare.Product
         public EquipmentFlags equipment = EquipmentFlags.Bodyweight;
         public int sessionsPerWeek;
         public SkillLevel skill = SkillLevel.Beginner;
+        public bool onboardingCompleted;
 
         public RomSafetyProfile romSafety = new RomSafetyProfile();
 
@@ -97,6 +98,7 @@ namespace Rag.Healthcare.Product
         public string calibrationCompletedAtUtc;
 
         public bool IsComplete =>
+            onboardingCompleted &&
             heightCm > 0f &&
             weightKg > 0f &&
             ageYears > 0 &&

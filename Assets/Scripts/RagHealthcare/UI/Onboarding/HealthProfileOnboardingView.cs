@@ -374,10 +374,14 @@ namespace Rag.Healthcare.UI
 
         private void CommitAndFinish()
         {
-            manager.SetInjuries(selectedInjuries);
-            manager.SetGoalPlaceEquipment(selectedGoal, selectedPlace, EquipmentFlags.Bodyweight);
-            manager.SetFrequencyAndSkill(sessionsPerWeek, selectedSkill);
-            manager.CommitProfile(new PersonalizedRomEvaluator());
+            manager.CommitWorkoutPreferences(
+                selectedInjuries,
+                selectedGoal,
+                selectedPlace,
+                EquipmentFlags.Bodyweight,
+                sessionsPerWeek,
+                selectedSkill,
+                new PersonalizedRomEvaluator());
             onCompleted?.Invoke();
         }
 

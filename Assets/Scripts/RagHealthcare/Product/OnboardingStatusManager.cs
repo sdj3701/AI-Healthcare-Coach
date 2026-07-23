@@ -55,9 +55,35 @@ namespace Rag.Healthcare.Product
             SaveAndNotify();
         }
 
+        public void CommitWorkoutPreferences(
+            InjuryRegions injuries,
+            WorkoutGoal goal,
+            WorkoutPlace place,
+            EquipmentFlags equipment,
+            int sessionsPerWeek,
+            SkillLevel skill,
+            PersonalizedRomEvaluator evaluator)
+        {
+            EnsureProfile();
+            Profile.injuries = injuries;
+            Profile.goal = goal;
+            Profile.place = place;
+            Profile.equipment = equipment;
+            Profile.sessionsPerWeek = sessionsPerWeek;
+            Profile.skill = skill;
+            Profile.onboardingCompleted = true;
+            if (evaluator != null)
+            {
+                Profile.romSafety = evaluator.Evaluate(Profile);
+            }
+
+            SaveAndNotify();
+        }
+
         public void CommitProfile(PersonalizedRomEvaluator evaluator)
         {
             EnsureProfile();
+            Profile.onboardingCompleted = true;
             if (evaluator != null)
             {
                 Profile.romSafety = evaluator.Evaluate(Profile);
@@ -85,6 +111,7 @@ namespace Rag.Healthcare.Product
         public void ResetProfile()
         {
             PlayerPrefs.DeleteKey(PreferencesKey);
+            PlayerPrefs.Save();
             Profile = CreateDefault();
             Changed?.Invoke(Profile);
         }
@@ -102,6 +129,13 @@ namespace Rag.Healthcare.Product
                     {
                         Profile.romSafety = new RomSafetyProfile();
                     }
+
+                    if (!Profile.onboardingCompleted && HasLegacyCompletedProfile(Profile))
+                    {
+                        Profile.onboardingCompleted = true;
+                        PlayerPrefs.SetString(PreferencesKey, JsonUtility.ToJson(Profile));
+                        PlayerPrefs.Save();
+                    }
                 }
                 catch (Exception exception)
                 {
@@ -113,6 +147,16 @@ namespace Rag.Healthcare.Product
         private static UserProfileData CreateDefault()
         {
             return new UserProfileData();
+        }
+
+        private static bool HasLegacyCompletedProfile(UserProfileData profile)
+        {
+            return profile != null &&
+                   profile.heightCm > 0f &&
+                   profile.weightKg > 0f &&
+                   profile.ageYears > 0 &&
+                   profile.gender != Gender.Unspecified &&
+                   profile.sessionsPerWeek > 0;
         }
 
         private void EnsureProfile()

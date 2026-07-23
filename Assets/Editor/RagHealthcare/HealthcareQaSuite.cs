@@ -9,7 +9,9 @@ using Rag.Healthcare.Performance;
 using Rag.Healthcare.Pose;
 using Rag.Healthcare.Pose.Calibration;
 using Rag.Healthcare.Pose.Providers;
+using Rag.Healthcare.Pose.Session;
 using Rag.Healthcare.Privacy;
+using Rag.Healthcare.Product;
 using Rag.Healthcare.Qa;
 using Rag.Healthcare.Rag.Runtime;
 using Rag.Healthcare.Rag.Rules;
@@ -53,6 +55,9 @@ namespace Rag.Healthcare.Editor
 
             VerifyLandmarkStability(failures);
             VerifyFrontCameraTrackingQuality(failures);
+            VerifyWorkoutSessionLifecycle(failures);
+            VerifyPersonalizedRomSafety(failures);
+            VerifyProfileCompletionGate(failures);
             VerifyHotPathObjectReuse(failures);
             VerifyPhaseReversalRecognition(failures);
             VerifyDepthUsesMinimumAngle(failures);
@@ -345,20 +350,12 @@ namespace Rag.Healthcare.Editor
                       documentRoot?.Q<VisualElement>("phone-home-indicator") == null,
                     "The app UI must not draw a second phone frame inside the physical screen.", failures);
 
-                var stepField = typeof(MobileWorkoutPrototypeView).GetField(
-                    "currentStep",
+                var buildPreviewMethod = typeof(MobileWorkoutPrototypeView).GetMethod(
+                    "BuildPreviewPanel",
                     BindingFlags.Instance | BindingFlags.NonPublic);
-                var renderMethod = typeof(MobileWorkoutPrototypeView).GetMethod(
-                    "RenderCurrentStep",
-                    BindingFlags.Instance | BindingFlags.NonPublic);
-                if (stepField != null && renderMethod != null)
-                {
-                    stepField.SetValue(view, Enum.ToObject(stepField.FieldType, 3));
-                    renderMethod.Invoke(view, null);
-                }
-
-                var preview = documentRoot?.Q<Image>("camera-or-replay-preview");
-                var overlay = documentRoot?.Q<VisualElement>("pose-overlay");
+                var previewPanel = buildPreviewMethod?.Invoke(view, null) as VisualElement;
+                var preview = previewPanel?.Q<Image>("camera-or-replay-preview");
+                var overlay = previewPanel?.Q<VisualElement>("pose-overlay");
                 Check(preview != null && overlay != null,
                     "The session UI must create separate camera preview and pose overlay elements.", failures);
                 Check(preview != null && overlay != null && ReferenceEquals(preview.parent, overlay.parent),
@@ -556,6 +553,117 @@ namespace Rag.Healthcare.Editor
 
             Check(report.State == PoseTrackingQualityState.Unavailable && !report.AllowsPoseAnalysis,
                 "Sustained low-confidence core landmarks must become Unavailable.", failures);
+        }
+
+        private static void VerifyWorkoutSessionLifecycle(ICollection<string> failures)
+        {
+            var settings = new CalibrationSettings
+            {
+                calibrationVisibilityThreshold = 0.85f,
+                calibrationHoldSeconds = 0.2f,
+                countdownSeconds = 0.3f,
+                pauseVisibilityThreshold = 0.6f,
+                outOfFrameGraceSeconds = 0.2f,
+                reReadyDebounceSeconds = 0.2f
+            };
+            var machine = new WorkoutSessionStateMachine(settings);
+            var goodQuality = new PoseTrackingQualityReport
+            {
+                State = PoseTrackingQualityState.Good
+            };
+            var degradedQuality = new PoseTrackingQualityReport
+            {
+                State = PoseTrackingQualityState.Degraded
+            };
+            var calibrationConfirmedCount = 0;
+            machine.CalibrationConfirmed += () => calibrationConfirmedCount++;
+
+            machine.BeginSession();
+            machine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.1f);
+            Check(machine.State == WorkoutTrackingState.ReadyForCalibration,
+                "Calibration must remain ready until the configured hold duration is met.", failures);
+
+            machine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.11f);
+            Check(machine.State == WorkoutTrackingState.CountingDown,
+                "Stable full-body visibility must start the countdown.", failures);
+
+            machine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.15f);
+            machine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.16f);
+            Check(machine.State == WorkoutTrackingState.InWorkout && calibrationConfirmedCount == 1,
+                "Countdown completion must enter the workout and confirm calibration exactly once.", failures);
+
+            machine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.1f);
+            Check(machine.State == WorkoutTrackingState.InWorkout,
+                "A brief tracking degradation must stay inside the out-of-frame grace period.", failures);
+
+            machine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.11f);
+            Check(machine.State == WorkoutTrackingState.PausedOutOfFrame,
+                "Sustained tracking degradation must pause pose analysis.", failures);
+
+            machine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.1f);
+            Check(machine.State == WorkoutTrackingState.InWorkout,
+                "Tracking recovery inside the debounce window must resume the workout.", failures);
+
+            machine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.21f);
+            machine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.21f);
+            Check(machine.State == WorkoutTrackingState.ReadyForCalibration,
+                "A prolonged out-of-frame pause must require full-body calibration again.", failures);
+
+            var rollbackMachine = new WorkoutSessionStateMachine(settings);
+            rollbackMachine.BeginSession();
+            rollbackMachine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.21f);
+            rollbackMachine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.01f);
+            Check(rollbackMachine.State == WorkoutTrackingState.ReadyForCalibration,
+                "Losing full-body visibility during countdown must roll back to calibration.", failures);
+        }
+
+        private static void VerifyPersonalizedRomSafety(ICollection<string> failures)
+        {
+            var evaluator = new PersonalizedRomEvaluator();
+            var profile = new UserProfileData
+            {
+                injuries = InjuryRegions.Knee | InjuryRegions.LowerBack,
+                skill = SkillLevel.Beginner
+            };
+            var safety = evaluator.Evaluate(profile);
+            Check(Mathf.Approximately(safety.minimumBottomKneeAngleDelta, 25f) &&
+                  Mathf.Approximately(safety.maximumBottomKneeAngleDelta, 5f) &&
+                  Mathf.Approximately(safety.maximumTorsoTiltDegreesDelta, -12f) &&
+                  safety.suppressDeeperEncouragement,
+                "Knee/lower-back beginner profile must choose the most conservative ROM deltas.", failures);
+
+            var baseSettings = new RealtimePoseRuleSettings();
+            var originalMinimum = baseSettings.minimumBottomKneeAngle;
+            var originalMaximum = baseSettings.maximumBottomKneeAngle;
+            var originalTorsoTilt = baseSettings.maximumTorsoTiltDegrees;
+            var personalized = evaluator.ApplyDerate(baseSettings, safety);
+            Check(personalized != null &&
+                  Mathf.Approximately(personalized.minimumBottomKneeAngle, originalMinimum + 25f) &&
+                  Mathf.Approximately(personalized.maximumBottomKneeAngle, originalMaximum + 5f) &&
+                  Mathf.Approximately(personalized.maximumTorsoTiltDegrees, originalTorsoTilt - 12f),
+                "ROM safety deltas must be applied to the active workout settings.", failures);
+            Check(Mathf.Approximately(baseSettings.minimumBottomKneeAngle, originalMinimum) &&
+                  Mathf.Approximately(baseSettings.maximumBottomKneeAngle, originalMaximum) &&
+                  Mathf.Approximately(baseSettings.maximumTorsoTiltDegrees, originalTorsoTilt),
+                "Personalized ROM application must not mutate the serialized base settings.", failures);
+        }
+
+        private static void VerifyProfileCompletionGate(ICollection<string> failures)
+        {
+            var profile = new UserProfileData
+            {
+                ageYears = 35,
+                gender = Gender.Other,
+                heightCm = 170f,
+                weightKg = 70f,
+                sessionsPerWeek = 3
+            };
+            Check(!profile.IsComplete,
+                "Body metrics alone must not skip the unfinished workout-preference onboarding step.", failures);
+
+            profile.onboardingCompleted = true;
+            Check(profile.IsComplete,
+                "A fully committed profile with valid body metrics must pass the onboarding gate.", failures);
         }
 
         private static void VerifyHotPathObjectReuse(ICollection<string> failures)

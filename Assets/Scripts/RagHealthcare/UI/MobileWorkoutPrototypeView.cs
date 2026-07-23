@@ -151,7 +151,6 @@ namespace Rag.Healthcare.UI
         private TextField setsField;
         private CalibrationOverlayView calibrationOverlay;
         private OnboardingStatusManager profileStatus;
-        private bool showingProfileOnboarding;
         private bool hasCompletedCalibrationThisLaunch;
         private bool calibrationFlowRunning;
         private bool calibrationSucceededThisFlow;
@@ -833,23 +832,18 @@ namespace Rag.Healthcare.UI
             switch (currentStep)
             {
                 case ScreenStep.Profile:
-                    showingProfileOnboarding = true;
                     RenderProfileOnboardingStep();
                     break;
                 case ScreenStep.Calibration:
-                    showingProfileOnboarding = false;
                     RenderCalibrationStep();
                     break;
                 case ScreenStep.Exercise:
-                    showingProfileOnboarding = false;
                     RenderExerciseStep();
                     break;
                 case ScreenStep.Target:
-                    showingProfileOnboarding = false;
                     RenderTargetStep();
                     break;
                 case ScreenStep.Session:
-                    showingProfileOnboarding = false;
                     RenderSessionStep();
                     if (Application.isPlaying && previewMode == PreviewMode.Camera)
                     {
@@ -883,7 +877,6 @@ namespace Rag.Healthcare.UI
                 profileStatus,
                 () =>
                 {
-                    showingProfileOnboarding = false;
                     forceShowProfileEditor = false;
                     SyncCalibrationLaunchFlagFromProfile();
                     currentStep = HasCalibrationReady()

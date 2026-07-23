@@ -11,6 +11,8 @@ namespace Rag.Healthcare.Rag.Runtime
 {
     public sealed class RealtimeFeedbackOrchestrator : MonoBehaviour
     {
+        private const float MaximumPoseDeltaSeconds = 0.25f;
+
         [Header("Scene References")]
         [SerializeField] private JointTrackingController trackingController;
         [SerializeField] private PoseFeedbackJsonReceiver feedbackReceiver;
@@ -49,6 +51,8 @@ namespace Rag.Healthcare.Rag.Runtime
         private bool currentRepInProgress;
         private bool currentRepHasViolation;
         private bool requiresStandingRearm = true;
+        private bool poseAnalysisSuspended;
+        private long lastSessionFrameTimestampMilliseconds;
         private RealtimePoseRuleSettings baseRuleSettings;
         private RealtimePoseRuleSettings workingRuleSettings;
 
@@ -127,6 +131,8 @@ namespace Rag.Healthcare.Rag.Runtime
         public void BeginWorkoutSession(bool skipCalibration = false)
         {
             ApplyPersonalizedRomFromProfile();
+            lastSessionFrameTimestampMilliseconds = 0L;
+            poseAnalysisSuspended = false;
             sessionState.Configure(calibrationSettings);
             if (skipCalibration)
             {
@@ -141,6 +147,8 @@ namespace Rag.Healthcare.Rag.Runtime
         public void EndWorkoutSession()
         {
             sessionState.EndSession();
+            lastSessionFrameTimestampMilliseconds = 0L;
+            poseAnalysisSuspended = false;
             RestoreBaseRuleSettings();
         }
 
@@ -167,6 +175,8 @@ namespace Rag.Healthcare.Rag.Runtime
             currentRepHasViolation = false;
             LastCompletedRepWasCorrect = false;
             requiresStandingRearm = true;
+            poseAnalysisSuspended = false;
+            lastSessionFrameTimestampMilliseconds = 0L;
         }
 
         public void SetCorrectRepTarget(int targetCount)
@@ -184,7 +194,10 @@ namespace Rag.Healthcare.Rag.Runtime
 
             var settings = ActiveRuleSettings;
             LatestTrackingQuality = trackingQualityEvaluator.Evaluate(frame, settings);
-            sessionState.Tick(frame, LatestTrackingQuality, Time.deltaTime);
+            sessionState.Tick(
+                frame,
+                LatestTrackingQuality,
+                ResolvePoseDeltaSeconds(frame.timestampUnixMilliseconds));
 
             if (sessionState.IsSessionActive && !sessionState.AllowsPoseAnalysis)
             {
@@ -219,6 +232,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 feature = featureExtractor.Extract(view, exercise, settings.minimumVisibility);
             }
 
+            poseAnalysisSuspended = false;
             windowBuffer.Add(feature);
 
             var previousPhase = phaseDetector.State.CurrentPhase;
@@ -255,6 +269,12 @@ namespace Rag.Healthcare.Rag.Runtime
 
         private void SuspendPoseAnalysis(long timestampUnixMilliseconds)
         {
+            if (poseAnalysisSuspended)
+            {
+                return;
+            }
+
+            poseAnalysisSuspended = true;
             var previousPhase = phaseDetector.State.CurrentPhase;
             phaseDetector.Suspend(timestampUnixMilliseconds);
             if (previousPhase != phaseDetector.State.CurrentPhase)
@@ -334,7 +354,7 @@ namespace Rag.Healthcare.Rag.Runtime
         private void ApplyPersonalizedRomFromProfile()
         {
             profileStatus ??= FindFirstObjectByType<OnboardingStatusManager>();
-            var baseCopy = CloneRuleSettings(baseRuleSettings ?? ruleSettings);
+            var sourceSettings = baseRuleSettings ?? ruleSettings;
             if (profileStatus != null &&
                 profileStatus.HasCompletedProfile &&
                 profileStatus.Profile != null)
@@ -345,11 +365,36 @@ namespace Rag.Healthcare.Rag.Runtime
                     safety = romEvaluator.Evaluate(profileStatus.Profile);
                 }
 
-                workingRuleSettings = romEvaluator.ApplyDerate(baseCopy, safety);
+                workingRuleSettings = romEvaluator.ApplyDerate(sourceSettings, safety);
                 return;
             }
 
-            workingRuleSettings = baseCopy;
+            workingRuleSettings = CloneRuleSettings(sourceSettings);
+        }
+
+        private float ResolvePoseDeltaSeconds(long timestampUnixMilliseconds)
+        {
+            var fallback = Mathf.Clamp(Time.unscaledDeltaTime, 0f, MaximumPoseDeltaSeconds);
+            if (timestampUnixMilliseconds <= 0L)
+            {
+                lastSessionFrameTimestampMilliseconds = 0L;
+                return fallback;
+            }
+
+            if (lastSessionFrameTimestampMilliseconds <= 0L ||
+                timestampUnixMilliseconds <= lastSessionFrameTimestampMilliseconds)
+            {
+                lastSessionFrameTimestampMilliseconds = timestampUnixMilliseconds;
+                return fallback;
+            }
+
+            var elapsedMilliseconds =
+                timestampUnixMilliseconds - lastSessionFrameTimestampMilliseconds;
+            lastSessionFrameTimestampMilliseconds = timestampUnixMilliseconds;
+            return Mathf.Clamp(
+                elapsedMilliseconds / 1000f,
+                0f,
+                MaximumPoseDeltaSeconds);
         }
 
         private void RestoreBaseRuleSettings()
