@@ -1,5 +1,7 @@
 using System.Collections.Generic;
 using Rag.Healthcare.Pose;
+using Rag.Healthcare.Pose.Session;
+using Rag.Healthcare.Product;
 using Rag.Healthcare.Rag.Composition;
 using Rag.Healthcare.Rag.Knowledge;
 using Rag.Healthcare.Rag.Logging;
@@ -14,6 +16,7 @@ namespace Rag.Healthcare.Rag.Runtime
         [SerializeField] private PoseFeedbackJsonReceiver feedbackReceiver;
         [SerializeField] private RagRetriever ragRetriever;
         [SerializeField] private SessionJsonlLogger sessionLogger;
+        [SerializeField] private OnboardingStatusManager profileStatus;
 
         [Header("Runtime")]
         [SerializeField] private bool startTrackingOnStart = true;
@@ -27,6 +30,7 @@ namespace Rag.Healthcare.Rag.Runtime
         [SerializeField] private string correctRepFeedbackFormat = "정확합니다. {0}개.";
         [SerializeField, Min(0)] private int targetCorrectRepCount;
         [SerializeField] private RealtimePoseRuleSettings ruleSettings = new RealtimePoseRuleSettings();
+        [SerializeField] private CalibrationSettings calibrationSettings = new CalibrationSettings();
 
         private readonly PoseFrameNormalizer normalizer = new PoseFrameNormalizer();
         private readonly PoseTrackingQualityEvaluator trackingQualityEvaluator = new PoseTrackingQualityEvaluator();
@@ -38,11 +42,15 @@ namespace Rag.Healthcare.Rag.Runtime
         private readonly FeedbackComposer composer = new FeedbackComposer();
         private readonly RepQualityAccumulator repQuality = new RepQualityAccumulator();
         private readonly PoseWindowStats reusableStats = new PoseWindowStats();
+        private readonly WorkoutSessionStateMachine sessionState = new WorkoutSessionStateMachine();
+        private readonly PersonalizedRomEvaluator romEvaluator = new PersonalizedRomEvaluator();
 
         private PoseWindowBuffer windowBuffer;
         private bool currentRepInProgress;
         private bool currentRepHasViolation;
         private bool requiresStandingRearm = true;
+        private RealtimePoseRuleSettings baseRuleSettings;
+        private RealtimePoseRuleSettings workingRuleSettings;
 
         public ExercisePhaseState PhaseState => phaseDetector.State;
         public PoseWindowStats LatestStats { get; private set; }
@@ -55,12 +63,20 @@ namespace Rag.Healthcare.Rag.Runtime
         public bool LastCompletedRepWasCorrect { get; private set; }
         public bool IsWaitingForStandingRearm => requiresStandingRearm;
 
+        public WorkoutTrackingState SessionState => sessionState.State;
+        public float CountdownRemaining => sessionState.CountdownRemainingSeconds;
+        public FullBodyCalibrationReport LatestCalibration => sessionState.LatestCalibration;
+        public WorkoutSessionStateMachine SessionStateMachine => sessionState;
+
+        private RealtimePoseRuleSettings ActiveRuleSettings => workingRuleSettings ?? ruleSettings;
+
         private void Awake()
         {
             trackingController ??= FindFirstObjectByType<JointTrackingController>();
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
             ragRetriever ??= FindFirstObjectByType<RagRetriever>();
             sessionLogger ??= FindFirstObjectByType<SessionJsonlLogger>();
+            profileStatus ??= FindFirstObjectByType<OnboardingStatusManager>();
 
             if (ragRetriever == null)
             {
@@ -79,6 +95,8 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 #endif
 
+            baseRuleSettings = CloneRuleSettings(ruleSettings);
+            workingRuleSettings = null;
             CreateWindowBuffer();
         }
 
@@ -106,8 +124,27 @@ namespace Rag.Healthcare.Rag.Runtime
             }
         }
 
+        public void BeginWorkoutSession()
+        {
+            ApplyPersonalizedRomFromProfile();
+            sessionState.Configure(calibrationSettings);
+            sessionState.BeginSession();
+        }
+
+        public void EndWorkoutSession()
+        {
+            sessionState.EndSession();
+            RestoreBaseRuleSettings();
+        }
+
         public void ResetRuntimeState()
         {
+            if (sessionState.IsSessionActive)
+            {
+                sessionState.EndSession();
+            }
+
+            RestoreBaseRuleSettings();
             windowBuffer?.Clear();
             trackingQualityEvaluator.Reset();
             landmarkStabilizer.Reset();
@@ -138,8 +175,17 @@ namespace Rag.Healthcare.Rag.Runtime
                 return;
             }
 
-            LatestTrackingQuality = trackingQualityEvaluator.Evaluate(frame, ruleSettings);
-            var stabilizedFrame = landmarkStabilizer.Stabilize(frame, ruleSettings);
+            var settings = ActiveRuleSettings;
+            LatestTrackingQuality = trackingQualityEvaluator.Evaluate(frame, settings);
+            sessionState.Tick(frame, LatestTrackingQuality, Time.deltaTime);
+
+            if (sessionState.IsSessionActive && !sessionState.AllowsPoseAnalysis)
+            {
+                SuspendPoseAnalysis(frame.timestampUnixMilliseconds);
+                return;
+            }
+
+            var stabilizedFrame = landmarkStabilizer.Stabilize(frame, settings);
             sessionLogger?.LogFrame(stabilizedFrame);
 
             if (LatestTrackingQuality == null || !LatestTrackingQuality.AllowsPoseAnalysis)
@@ -148,13 +194,13 @@ namespace Rag.Healthcare.Rag.Runtime
                 return;
             }
 
-            var view = normalizer.Normalize(stabilizedFrame, ruleSettings.minimumVisibility);
-            var feature = featureExtractor.Extract(view, exercise, ruleSettings.minimumVisibility);
+            var view = normalizer.Normalize(stabilizedFrame, settings.minimumVisibility);
+            var feature = featureExtractor.Extract(view, exercise, settings.minimumVisibility);
             if (requiresStandingRearm)
             {
                 // Do not resume halfway through a squat after an occlusion. A partial
                 // bottom/ascent sequence does not contain enough evidence for a rep.
-                if (!feature.HasReliableSquatCore || feature.AverageKneeAngle < ruleSettings.StandingKneeAngle)
+                if (!feature.HasReliableSquatCore || feature.AverageKneeAngle < settings.StandingKneeAngle)
                 {
                     phaseDetector.Suspend(frame.timestampUnixMilliseconds);
                     LatestStats = null;
@@ -163,14 +209,14 @@ namespace Rag.Healthcare.Rag.Runtime
 
                 requiresStandingRearm = false;
                 featureExtractor.Reset();
-                feature = featureExtractor.Extract(view, exercise, ruleSettings.minimumVisibility);
+                feature = featureExtractor.Extract(view, exercise, settings.minimumVisibility);
             }
 
             windowBuffer.Add(feature);
 
             var previousPhase = phaseDetector.State.CurrentPhase;
             var previousRepCount = phaseDetector.State.RepCount;
-            var phaseState = phaseDetector.Update(feature, ruleSettings);
+            var phaseState = phaseDetector.Update(feature, settings);
             if (previousPhase != phaseState.CurrentPhase)
             {
                 sessionLogger?.LogPhase(phaseState);
@@ -178,10 +224,10 @@ namespace Rag.Healthcare.Rag.Runtime
 
             LatestStats = PoseWindowStats.Calculate(
                 windowBuffer,
-                ruleSettings,
+                settings,
                 reusableStats,
                 analysisWindowSeconds);
-            var candidates = ruleEngine.Evaluate(feature, LatestStats, phaseState, ruleSettings);
+            var candidates = ruleEngine.Evaluate(feature, LatestStats, phaseState, settings);
             UpdateCorrectRepCount(previousPhase, previousRepCount, phaseState, feature, candidates);
             if (!prioritizer.TrySelect(candidates, duplicateCooldownSeconds, minimumGlobalFeedbackIntervalSeconds, out var selected))
             {
@@ -227,6 +273,7 @@ namespace Rag.Healthcare.Rag.Runtime
             PoseFeatureFrame feature,
             IReadOnlyList<FeedbackEvent> candidates)
         {
+            var settings = ActiveRuleSettings;
             if (phaseState == null)
             {
                 return;
@@ -242,14 +289,14 @@ namespace Rag.Healthcare.Rag.Runtime
 
             if (currentRepInProgress && IsRepActive(phaseState.CurrentPhase))
             {
-                repQuality.Observe(feature != null && feature.HasReliableSquatCore, candidates, ruleSettings);
-                currentRepHasViolation = repQuality.HasConfirmedViolation(ruleSettings);
+                repQuality.Observe(feature != null && feature.HasReliableSquatCore, candidates, settings);
+                currentRepHasViolation = repQuality.HasConfirmedViolation(settings);
             }
 
             if (phaseState.RepCount > previousRepCount)
             {
-                var hasEnoughEvidence = repQuality.HasEnoughEvidence(ruleSettings);
-                LastCompletedRepWasCorrect = repQuality.IsCorrect(ruleSettings);
+                var hasEnoughEvidence = repQuality.HasEnoughEvidence(settings);
+                LastCompletedRepWasCorrect = repQuality.IsCorrect(settings);
                 if (LastCompletedRepWasCorrect && CanIncrementCorrectRepCount())
                 {
                     CorrectRepCount++;
@@ -275,6 +322,59 @@ namespace Rag.Healthcare.Rag.Runtime
                 LastCompletedRepWasCorrect = false;
                 repQuality.Reset();
             }
+        }
+
+        private void ApplyPersonalizedRomFromProfile()
+        {
+            profileStatus ??= FindFirstObjectByType<OnboardingStatusManager>();
+            var baseCopy = CloneRuleSettings(baseRuleSettings ?? ruleSettings);
+            if (profileStatus != null &&
+                profileStatus.HasCompletedProfile &&
+                profileStatus.Profile != null)
+            {
+                var safety = profileStatus.Profile.romSafety;
+                if (safety == null || IsRomSafetyEmpty(safety))
+                {
+                    safety = romEvaluator.Evaluate(profileStatus.Profile);
+                }
+
+                workingRuleSettings = romEvaluator.ApplyDerate(baseCopy, safety);
+                return;
+            }
+
+            workingRuleSettings = baseCopy;
+        }
+
+        private void RestoreBaseRuleSettings()
+        {
+            workingRuleSettings = null;
+        }
+
+        private static bool IsRomSafetyEmpty(RomSafetyProfile safety)
+        {
+            if (safety == null)
+            {
+                return true;
+            }
+
+            return Mathf.Approximately(safety.bottomKneeAngleDelta, 0f) &&
+                   Mathf.Approximately(safety.minimumBottomKneeAngleDelta, 0f) &&
+                   Mathf.Approximately(safety.maximumBottomKneeAngleDelta, 0f) &&
+                   Mathf.Approximately(safety.maximumTorsoTiltDegreesDelta, 0f) &&
+                   !safety.suppressDeeperEncouragement &&
+                   string.IsNullOrWhiteSpace(safety.derateReason);
+        }
+
+        private static RealtimePoseRuleSettings CloneRuleSettings(RealtimePoseRuleSettings source)
+        {
+            if (source == null)
+            {
+                return new RealtimePoseRuleSettings();
+            }
+
+            var copy = new RealtimePoseRuleSettings();
+            JsonUtility.FromJsonOverwrite(JsonUtility.ToJson(source), copy);
+            return copy;
         }
 
         private bool CanIncrementCorrectRepCount()

@@ -11,20 +11,20 @@
 * 수집된 데이터를 바탕으로 개인별 맞춤형 관절 가동 범위(ROM), 스쿼트 뎁스 안전 보정 및 운동 추천 파라미터를 도출하여 데이터베이스 및 RAG 시스템과 연동하는 기반을 제공합니다.
 
 ## 2. 주요 작업 단계 (대표 작업 리스트)
-- [ ] **Step 1: 온보딩 사용자 프로필 데이터 모델 (`UserProfileData.cs`) 설계**
+- [x] **Step 1: 온보딩 사용자 프로필 데이터 모델 (`UserProfileData.cs`) 설계**
   - 신체 정보: 나이, 성별, 키, 몸무게, (TODO: InBody / Apple Health / Google Fit 연동 인터페이스 훅)
   - 운동 이력 정보: 부상 부위/이력, 운동 목적, 운동 장소/기구, 주당 운동 횟수, 운동 숙련도
   - 맞춤 파라미터: 관절 가동 범위 (ROM Thresholds), 권장 뎁스, 초기 모니터링 강도
-- [ ] **Step 2: 신규 사용자 판별 및 온보딩 플로우 구현**
+- [x] **Step 2: 신규 사용자 판별 및 온보딩 플로우 구현**
   - 앱 최초 진입 시 온보딩 완료 여부 검사 (`OnboardingStatusManager`)
   - 신규 사용자일 경우 온보딩 수집 UI 뷰(OnboardingProfileView)로 단계별 전환
-- [ ] **Step 3: 온보딩 UI 스텝 작성 (Step 1: 신체 기본정보 / Step 2: 운동 이력 및 부상)**
+- [x] **Step 3: 온보딩 UI 스텝 작성 (Step 1: 신체 기본정보 / Step 2: 운동 이력 및 부상)**
   - UI Toolkit / Canvas 기반 스텝별 입력 및 선택 폼 작성
   - 부상 부위 선택 시 관절 가동 범위(ROM) 안전 보정 알고리즘 자동 매핑
-- [ ] **Step 4: 로컬 DB / JSON 저장 및 RAG 피드백 엔진 연동**
+- [x] **Step 4: 로컬 DB / JSON 저장 및 RAG 피드백 엔진 연동**
   - 수집 데이터를 Encrypted Local DB / JSON 저장
   - `RealtimePoseRuleSettings` 및 RAG 컨텍스트 프롬프트에 사용자 프로필 정보 바인딩
-- [ ] **Step 5: Linear PBI 이슈 등록 및 동기화**
+- [x] **Step 5: Linear PBI 이슈 등록 및 동기화**
   - Linear GraphQL API를 통해 PBI-110 생성 및 계획 연동
 
 ## 3. 예상 예외 사항 및 제약 조건과 코드 구현이유

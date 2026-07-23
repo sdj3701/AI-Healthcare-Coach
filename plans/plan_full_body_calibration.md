@@ -11,18 +11,18 @@
 * 운동 도중 전신 이탈(Out-of-Frame) 시 자동 일시정지 및 가이드 재진입 예외 처리를 포함하여 트래킹 안정성과 자세 분석 정확도를 극대화합니다.
 
 ## 2. 주요 작업 단계 (대표 작업 리스트)
-- [ ] **Step 1: Workout Tracking State Machine 설계 및 Enum 구축**
+- [x] **Step 1: Workout Tracking State Machine 설계 및 Enum 구축**
   - `RealtimeFeedbackOrchestrator.cs` 또는 상태 관리자에 `WorkoutTrackingState` Enum 정의 (`ReadyForCalibration`, `CountingDown`, `InWorkout`, `PausedOutOfFrame`)
   - 상태별 트래킹 플로우 제어 로직 구현
-- [ ] **Step 2: 전신 감지 캘리브레이션(Calibration) 검증 로직 개발**
+- [x] **Step 2: 전신 감지 캘리브레이션(Calibration) 검증 로직 개발**
   - MediaPipe 33개 관절 랜드마크의 `Visibility` / `Presence Score` 조건 검증 (주요 관절: 머리, 어깨, 골반, 무릎, 발목 score > 0.85f)
   - 전신 충족 조건이 1.5초 이상 안정적으로 유지 시 `CountingDown` 상태로 전환
-- [ ] **Step 3: 실루엣 가이드 및 캘리브레이션 UI 오버레이 연동**
+- [x] **Step 3: 실루엣 가이드 및 캘리브레이션 UI 오버레이 연동**
   - 모바일 프리뷰 UI 상에 전신 영역 가이드 실루엣 표시
   - 전신 감지 상태 알림 (예: "카메라 뒤로 물러서주세요" ➔ "전신 감지 완료! 3초 후 시작합니다")
-- [ ] **Step 4: Out-of-Frame 예외 처리 및 자동 일시정지 로직**
+- [x] **Step 4: Out-of-Frame 예외 처리 및 자동 일시정지 로직**
   - 운동 중 관절 가시성(Visibility) 저하 시 `PausedOutOfFrame` 상태로 전환하여 오작동 방지
-- [ ] **Step 5: Linear PBI 등록 및 동기화**
+- [x] **Step 5: Linear PBI 등록 및 동기화**
   - Linear GraphQL API를 통해 PBI 이슈 생성 및 계획서 연동
 
 ## 3. 예상 예외 사항 및 제약 조건과 코드 구현이유

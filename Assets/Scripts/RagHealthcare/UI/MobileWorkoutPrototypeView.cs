@@ -5,6 +5,8 @@ using Rag.Healthcare.Camera;
 using Rag.Healthcare.Performance;
 using Rag.Healthcare.Pose;
 using Rag.Healthcare.Pose.Rendering;
+using Rag.Healthcare.Pose.Session;
+using Rag.Healthcare.Product;
 using Rag.Healthcare.Rag.Runtime;
 using Rag.Healthcare.Tts;
 using UnityEngine;
@@ -145,6 +147,9 @@ namespace Rag.Healthcare.UI
         private Label performanceBenchStatusLabel;
         private TextField repsField;
         private TextField setsField;
+        private CalibrationOverlayView calibrationOverlay;
+        private OnboardingStatusManager profileStatus;
+        private bool showingProfileOnboarding;
         private string performanceBenchStatusText = "Perf bench: idle";
         private bool performanceBenchSubscribed;
 
@@ -382,6 +387,12 @@ namespace Rag.Healthcare.UI
             coachTts ??= FindFirstObjectByType<CoachTtsController>();
             replayPlayer ??= FindFirstObjectByType<PoseJsonReplayPlayer>();
             performanceProfiler ??= FindFirstObjectByType<DevicePerformanceProfiler>();
+            profileStatus ??= FindFirstObjectByType<OnboardingStatusManager>();
+
+            if (Application.isPlaying && profileStatus == null)
+            {
+                profileStatus = gameObject.AddComponent<OnboardingStatusManager>();
+            }
 
             if (Application.isPlaying && replayPlayer == null)
             {
@@ -772,6 +783,24 @@ namespace Rag.Healthcare.UI
             ResetStepReferences();
             UpdateProgress();
 
+            if (Application.isPlaying &&
+                profileStatus != null &&
+                !profileStatus.HasCompletedProfile)
+            {
+                showingProfileOnboarding = true;
+                RenderProfileOnboardingStep();
+                RefreshDynamicText();
+                RefreshPreviewTexture();
+                if (contentScroll != null)
+                {
+                    contentScroll.scrollOffset = Vector2.zero;
+                }
+
+                return;
+            }
+
+            showingProfileOnboarding = false;
+
             switch (currentStep)
             {
                 case ScreenStep.Exercise:
@@ -795,6 +824,25 @@ namespace Rag.Healthcare.UI
             {
                 contentScroll.scrollOffset = Vector2.zero;
             }
+        }
+
+        private void RenderProfileOnboardingStep()
+        {
+            if (stepLabel != null)
+            {
+                stepLabel.text = "PROFILE";
+            }
+
+            var onboarding = new HealthProfileOnboardingView(
+                profileStatus,
+                () =>
+                {
+                    showingProfileOnboarding = false;
+                    currentStep = ScreenStep.Exercise;
+                    RenderCurrentStep();
+                },
+                ResolveRuntimeFont());
+            onboarding.Bind(contentRoot);
         }
 
         private void RenderExerciseStep()
@@ -1185,6 +1233,10 @@ namespace Rag.Healthcare.UI
             previewPlaceholder.Add(replayStateLabel);
             frame.Add(previewPlaceholder);
 
+            calibrationOverlay = new CalibrationOverlayView();
+            calibrationOverlay.Bind(frame);
+            calibrationOverlay.SetVisible(false);
+
             var tag = Label("AI SKELETON DETECTING", 10, ColorFromHex(0x34D399), FontStyle.Bold);
             tag.style.position = Position.Absolute;
             tag.style.left = 12f;
@@ -1398,6 +1450,22 @@ namespace Rag.Healthcare.UI
             if (replayStateLabel != null)
             {
                 replayStateLabel.text = BuildReplayStateText();
+            }
+
+            if (workoutRunning &&
+                feedbackOrchestrator != null &&
+                calibrationOverlay != null &&
+                feedbackOrchestrator.SessionStateMachine != null &&
+                feedbackOrchestrator.SessionStateMachine.IsSessionActive)
+            {
+                calibrationOverlay.Update(
+                    feedbackOrchestrator.SessionState,
+                    feedbackOrchestrator.LatestCalibration,
+                    feedbackOrchestrator.CountdownRemaining);
+            }
+            else if (calibrationOverlay != null)
+            {
+                calibrationOverlay.SetVisible(false);
             }
 
             if (showPerformanceBenchControls && performanceBenchStatusLabel != null)
@@ -1699,6 +1767,8 @@ namespace Rag.Healthcare.UI
 
                 coachTts ??= FindFirstObjectByType<CoachTtsController>();
                 coachTts?.BeginSession();
+                feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
+                feedbackOrchestrator?.BeginWorkoutSession();
                 sessionStartedAt = Time.unscaledTime;
                 workoutRunning = true;
                 RefreshPreviewTexture();
@@ -1786,10 +1856,13 @@ namespace Rag.Healthcare.UI
             }
 
             workoutRunning = false;
+            feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
+            feedbackOrchestrator?.EndWorkoutSession();
             coachTts ??= FindFirstObjectByType<CoachTtsController>();
             coachTts?.EndSession();
             trackingController?.StopTracking();
             HidePoseOverlay();
+            calibrationOverlay?.SetVisible(false);
         }
 
         private void SwitchCamera()
@@ -2208,6 +2281,7 @@ namespace Rag.Healthcare.UI
             previewFrame = null;
             previewImage = null;
             poseOverlay = null;
+            calibrationOverlay = null;
             InvalidatePreviewLayout();
             previewPlaceholder = null;
             timerLabel = null;
@@ -2258,6 +2332,35 @@ namespace Rag.Healthcare.UI
             if (!string.IsNullOrWhiteSpace(trackingController?.LastTrackingError))
             {
                 return "인식 오류: " + Trim(trackingController.LastTrackingError, 58);
+            }
+
+            if (workoutRunning &&
+                feedbackOrchestrator != null &&
+                feedbackOrchestrator.SessionStateMachine != null &&
+                feedbackOrchestrator.SessionStateMachine.IsSessionActive)
+            {
+                var sessionState = feedbackOrchestrator.SessionState;
+                if (sessionState == WorkoutTrackingState.CountingDown)
+                {
+                    var seconds = Mathf.Max(1, Mathf.CeilToInt(feedbackOrchestrator.CountdownRemaining));
+                    return "전신 감지 완료! " + seconds + "초 후 시작합니다";
+                }
+
+                if (sessionState == WorkoutTrackingState.PausedOutOfFrame)
+                {
+                    return "전신이 화면을 벗어났어요. 다시 프레임 안으로 들어와 주세요";
+                }
+
+                if (sessionState == WorkoutTrackingState.ReadyForCalibration)
+                {
+                    var calibration = feedbackOrchestrator.LatestCalibration;
+                    if (calibration != null && !string.IsNullOrWhiteSpace(calibration.GuidanceReason))
+                    {
+                        return calibration.GuidanceReason;
+                    }
+
+                    return "카메라 뒤로 물러서주세요. 전신이 보이도록 서 주세요.";
+                }
             }
 
             if (cameraSource.IsRunning && trackingController != null && trackingController.IsTracking)
