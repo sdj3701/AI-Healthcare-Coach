@@ -74,7 +74,7 @@ namespace Rag.Healthcare.Editor
             SetObject(trackingController, "trackingProvider", mediaPipeProvider);
             SetEnum(trackingController, "backend", (int)PoseTrackingBackend.LocalMediaPipe);
             SetBool(trackingController, "autoStartTracking", false);
-            SetFloat(trackingController, "requestIntervalSeconds", 1f / 15f);
+            SetFloat(trackingController, "requestIntervalSeconds", 1f / 12f);
 
             SetObject(feedbackReceiver, "coachTts", coachTts);
             SetEnum(coachTts, "backend", (int)TtsBackend.Auto);

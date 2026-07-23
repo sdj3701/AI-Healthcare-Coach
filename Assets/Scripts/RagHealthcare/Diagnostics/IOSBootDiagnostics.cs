@@ -1,40 +1,64 @@
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.SceneManagement;
+using UnityEngine.Scripting;
 
 namespace Rag.Healthcare.Diagnostics
 {
     /// <summary>
-    /// Emits early startup breadcrumbs so device consoles show whether managed
-    /// code and the first scene actually begin after the native engine init.
+    /// Emits early startup breadcrumbs through IOSDeviceConsoleLog so physical
+    /// devices always print boot progress in Xcode Console (Release included).
     /// </summary>
+    [Preserve]
     internal static class IOSBootDiagnostics
     {
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterAssembliesLoaded)]
+        private static void OnAfterAssembliesLoaded()
+        {
+            IOSDeviceConsoleLog.Write("[IOSBoot] AfterAssembliesLoaded");
+        }
+
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         private static void OnSubsystemRegistration()
         {
-            Debug.Log("[IOSBoot] SubsystemRegistration");
+            IOSDeviceConsoleLog.Write("[IOSBoot] SubsystemRegistration");
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSplashScreen)]
         private static void OnBeforeSplashScreen()
         {
-            Debug.Log("[IOSBoot] BeforeSplashScreen");
+            IOSDeviceConsoleLog.Write("[IOSBoot] BeforeSplashScreen");
+            TryDismissUnitySplash();
+        }
+
+        private static void TryDismissUnitySplash()
+        {
+#if UNITY_IOS && !UNITY_EDITOR
+            if (SplashScreen.isFinished)
+            {
+                IOSDeviceConsoleLog.Write("[IOSBoot] Splash already finished");
+                return;
+            }
+
+            SplashScreen.Stop(SplashScreen.StopBehavior.FadeOut);
+            IOSDeviceConsoleLog.Write("[IOSBoot] SplashScreen.FadeOut");
+#endif
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         private static void OnBeforeSceneLoad()
         {
-            Debug.Log("[IOSBoot] BeforeSceneLoad");
+            IOSDeviceConsoleLog.Write("[IOSBoot] BeforeSceneLoad");
         }
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void OnAfterSceneLoad()
         {
             var scene = SceneManager.GetActiveScene();
-            Debug.Log(
-                $"[IOSBoot] AfterSceneLoad scene='{scene.name}' " +
-                $"path='{scene.path}' buildIndex={scene.buildIndex} " +
-                $"rootCount={scene.rootCount}");
+            IOSDeviceConsoleLog.Write(
+                "[IOSBoot] AfterSceneLoad scene='" + scene.name + "' " +
+                "path='" + scene.path + "' buildIndex=" + scene.buildIndex +
+                " rootCount=" + scene.rootCount);
         }
     }
 }

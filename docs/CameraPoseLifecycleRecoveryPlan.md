@@ -43,7 +43,7 @@
 
 코드 작업은 아래 규칙을 순서대로 지킨다.
 
-1. **좌표 계약을 하나로 고정한다.** Provider 결과는 `분석 완료된 upright 정규화 좌표`로 유지한다. 카메라 원본 표시 보정과 관절 표시 보정을 분리하고, 전면 카메라일 때만 카메라와 overlay에 동일한 좌우 미러 정책을 적용한다.
+1. **좌표 계약을 하나로 고정한다.** Provider 결과는 `분석 완료된 upright 정규화 좌표`로 유지한다. 카메라 원본 표시 보정과 관절 표시 보정을 분리한다. 전면 셀피 미러는 preview scale만 적용하고, overlay는 upright 좌표 그대로 쓴다(이중/반대 미러 방지).
 2. **카메라 이미지와 관절 overlay를 분리한다.** 카메라 `Image`에는 WebCamTexture 회전·상하 배치 보정과 셀피 미러를 적용하고, 형제 overlay에는 최종 fitted rect 기준 관절 좌표만 그린다. 관절이 카메라 원본 변환을 두 번 받지 않게 한다.
 3. **고정 프레임 대기를 준비 조건으로 사용하지 않는다.** 카메라 시작·전환은 `HasValidFrame`, 목표 facing, timeout을 확인하고 완료한다.
 4. **추적 요청에 세대 번호를 둔다.** Stop은 현재 세대를 무효화하고, 이전 세대 callback은 UI·최신 프레임·새 세션 상태를 바꾸지 못하게 한다.
@@ -58,8 +58,8 @@
 
 - `MobileWorkoutPrototypeView`의 preview와 pose overlay를 형제 `VisualElement`로 분리한다.
 - preview의 fitted rect를 단일 계산 함수에서 구해 두 요소에 공유한다.
-- 카메라 preview에는 rotation, `videoVerticallyMirrored`, 전면 셀피 미러를 적용한다.
-- overlay는 upright fitted rect에 그리며 전면 카메라에서만 landmark X를 반전한다.
+- 카메라 preview에는 rotation, `videoVerticallyMirrored`, 전면 셀피 미러(scale)를 적용한다.
+- overlay는 upright fitted rect에 그리며, 전면 셀피 미러는 preview scale만 쓰고 overlay는 upright 좌표 그대로 둔다(추가 X 미러 없음).
 - replay에는 카메라 실시간 metadata를 적용하지 않는다.
 
 ### 단계 B — 추적 Stop/Start 상태 안정화
@@ -125,7 +125,7 @@
 
 ## 8. 구현 결과
 
-- 단계 A: preview와 pose overlay 분리, 전면 카메라 X 미러 및 회전별 raw preview 변환 적용 완료.
+- 단계 A: preview와 pose overlay 분리, 전면 셀피 미러는 preview scale만·overlay는 upright 좌표 유지, 회전별 raw preview 변환 적용 완료.
 - 단계 B: tracking epoch, Stop 중 Start handoff, native cancel-drain 및 recovery budget 초기화 적용 완료.
 - 단계 C: 목표 facing 사전 검사, 첫 유효 프레임/실제 facing 검증, 실패 시 이전 카메라 복구 적용 완료.
 - 단계 D: 명시적 PreviewMode, camera-ready 후 운동 시작, 비동기 화면 이탈, Reset/Replay 상태 정리 적용 완료.

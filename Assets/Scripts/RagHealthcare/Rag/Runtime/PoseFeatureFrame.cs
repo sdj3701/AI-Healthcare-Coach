@@ -9,6 +9,7 @@ namespace Rag.Healthcare.Rag.Runtime
         public bool HasRightKneeAngle;
         public bool HasTorsoTilt;
         public bool HasHipLevel;
+        public bool HasPelvicTilt;
         public bool HasShoulderLevel;
         public bool HasCenterBalance;
         public bool HasLeftKneeValgus;
@@ -21,6 +22,9 @@ namespace Rag.Healthcare.Rag.Runtime
         public float AverageKneeAngle;
         public float TorsoTiltDegrees;
         public float HipLevelDelta;
+        // Relative pelvis-to-shoulder-line slope. This compensates for camera roll
+        // and stays comparable when the user moves nearer/farther from the camera.
+        public float PelvicTiltRatio;
         public float ShoulderLevelDelta;
         public float CenterBalanceOffset;
         public float LeftKneeValgusOffset;
@@ -33,8 +37,7 @@ namespace Rag.Healthcare.Rag.Runtime
         public bool HasReliableSquatCore =>
             HasLeftKneeAngle &&
             HasRightKneeAngle &&
-            HasTorsoTilt &&
-            HasCenterBalance;
+            HasTorsoTilt;
 
         public void CopyFrom(PoseFeatureFrame source)
         {
@@ -50,6 +53,7 @@ namespace Rag.Healthcare.Rag.Runtime
             HasRightKneeAngle = source.HasRightKneeAngle;
             HasTorsoTilt = source.HasTorsoTilt;
             HasHipLevel = source.HasHipLevel;
+            HasPelvicTilt = source.HasPelvicTilt;
             HasShoulderLevel = source.HasShoulderLevel;
             HasCenterBalance = source.HasCenterBalance;
             HasLeftKneeValgus = source.HasLeftKneeValgus;
@@ -61,6 +65,7 @@ namespace Rag.Healthcare.Rag.Runtime
             AverageKneeAngle = source.AverageKneeAngle;
             TorsoTiltDegrees = source.TorsoTiltDegrees;
             HipLevelDelta = source.HipLevelDelta;
+            PelvicTiltRatio = source.PelvicTiltRatio;
             ShoulderLevelDelta = source.ShoulderLevelDelta;
             CenterBalanceOffset = source.CenterBalanceOffset;
             LeftKneeValgusOffset = source.LeftKneeValgusOffset;
@@ -79,6 +84,7 @@ namespace Rag.Healthcare.Rag.Runtime
             HasRightKneeAngle = false;
             HasTorsoTilt = false;
             HasHipLevel = false;
+            HasPelvicTilt = false;
             HasShoulderLevel = false;
             HasCenterBalance = false;
             HasLeftKneeValgus = false;
@@ -90,6 +96,7 @@ namespace Rag.Healthcare.Rag.Runtime
             AverageKneeAngle = 0f;
             TorsoTiltDegrees = 0f;
             HipLevelDelta = 0f;
+            PelvicTiltRatio = 0f;
             ShoulderLevelDelta = 0f;
             CenterBalanceOffset = 0f;
             LeftKneeValgusOffset = 0f;

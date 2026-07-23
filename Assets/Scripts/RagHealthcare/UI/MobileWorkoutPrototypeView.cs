@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using Rag.Healthcare.Diagnostics;
 using Rag.Healthcare.Camera;
 using Rag.Healthcare.Performance;
 using Rag.Healthcare.Pose;
@@ -110,7 +111,7 @@ namespace Rag.Healthcare.UI
         [SerializeField, Min(16)] private int mobileCameraWidth = 640;
         [SerializeField, Min(16)] private int mobileCameraHeight = 480;
         [SerializeField, Range(1, 60)] private int mobileCameraFps = 20;
-        [SerializeField, Range(1, 30)] private int mobilePoseFps = 8;
+        [SerializeField, Range(1, 30)] private int mobilePoseFps = 12;
         [SerializeField, Range(15, 120)] private int mobileTargetFrameRate = 30;
         [SerializeField, Min(1f)] private float trackingStartupTimeoutSeconds = 15f;
 
@@ -202,6 +203,11 @@ namespace Rag.Healthcare.UI
 
         private void Awake()
         {
+            if (Application.isPlaying && !buildUiSuccessLogged)
+            {
+                IOSDeviceConsoleLog.Write("[MobileWorkoutPrototypeView] Awake on " + gameObject.name);
+            }
+
             EnsureDocumentAndUi();
 #if UNITY_EDITOR
             QueueEditorRebuild();
@@ -354,7 +360,7 @@ namespace Rag.Healthcare.UI
             if (!buildUiSuccessLogged)
             {
                 buildUiSuccessLogged = true;
-                Debug.Log("[MobileWorkoutPrototypeView] UI Toolkit workout interface built successfully.");
+                IOSDeviceConsoleLog.Write("[MobileWorkoutPrototypeView] UI Toolkit workout interface built successfully.");
             }
 
             if (Application.isPlaying)
@@ -1511,7 +1517,7 @@ namespace Rag.Healthcare.UI
             previewImage.style.width = elementWidth;
             previewImage.style.height = elementHeight;
             previewImage.style.rotate = new Rotate(new Angle(rotation, AngleUnit.Degree));
-            previewImage.style.scale = new Scale(ResolvePreviewScale(
+            previewImage.style.scale = new Scale(PoseDisplayCoordinateMapper.ResolvePreviewScale(
                 rotation,
                 verticallyMirrored,
                 selfieMirrored));
@@ -1537,32 +1543,6 @@ namespace Rag.Healthcare.UI
             lastPreviewUsesCameraMetadata = usesCameraMetadata;
             lastPreviewFrameWidth = frameWidth;
             lastPreviewFrameHeight = frameHeight;
-        }
-
-        private static Vector3 ResolvePreviewScale(
-            int rotation,
-            bool verticallyMirrored,
-            bool selfieMirrored)
-        {
-            var scaleX = 1f;
-            var scaleY = verticallyMirrored ? -1f : 1f;
-
-            // The selfie mirror is horizontal in the final upright display space.
-            // For a quarter-turn raw texture, that display X axis corresponds to
-            // the texture's local Y axis before the element rotation is applied.
-            if (selfieMirrored)
-            {
-                if (rotation == 90 || rotation == 270)
-                {
-                    scaleY *= -1f;
-                }
-                else
-                {
-                    scaleX = -1f;
-                }
-            }
-
-            return new Vector3(scaleX, scaleY, 1f);
         }
 
         private void ResetPoseOverlayLayout()
@@ -2282,6 +2262,19 @@ namespace Rag.Healthcare.UI
 
             if (cameraSource.IsRunning && trackingController != null && trackingController.IsTracking)
             {
+                var quality = feedbackOrchestrator == null ? null : feedbackOrchestrator.LatestTrackingQuality;
+                if (quality != null && quality.State != PoseTrackingQualityState.Good)
+                {
+                    return string.IsNullOrWhiteSpace(quality.Reason)
+                        ? "관절 위치를 안정화하는 중입니다."
+                        : quality.Reason;
+                }
+
+                if (feedbackOrchestrator != null && feedbackOrchestrator.IsWaitingForStandingRearm)
+                {
+                    return "스쿼트 판정을 시작하려면 바르게 서 주세요.";
+                }
+
                 return "관절 인식 중 · " + trackingController.PoseFps.ToString("0.0") + " FPS";
             }
 
@@ -2298,6 +2291,19 @@ namespace Rag.Healthcare.UI
             if (trackingController == null || !trackingController.IsTracking || trackingController.PoseFps < 1f)
             {
                 return "추적 대기";
+            }
+
+            var quality = feedbackOrchestrator == null ? null : feedbackOrchestrator.LatestTrackingQuality;
+            if (quality != null && quality.State != PoseTrackingQualityState.Good)
+            {
+                return quality.State == PoseTrackingQualityState.Unavailable
+                    ? "전신 확인 필요"
+                    : "추적 보정 중";
+            }
+
+            if (feedbackOrchestrator != null && feedbackOrchestrator.IsWaitingForStandingRearm)
+            {
+                return "준비 자세로 서기";
             }
 
             if (phase == ExercisePhase.Unknown)
@@ -2530,7 +2536,12 @@ namespace Rag.Healthcare.UI
             }
 
             var rect = new Rect(0f, 0f, width, height);
-            var mirrorX = cameraSource != null && cameraSource.ActiveCameraIsFrontFacing;
+            // Lifecycle contract:
+            // - Preview: rotation + verticalMirror + front selfie scale (ResolvePreviewScale)
+            // - Overlay: upright fitted rect, no extra front X mirror (avoids double/opposite mirror)
+            // Front-camera selfie mirroring is applied on the preview Image scale only.
+            // Overlay landmarks stay in upright provider space so they move with the mirrored preview.
+            var mirrorX = false;
             var painter = mgc.painter2D;
 
             // Draw bones
@@ -2540,10 +2551,11 @@ namespace Rag.Healthcare.UI
             {
                 if (frame.TryGetJoint(segment.From, out var fromJoint) &&
                     frame.TryGetJoint(segment.To, out var toJoint) &&
-                    CanRender(fromJoint) && CanRender(toJoint))
+                    PoseDisplayCoordinateMapper.CanRender(fromJoint) &&
+                    PoseDisplayCoordinateMapper.CanRender(toJoint))
                 {
-                    var p1 = ToPreviewPoint(fromJoint, rect, mirrorX);
-                    var p2 = ToPreviewPoint(toJoint, rect, mirrorX);
+                    var p1 = PoseDisplayCoordinateMapper.ToDisplayPoint(fromJoint, rect, mirrorX);
+                    var p2 = PoseDisplayCoordinateMapper.ToDisplayPoint(toJoint, rect, mirrorX);
                     painter.BeginPath();
                     painter.MoveTo(p1);
                     painter.LineTo(p2);
@@ -2556,9 +2568,9 @@ namespace Rag.Healthcare.UI
             float half = jointSize * 0.5f;
             foreach (var joint in frame.joints)
             {
-                if (CanRender(joint))
+                if (PoseDisplayCoordinateMapper.CanRender(joint))
                 {
-                    var p = ToPreviewPoint(joint, rect, mirrorX);
+                    var p = PoseDisplayCoordinateMapper.ToDisplayPoint(joint, rect, mirrorX);
                     painter.fillColor = GetJointColor(joint.name);
                     painter.BeginPath();
                     painter.MoveTo(new Vector2(p.x - half, p.y - half));
@@ -2569,18 +2581,6 @@ namespace Rag.Healthcare.UI
                     painter.Fill();
                 }
             }
-        }
-
-        private bool CanRender(TrackedJoint joint)
-        {
-            if (joint == null || string.IsNullOrWhiteSpace(joint.name))
-            {
-                return false;
-            }
-            var score = Mathf.Max(joint.confidence, joint.visibility);
-            return score >= 0.45f &&
-                   joint.x >= -0.2f && joint.x <= 1.2f &&
-                   joint.y >= -0.2f && joint.y <= 1.2f;
         }
 
         private Color GetJointColor(string jointName)
@@ -2594,15 +2594,6 @@ namespace Rag.Healthcare.UI
                 return new Color(0.95f, 0.42f, 0.2f, 0.95f);
             }
             return new Color(0.95f, 0.95f, 0.95f, 0.9f);
-        }
-
-        private static Vector2 ToPreviewPoint(TrackedJoint joint, Rect rect, bool mirrorX)
-        {
-            var normalizedX = mirrorX ? 1f - joint.x : joint.x;
-            return new Vector2(
-                rect.x + Mathf.Clamp01(normalizedX) * rect.width,
-                rect.y + Mathf.Clamp01(joint.y) * rect.height
-            );
         }
 
         private void DestroyPanelSettings()

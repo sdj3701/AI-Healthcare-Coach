@@ -19,7 +19,7 @@ namespace Rag.Healthcare.Rag.Runtime
         [SerializeField] private bool startTrackingOnStart = true;
         [SerializeField] private string exercise = "squat";
         [SerializeField, Range(0.5f, 3f)] private float analysisWindowSeconds = 1.2f;
-        [SerializeField, Range(5, 60)] private int expectedPoseFps = 15;
+        [SerializeField, Range(5, 60)] private int expectedPoseFps = 12;
         [SerializeField, Min(0f)] private float duplicateCooldownSeconds = 3f;
         [SerializeField, Min(0f)] private float minimumGlobalFeedbackIntervalSeconds = 1.5f;
         [SerializeField, Range(20, 140)] private int maxSpokenTextLength = 70;
@@ -29,6 +29,7 @@ namespace Rag.Healthcare.Rag.Runtime
         [SerializeField] private RealtimePoseRuleSettings ruleSettings = new RealtimePoseRuleSettings();
 
         private readonly PoseFrameNormalizer normalizer = new PoseFrameNormalizer();
+        private readonly PoseTrackingQualityEvaluator trackingQualityEvaluator = new PoseTrackingQualityEvaluator();
         private readonly PoseLandmarkStabilizer landmarkStabilizer = new PoseLandmarkStabilizer();
         private readonly PoseFeatureExtractor featureExtractor = new PoseFeatureExtractor();
         private readonly ExercisePhaseDetector phaseDetector = new ExercisePhaseDetector();
@@ -41,15 +42,18 @@ namespace Rag.Healthcare.Rag.Runtime
         private PoseWindowBuffer windowBuffer;
         private bool currentRepInProgress;
         private bool currentRepHasViolation;
+        private bool requiresStandingRearm = true;
 
         public ExercisePhaseState PhaseState => phaseDetector.State;
         public PoseWindowStats LatestStats { get; private set; }
+        public PoseTrackingQualityReport LatestTrackingQuality { get; private set; }
         public int CorrectRepCount { get; private set; }
         public int TargetCorrectRepCount => targetCorrectRepCount;
         public bool HasCorrectRepTarget => targetCorrectRepCount > 0;
         public bool IsCorrectRepTargetComplete => HasCorrectRepTarget && CorrectRepCount >= targetCorrectRepCount;
         public bool CurrentRepHasViolation => currentRepHasViolation;
         public bool LastCompletedRepWasCorrect { get; private set; }
+        public bool IsWaitingForStandingRearm => requiresStandingRearm;
 
         private void Awake()
         {
@@ -71,7 +75,7 @@ namespace Rag.Healthcare.Rag.Runtime
 #if UNITY_IOS && !UNITY_EDITOR
             if (ruleSettings != null)
             {
-                ruleSettings.landmarkSmoothingAlpha = 0.5f;
+                ruleSettings.landmarkSmoothingAlpha = 0.55f;
             }
 #endif
 
@@ -105,6 +109,7 @@ namespace Rag.Healthcare.Rag.Runtime
         public void ResetRuntimeState()
         {
             windowBuffer?.Clear();
+            trackingQualityEvaluator.Reset();
             landmarkStabilizer.Reset();
             featureExtractor.Reset();
             phaseDetector.Reset();
@@ -112,10 +117,12 @@ namespace Rag.Healthcare.Rag.Runtime
             repQuality.Reset();
             reusableStats.Reset();
             LatestStats = null;
+            LatestTrackingQuality = null;
             CorrectRepCount = 0;
             currentRepInProgress = false;
             currentRepHasViolation = false;
             LastCompletedRepWasCorrect = false;
+            requiresStandingRearm = true;
         }
 
         public void SetCorrectRepTarget(int targetCount)
@@ -131,11 +138,34 @@ namespace Rag.Healthcare.Rag.Runtime
                 return;
             }
 
+            LatestTrackingQuality = trackingQualityEvaluator.Evaluate(frame, ruleSettings);
             var stabilizedFrame = landmarkStabilizer.Stabilize(frame, ruleSettings);
             sessionLogger?.LogFrame(stabilizedFrame);
 
+            if (LatestTrackingQuality == null || !LatestTrackingQuality.AllowsPoseAnalysis)
+            {
+                SuspendPoseAnalysis(frame.timestampUnixMilliseconds);
+                return;
+            }
+
             var view = normalizer.Normalize(stabilizedFrame, ruleSettings.minimumVisibility);
             var feature = featureExtractor.Extract(view, exercise, ruleSettings.minimumVisibility);
+            if (requiresStandingRearm)
+            {
+                // Do not resume halfway through a squat after an occlusion. A partial
+                // bottom/ascent sequence does not contain enough evidence for a rep.
+                if (!feature.HasReliableSquatCore || feature.AverageKneeAngle < ruleSettings.StandingKneeAngle)
+                {
+                    phaseDetector.Suspend(frame.timestampUnixMilliseconds);
+                    LatestStats = null;
+                    return;
+                }
+
+                requiresStandingRearm = false;
+                featureExtractor.Reset();
+                feature = featureExtractor.Extract(view, exercise, ruleSettings.minimumVisibility);
+            }
+
             windowBuffer.Add(feature);
 
             var previousPhase = phaseDetector.State.CurrentPhase;
@@ -168,6 +198,26 @@ namespace Rag.Healthcare.Rag.Runtime
             sessionLogger?.LogFeedback(selected, message);
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
             feedbackReceiver?.ReceiveFeedback(message);
+        }
+
+        private void SuspendPoseAnalysis(long timestampUnixMilliseconds)
+        {
+            var previousPhase = phaseDetector.State.CurrentPhase;
+            phaseDetector.Suspend(timestampUnixMilliseconds);
+            if (previousPhase != phaseDetector.State.CurrentPhase)
+            {
+                sessionLogger?.LogPhase(phaseDetector.State);
+            }
+
+            windowBuffer?.Clear();
+            featureExtractor.Reset();
+            reusableStats.Reset();
+            LatestStats = null;
+            repQuality.Reset();
+            currentRepInProgress = false;
+            currentRepHasViolation = false;
+            LastCompletedRepWasCorrect = false;
+            requiresStandingRearm = true;
         }
 
         private void UpdateCorrectRepCount(

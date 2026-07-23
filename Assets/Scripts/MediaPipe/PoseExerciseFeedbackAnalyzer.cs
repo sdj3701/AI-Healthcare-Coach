@@ -142,7 +142,8 @@ namespace AIHealthcareCoach.MediaPipe
                 return;
             }
 
-            var tilt = Vector2.Angle(torso, Vector2.down);
+            // MediaPipe image coordinates grow downward, so an upright torso points up.
+            var tilt = Vector2.Angle(torso, Vector2.up);
             if (tilt <= maximumTorsoTiltDegrees)
             {
                 return;

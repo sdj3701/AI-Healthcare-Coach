@@ -23,7 +23,7 @@ alwaysApply: true
 | 기간 (KST 기준) | 코드 작업 모델 | Task/subagent `model` 값 |
 | --- | --- | --- |
 | ~ 2026-07-21 (포함) | Grok 4.5 High Fast | `cursor-grok-4.5-high-fast` |
-| 2026-07-22 이후 | Composer 2.5 Fast | `composer-2.5-fast` |
+| 2026-07-22 이후 | Grok 4.5 High Fast | `cursor-grok-4.5-high-fast` |
 
 ## 문서 작업
 

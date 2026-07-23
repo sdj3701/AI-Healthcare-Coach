@@ -49,6 +49,7 @@ namespace Rag.Healthcare.Rag.Runtime
 
             EvaluateKneeAlignment(feature, stats, phaseState, settings);
             EvaluateTorsoTilt(feature, stats, phaseState, settings);
+            EvaluatePelvicTilt(feature, stats, phaseState, settings);
             EvaluateCenterBalance(feature, stats, phaseState, settings);
             EvaluateKneeSymmetry(feature, stats, phaseState, settings);
             EvaluateSquatDepth(feature, stats, phaseState, settings);
@@ -61,6 +62,14 @@ namespace Rag.Healthcare.Rag.Runtime
             ExercisePhaseState phaseState,
             RealtimePoseRuleSettings settings)
         {
+            if (phaseState == null ||
+                (phaseState.CurrentPhase != ExercisePhase.Descent &&
+                 phaseState.CurrentPhase != ExercisePhase.Bottom &&
+                 phaseState.CurrentPhase != ExercisePhase.Ascent))
+            {
+                return;
+            }
+
             var leftQualifies =
                 stats.LeftKneeObservationRatio >= settings.MinimumKneeObservationRatio &&
                 stats.LeftKneeAlignmentViolationRatio >= settings.MinimumViolationRatio;
@@ -82,19 +91,27 @@ namespace Rag.Healthcare.Rag.Runtime
             var persistenceRatio = useLeft
                 ? stats.LeftKneeAlignmentViolationRatio
                 : stats.RightKneeAlignmentViolationRatio;
+            var mildCeiling = settings.MaximumKneeValgusOffset * 1.4f;
+            var mild = offset <= mildCeiling;
+            var severity = mild ? FeedbackSeverity.Info : FeedbackSeverity.Warning;
+            var message = mild
+                ? (useLeft
+                    ? "왼쪽 무릎이 살짝 벌어집니다. 발끝과 같은 방향을 유지해 보세요."
+                    : "오른쪽 무릎이 살짝 벌어집니다. 발끝과 같은 방향을 유지해 보세요.")
+                : (useLeft
+                    ? "왼쪽 무릎이 발끝 방향에서 벗어납니다. 무릎과 발끝을 같은 방향으로 맞춰 주세요."
+                    : "오른쪽 무릎이 발끝 방향에서 벗어납니다. 무릎과 발끝을 같은 방향으로 맞춰 주세요.");
 
             AddEvent(
                 useLeft ? "squat_left_knee_alignment" : "squat_right_knee_alignment",
                 "squat_knee_alignment",
                 joint,
                 side,
-                FeedbackSeverity.Warning,
+                severity,
                 ConfidenceFromOffset(offset, settings.MaximumKneeValgusOffset),
                 persistenceRatio,
                 feature.TimestampUnixMilliseconds,
-                useLeft
-                    ? "왼쪽 무릎이 발끝 방향에서 벗어납니다. 무릎과 발끝을 같은 방향으로 맞춰 주세요."
-                    : "오른쪽 무릎이 발끝 방향에서 벗어납니다. 무릎과 발끝을 같은 방향으로 맞춰 주세요.",
+                message,
                 phaseState,
                 "kneeValgusOffset",
                 offset);
@@ -156,6 +173,43 @@ namespace Rag.Healthcare.Rag.Runtime
                 stats.AverageCenterBalanceOffset);
         }
 
+        private void EvaluatePelvicTilt(
+            PoseFeatureFrame feature,
+            PoseWindowStats stats,
+            ExercisePhaseState phaseState,
+            RealtimePoseRuleSettings settings)
+        {
+            if (phaseState == null ||
+                (phaseState.CurrentPhase != ExercisePhase.Descent &&
+                 phaseState.CurrentPhase != ExercisePhase.Bottom &&
+                 phaseState.CurrentPhase != ExercisePhase.Ascent))
+            {
+                return;
+            }
+
+            if (!feature.HasReliableSquatCore ||
+                !feature.HasPelvicTilt ||
+                stats.PelvicTiltViolationRatio < settings.minimumViolationRatio ||
+                stats.AveragePelvicTiltRatio <= settings.MaximumPelvicTiltRatio)
+            {
+                return;
+            }
+
+            AddEvent(
+                "squat_pelvic_tilt",
+                "squat_pelvic_tilt",
+                PoseJointNames.LeftHip,
+                string.Empty,
+                FeedbackSeverity.Warning,
+                ConfidenceFromOffset(stats.AveragePelvicTiltRatio, settings.MaximumPelvicTiltRatio),
+                stats.PelvicTiltViolationRatio,
+                feature.TimestampUnixMilliseconds,
+                "골반 높이가 한쪽으로 기웁니다. 양발에 체중을 고르게 싣고 골반을 수평에 가깝게 맞춰 주세요.",
+                phaseState,
+                "pelvicTiltRatio",
+                stats.AveragePelvicTiltRatio);
+        }
+
         private void EvaluateKneeSymmetry(
             PoseFeatureFrame feature,
             PoseWindowStats stats,
@@ -202,8 +256,40 @@ namespace Rag.Healthcare.Rag.Runtime
                 return;
             }
 
+            // Prefer this-rep minimum when available; window min alone can miss the deepest squat
+            // if those frames rolled out. PoseWindowStats sets MinimumKneeAngle=0 when kneeAngleCount==0.
             var depthAngle = stats.MinimumKneeAngle;
-            if (depthAngle > settings.MaximumBottomKneeAngle)
+            var repMin = phaseState.MinimumKneeAngleInCurrentRep;
+            if (repMin > 0f && repMin < 180f)
+            {
+                depthAngle = depthAngle <= 0f ? repMin : Mathf.Min(depthAngle, repMin);
+            }
+
+            // Once Bottom has been recognized for this rep, never nag about shallow depth.
+            if (phaseState.HasReachedBottomInCurrentRep)
+            {
+                if (depthAngle < settings.MinimumBottomKneeAngle)
+                {
+                    AddEvent(
+                        "squat_depth_deep",
+                        "squat_depth_deep",
+                        PoseJointNames.LeftKnee,
+                        string.Empty,
+                        FeedbackSeverity.Warning,
+                        ConfidenceFromOffset(settings.MinimumBottomKneeAngle, depthAngle),
+                        stats.DeepDepthViolationRatio,
+                        feature.TimestampUnixMilliseconds,
+                        "너무 깊게 내려갔습니다. 무릎과 허리에 부담이 없도록 깊이를 조금 줄여 주세요.",
+                        phaseState,
+                        "averageKneeAngle",
+                        depthAngle);
+                }
+
+                return;
+            }
+
+            // Bottom phase but flag false (rare): only warn when clearly too shallow.
+            if (depthAngle > settings.MaximumRecognizableBottomKneeAngle)
             {
                 AddEvent(
                     "squat_depth_shallow",
@@ -211,10 +297,26 @@ namespace Rag.Healthcare.Rag.Runtime
                     PoseJointNames.LeftKnee,
                     string.Empty,
                     FeedbackSeverity.Warning,
-                    ConfidenceFromOffset(depthAngle, settings.MaximumBottomKneeAngle),
-                    0.8f,
+                    ConfidenceFromOffset(depthAngle, settings.MaximumRecognizableBottomKneeAngle),
+                    stats.ShallowDepthViolationRatio,
                     feature.TimestampUnixMilliseconds,
                     "가능한 범위 안에서 엉덩이를 조금 더 낮춰 주세요.",
+                    phaseState,
+                    "averageKneeAngle",
+                    depthAngle);
+            }
+            else if (depthAngle > settings.MaximumBottomKneeAngle)
+            {
+                AddEvent(
+                    "squat_depth_shallow",
+                    "squat_depth_shallow",
+                    PoseJointNames.LeftKnee,
+                    string.Empty,
+                    FeedbackSeverity.Info,
+                    ConfidenceFromOffset(depthAngle, settings.MaximumBottomKneeAngle),
+                    stats.ShallowDepthViolationRatio,
+                    feature.TimestampUnixMilliseconds,
+                    "괜찮습니다. 가능하면 조금 더 앉아도 좋아요.",
                     phaseState,
                     "averageKneeAngle",
                     depthAngle);
@@ -228,7 +330,7 @@ namespace Rag.Healthcare.Rag.Runtime
                     string.Empty,
                     FeedbackSeverity.Warning,
                     ConfidenceFromOffset(settings.MinimumBottomKneeAngle, depthAngle),
-                    0.8f,
+                    stats.DeepDepthViolationRatio,
                     feature.TimestampUnixMilliseconds,
                     "너무 깊게 내려갔습니다. 무릎과 허리에 부담이 없도록 깊이를 조금 줄여 주세요.",
                     phaseState,

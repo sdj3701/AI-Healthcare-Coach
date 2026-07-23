@@ -43,6 +43,10 @@ namespace Rag.Healthcare.Rag.Runtime
         private TrackedJoint[] outputJoints = Array.Empty<TrackedJoint>();
         private TrackedJoint[] jointPool = Array.Empty<TrackedJoint>();
 
+        public float LastBodyScale { get; private set; }
+        public int HeldLowConfidenceJointCount { get; private set; }
+        public int RejectedOutlierJointCount { get; private set; }
+
         // The returned frame is a reusable view and is valid until the next Stabilize call.
         public JointTrackingFrame Stabilize(JointTrackingFrame frame, RealtimePoseRuleSettings settings)
         {
@@ -51,6 +55,9 @@ namespace Rag.Healthcare.Rag.Runtime
                 return frame;
             }
 
+            LastBodyScale = CalculateBodyScale(frame, settings);
+            HeldLowConfidenceJointCount = 0;
+            RejectedOutlierJointCount = 0;
             EnsureOutputCapacity(frame.joints.Length);
             for (var i = 0; i < frame.joints.Length; i++)
             {
@@ -63,7 +70,7 @@ namespace Rag.Healthcare.Rag.Runtime
 
                 var target = jointPool[i] ??= new TrackedJoint();
                 outputJoints[i] = target;
-                StabilizeJoint(source, target, frame.timestampUnixMilliseconds, settings);
+                StabilizeJoint(source, target, frame.timestampUnixMilliseconds, LastBodyScale, settings);
             }
 
             outputFrame.id = frame.id;
@@ -80,6 +87,10 @@ namespace Rag.Healthcare.Rag.Runtime
             {
                 state.Reset();
             }
+
+            LastBodyScale = 0f;
+            HeldLowConfidenceJointCount = 0;
+            RejectedOutlierJointCount = 0;
         }
 
         private void EnsureOutputCapacity(int jointCount)
@@ -97,6 +108,7 @@ namespace Rag.Healthcare.Rag.Runtime
             TrackedJoint joint,
             TrackedJoint target,
             long timestampUnixMilliseconds,
+            float bodyScale,
             RealtimePoseRuleSettings settings)
         {
             if (string.IsNullOrWhiteSpace(joint.name))
@@ -118,9 +130,12 @@ namespace Rag.Healthcare.Rag.Runtime
 
             if (state.HasSmoothed &&
                 score < settings.minimumVisibility &&
-                elapsedSeconds <= settings.lowConfidenceGraceSeconds)
+                elapsedSeconds <= Mathf.Min(settings.lowConfidenceGraceSeconds, settings.MaximumTrackingHoldSeconds))
             {
-                WriteJoint(target, joint.name, state.Smoothed, state.Visibility, state.Confidence);
+                // Keep the visual position briefly, but preserve the current low score.
+                // Analysis must not mistake a held coordinate for a newly observed joint.
+                HeldLowConfidenceJointCount++;
+                WriteJoint(target, joint.name, state.Smoothed, joint.visibility, joint.confidence);
                 return;
             }
 
@@ -133,28 +148,52 @@ namespace Rag.Healthcare.Rag.Runtime
             var raw = joint.NormalizedPosition;
             var deltaX = raw.x - state.Smoothed.x;
             var deltaY = raw.y - state.Smoothed.y;
-            var maximumJump = settings.maximumNormalizedJointJump;
+            var maximumJump = bodyScale > Mathf.Epsilon
+                ? Mathf.Max(settings.MinimumBodyScaleJointJump, bodyScale * settings.MaximumBodyScaleJointJump)
+                : settings.maximumNormalizedJointJump;
             if (state.HasSmoothed && deltaX * deltaX + deltaY * deltaY > maximumJump * maximumJump)
             {
                 state.ConsecutiveOutliers++;
                 if (state.ConsecutiveOutliers <= settings.maximumConsecutiveOutlierFrames)
                 {
+                    RejectedOutlierJointCount++;
                     WriteJoint(target, joint.name, state.Smoothed, state.Visibility, state.Confidence);
                     return;
                 }
 
                 state.SampleCount = 0;
                 state.NextSampleIndex = 0;
-                state.Smoothed = raw;
+                // A sustained displacement is probably a real reacquisition. Move
+                // toward it quickly without snapping the skeleton in a single frame.
+                state.Smoothed = Vector3.Lerp(
+                    state.Smoothed,
+                    raw,
+                    settings.MovingSmoothingAlpha);
             }
             else
             {
                 state.ConsecutiveOutliers = 0;
                 AddSample(state, raw);
                 var median = Median(state);
+                var deltaSeconds = elapsedSeconds >= float.MaxValue / 2f
+                    ? 0f
+                    : Mathf.Max(0.001f, elapsedSeconds);
+                var normalizedSpeed = !state.HasSmoothed || bodyScale <= Mathf.Epsilon || deltaSeconds <= 0f
+                    ? 0f
+                    : Mathf.Sqrt(deltaX * deltaX + deltaY * deltaY) / bodyScale / deltaSeconds;
+                var motionFactor = Mathf.InverseLerp(0f, settings.AdaptiveMotionSpeed, normalizedSpeed);
+                var confidenceFactor = Mathf.InverseLerp(settings.minimumVisibility, 1f, score);
+                var alpha = Mathf.Lerp(
+                    settings.StationarySmoothingAlpha,
+                    settings.MovingSmoothingAlpha,
+                    motionFactor);
+                alpha *= Mathf.Lerp(0.75f, 1f, confidenceFactor);
+                // Median is robust while stationary. Blend toward the newest raw
+                // point during fast motion so the 3-sample filter does not lag a squat.
+                var adaptiveTarget = Vector3.Lerp(median, raw, motionFactor * 0.65f);
                 state.Smoothed = state.HasSmoothed
-                    ? Vector3.Lerp(state.Smoothed, median, Mathf.Clamp01(settings.landmarkSmoothingAlpha))
-                    : median;
+                    ? Vector3.Lerp(state.Smoothed, adaptiveTarget, Mathf.Clamp01(alpha))
+                    : adaptiveTarget;
             }
 
             state.HasSmoothed = true;
@@ -162,6 +201,40 @@ namespace Rag.Healthcare.Rag.Runtime
             state.Confidence = joint.confidence;
             state.LastAcceptedTimestamp = timestampUnixMilliseconds;
             WriteJoint(target, joint.name, state.Smoothed, joint.visibility, joint.confidence);
+        }
+
+        private static float CalculateBodyScale(JointTrackingFrame frame, RealtimePoseRuleSettings settings)
+        {
+            if (frame == null || settings == null ||
+                !TryGetValidPosition(frame, PoseJointNames.LeftShoulder, settings.minimumVisibility, out var leftShoulder) ||
+                !TryGetValidPosition(frame, PoseJointNames.RightShoulder, settings.minimumVisibility, out var rightShoulder) ||
+                !TryGetValidPosition(frame, PoseJointNames.LeftHip, settings.minimumVisibility, out var leftHip) ||
+                !TryGetValidPosition(frame, PoseJointNames.RightHip, settings.minimumVisibility, out var rightHip))
+            {
+                return 0f;
+            }
+
+            var shoulderCenter = (leftShoulder + rightShoulder) * 0.5f;
+            var hipCenter = (leftHip + rightHip) * 0.5f;
+            return Vector2.Distance(shoulderCenter, hipCenter);
+        }
+
+        private static bool TryGetValidPosition(
+            JointTrackingFrame frame,
+            string jointName,
+            float minimumVisibility,
+            out Vector2 position)
+        {
+            position = default;
+            if (!frame.TryGetJoint(jointName, out var joint) ||
+                joint == null ||
+                PoseFrameView.GetJointScore(joint) < minimumVisibility)
+            {
+                return false;
+            }
+
+            position = new Vector2(joint.x, joint.y);
+            return true;
         }
 
         private static void AddSample(JointState state, Vector3 value)

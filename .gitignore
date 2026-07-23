@@ -108,3 +108,6 @@ InitTestScene*.unity*
 .DS_Store
 .env
 /Learning/build/
+*.trace
+docs/Test/
+

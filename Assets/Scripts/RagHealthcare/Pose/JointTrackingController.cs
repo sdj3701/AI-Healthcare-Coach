@@ -21,7 +21,7 @@ namespace Rag.Healthcare.Pose
 
         [Header("Tracking")]
         [SerializeField] private bool autoStartTracking;
-        [SerializeField, Min(0.01f)] private float requestIntervalSeconds = 1f / 15f;
+        [SerializeField, Min(0.01f)] private float requestIntervalSeconds = 1f / 12f;
         [SerializeField, Min(0f)] private float failureLogCooldownSeconds = 1f;
         [SerializeField, Min(1f)] private float cameraStartupTimeoutSeconds = 10f;
 
@@ -324,8 +324,23 @@ namespace Rag.Healthcare.Pose
                         DroppedFrameCount += skippedSamples;
                     }
 
-                    nextSampleAt = now + interval;
+                    // Schedule from the request start, not from the result callback.
+                    // The previous end-to-start schedule added the inference time to
+                    // every configured interval (e.g. 40 ms inference + 83 ms at
+                    // 12 FPS yielded about 8 FPS). The provider remains single-flight:
+                    // when inference takes longer than the interval, the next request
+                    // simply starts on the first frame after it completes.
+                    var scheduledNextSampleAt = now + interval;
                     yield return EstimateCurrentFrame();
+
+                    var completedAt = Time.unscaledTime;
+                    if (completedAt > scheduledNextSampleAt)
+                    {
+                        DroppedFrameCount += Mathf.FloorToInt(
+                            (completedAt - scheduledNextSampleAt) / interval);
+                    }
+
+                    nextSampleAt = Mathf.Max(scheduledNextSampleAt, completedAt);
                 }
             }
             finally

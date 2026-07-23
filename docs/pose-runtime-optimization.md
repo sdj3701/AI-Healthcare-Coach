@@ -375,6 +375,13 @@ Profiler에서 allocation call stack을 보려면 필요한 짧은 구간에만 
 
 ## 10. 튜닝 가이드
 
+### 현재 관절 추적 품질 기본값 (2026-07-22)
+
+- 추론 입력: `enableInferenceDownscale=false` → 촬영과 동일 `640×480` full webcam
+- Pose FPS: `12` (`mobilePoseFps` / Editor `targetPoseFps` / `expectedPoseFps`)
+- MediaPipe confidence: detection / presence / tracking 모두 `0.40`
+- 안정화: `maximumNormalizedJointJump=0.12`, iOS `landmarkSmoothingAlpha=0.55`(비-iOS `0.35`)
+
 ### 흔들림은 줄었지만 반응이 느린 경우
 
 - `landmarkSmoothingAlpha`를 조금 높인다.

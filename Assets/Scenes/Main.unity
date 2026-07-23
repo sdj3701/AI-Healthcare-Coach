@@ -306,7 +306,7 @@ MonoBehaviour:
   backend: 0
   trackingProvider: {fileID: 1954474668}
   autoStartTracking: 0
-  requestIntervalSeconds: 0.06666667
+  requestIntervalSeconds: 0.08333334
   failureLogCooldownSeconds: 1
   cameraStartupTimeoutSeconds: 10
 --- !u!114 &1954474668
@@ -325,13 +325,21 @@ MonoBehaviour:
   modelBytesAsset: {fileID: 0}
   useGpuDelegate: 1
   numPoses: 1
-  minPoseDetectionConfidence: 0.5
-  minPosePresenceConfidence: 0.5
-  minTrackingConfidence: 0.5
+  minPoseDetectionConfidence: 0.4
+  minPosePresenceConfidence: 0.4
+  minTrackingConfidence: 0.4
   imageRotationDegrees: -1
   mirrorXOutput: 0
   invertYOutput: 0
   framePoolSize: 2
+  asyncInferenceTimeoutSeconds: 3
+  enableInferenceDownscale: 0
+  inferenceWidth: 640
+  inferenceHeight: 480
+  useEditorPythonMediaPipeFallback: 1
+  targetPoseFps: 12
+  editorPythonExecutablePath: 
+  editorPythonWorkerRelativePath: MediaPipe/editor_pose_worker.py
 --- !u!114 &1954474669
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -384,7 +392,7 @@ MonoBehaviour:
   startTrackingOnStart: 0
   exercise: squat
   analysisWindowSeconds: 0.8
-  expectedPoseFps: 15
+  expectedPoseFps: 12
   duplicateCooldownSeconds: 3
   minimumGlobalFeedbackIntervalSeconds: 1.5
   maxSpokenTextLength: 70
@@ -394,28 +402,28 @@ MonoBehaviour:
   ruleSettings:
     minimumVisibility: 0.45
     landmarkSmoothingAlpha: 0.35
-    maximumNormalizedJointJump: 0.08
+    maximumNormalizedJointJump: 0.12
     lowConfidenceGraceSeconds: 0.35
     maximumConsecutiveOutlierFrames: 3
     minimumValidCoreFrameRatio: 0.45
     minimumViolationRatio: 0.35
     minimumRuleEvaluationFrames: 6
-    minimumValidRepFrames: 6
+    minimumValidRepFrames: 4
     minimumRepViolationRatio: 0.35
     immediateViolationPersistenceRatio: 0.75
     minimumCriticalFrames: 2
-    maximumKneeValgusOffset: 0.1
-    minimumKneeObservationRatio: 0.5
-    standingKneeAngle: 160
-    standingExitKneeAngle: 150
+    maximumKneeValgusOffset: 0.15
+    minimumKneeObservationRatio: 0.6
+    standingKneeAngle: 150
+    standingExitKneeAngle: 140
     bottomKneeAngle: 125
-    bottomExitKneeAngle: 135
-    maximumRecognizableBottomKneeAngle: 145
-    maximumBottomKneeAngle: 135
+    bottomExitKneeAngle: 150
+    maximumRecognizableBottomKneeAngle: 175
+    maximumBottomKneeAngle: 170
     minimumBottomKneeAngle: 55
     maximumLeftRightKneeAngleDelta: 18
-    maximumTorsoTiltDegrees: 35
-    maximumCenterBalanceOffset: 0.12
+    maximumTorsoTiltDegrees: 42
+    maximumCenterBalanceOffset: 0.16
     phaseVelocityDeadZoneDegreesPerSecond: 12
     minimumBottomDwellSeconds: 0.15
 --- !u!114 &1954474672
@@ -461,7 +469,7 @@ MonoBehaviour:
   mobileCameraWidth: 640
   mobileCameraHeight: 480
   mobileCameraFps: 20
-  mobilePoseFps: 8
+  mobilePoseFps: 12
   mobileTargetFrameRate: 30
   trackingStartupTimeoutSeconds: 15
   performanceProfiler: {fileID: 1954474674}

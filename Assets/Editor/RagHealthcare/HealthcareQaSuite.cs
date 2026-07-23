@@ -52,9 +52,14 @@ namespace Rag.Healthcare.Editor
             Check(FloorReferenceEstimator.Estimate(SyntheticPoseFixtures.Standing()).valid, "Floor reference should be valid.", failures);
 
             VerifyLandmarkStability(failures);
+            VerifyFrontCameraTrackingQuality(failures);
             VerifyHotPathObjectReuse(failures);
             VerifyPhaseReversalRecognition(failures);
             VerifyDepthUsesMinimumAngle(failures);
+            VerifyShallowDepthInfoBand(failures);
+            VerifyBottomReachedSuppressesShallowWarning(failures);
+            VerifyKneeAlignmentPhaseGateAndSeverity(failures);
+            VerifyTorsoAndPelvicGeometry(failures);
             VerifyAnalysisWindowUsesTimestamps(failures);
             VerifyTemporalRepQuality(failures);
 
@@ -85,6 +90,7 @@ namespace Rag.Healthcare.Editor
             VerifyBundledKoreanFont(failures);
             VerifyMobileUiStructure(failures);
             VerifyPosePreviewCoordinateMapping(failures);
+            VerifyVisibilityGating(failures);
             VerifySafetyConstrainedPrompt(failures);
 
             var acceptance = PerformanceAcceptanceEvaluator.Evaluate(new PerformanceBenchmarkResult
@@ -366,32 +372,26 @@ namespace Rag.Healthcare.Editor
 
         private static void VerifyPosePreviewCoordinateMapping(ICollection<string> failures)
         {
-            var mapMethod = typeof(MobileWorkoutPrototypeView).GetMethod(
-                "ToPreviewPoint",
-                BindingFlags.Static | BindingFlags.NonPublic);
-            var scaleMethod = typeof(MobileWorkoutPrototypeView).GetMethod(
-                "ResolvePreviewScale",
-                BindingFlags.Static | BindingFlags.NonPublic);
-            Check(mapMethod != null, "The mobile pose coordinate mapper must exist.", failures);
-            Check(scaleMethod != null, "The raw camera preview transform mapper must exist.", failures);
-            if (mapMethod == null || scaleMethod == null)
-            {
-                return;
-            }
-
             var rect = new Rect(0f, 0f, 100f, 200f);
             var asymmetricJoint = new TrackedJoint { x = 0.2f, y = 0.3f };
             var centerJoint = new TrackedJoint { x = 0.5f, y = 0.5f };
-            var rearPoint = (Vector2)mapMethod.Invoke(null, new object[] { asymmetricJoint, rect, false });
-            var frontPoint = (Vector2)mapMethod.Invoke(null, new object[] { asymmetricJoint, rect, true });
-            var frontCenter = (Vector2)mapMethod.Invoke(null, new object[] { centerJoint, rect, true });
+            var rearPoint = PoseDisplayCoordinateMapper.ToDisplayPoint(asymmetricJoint, rect, false);
+            // Util API: mirrorX:true flips display X (tests/special paths). Live overlay uses false.
+            var frontMirrorUtilPoint = PoseDisplayCoordinateMapper.ToDisplayPoint(asymmetricJoint, rect, true);
+            var frontMirrorUtilCenter = PoseDisplayCoordinateMapper.ToDisplayPoint(centerJoint, rect, true);
+            // Live overlay contract: front camera uses ToDisplayPoint(..., mirrorX: false),
+            // so rear and front overlay mapping are identical for the same landmark.
+            var liveOverlayFrontPoint = PoseDisplayCoordinateMapper.ToDisplayPoint(asymmetricJoint, rect, false);
 
             Check(Mathf.Abs(rearPoint.x - 20f) < 0.01f && Mathf.Abs(rearPoint.y - 60f) < 0.01f,
                 "Rear-camera landmarks must preserve upright normalized coordinates.", failures);
-            Check(Mathf.Abs(frontPoint.x - 80f) < 0.01f && Mathf.Abs(frontPoint.y - 60f) < 0.01f,
-                "Front-camera landmarks must mirror only the display X coordinate.", failures);
-            Check(Mathf.Abs(frontCenter.x - 50f) < 0.01f && Mathf.Abs(frontCenter.y - 100f) < 0.01f,
-                "Front-camera mirroring must keep the center landmark fixed.", failures);
+            Check(Mathf.Abs(frontMirrorUtilPoint.x - 80f) < 0.01f && Mathf.Abs(frontMirrorUtilPoint.y - 60f) < 0.01f,
+                "ToDisplayPoint(mirrorX:true) util API must mirror only the display X coordinate.", failures);
+            Check(Mathf.Abs(frontMirrorUtilCenter.x - 50f) < 0.01f && Mathf.Abs(frontMirrorUtilCenter.y - 100f) < 0.01f,
+                "ToDisplayPoint(mirrorX:true) util API must keep the center landmark fixed.", failures);
+            Check(Mathf.Abs(liveOverlayFrontPoint.x - rearPoint.x) < 0.01f &&
+                  Mathf.Abs(liveOverlayFrontPoint.y - rearPoint.y) < 0.01f,
+                "Live overlay contract: front uses mirrorX:false, same path as rear for the same landmark.", failures);
 
             foreach (var rotation in new[] { 0, 90, 180, 270 })
             {
@@ -399,9 +399,10 @@ namespace Rag.Healthcare.Editor
                 {
                     foreach (var selfieMirrored in new[] { false, true })
                     {
-                        var actual = (Vector3)scaleMethod.Invoke(
-                            null,
-                            new object[] { rotation, verticallyMirrored, selfieMirrored });
+                        var actual = PoseDisplayCoordinateMapper.ResolvePreviewScale(
+                            rotation,
+                            verticallyMirrored,
+                            selfieMirrored);
                         var quarterTurn = rotation == 90 || rotation == 270;
                         var expectedX = selfieMirrored && !quarterTurn ? -1f : 1f;
                         var expectedY = verticallyMirrored ? -1f : 1f;
@@ -419,6 +420,68 @@ namespace Rag.Healthcare.Editor
                     }
                 }
             }
+        }
+
+        private static void VerifyVisibilityGating(ICollection<string> failures)
+        {
+            var visibleJoint = new TrackedJoint
+            {
+                name = PoseJointNames.LeftKnee,
+                x = 0.5f,
+                y = 0.5f,
+                visibility = 0.8f,
+                confidence = 0.8f
+            };
+            // Explicit 0/0 after ResolveLandmarkScores would be remapped to 1/1 at ingest;
+            // overlay CanRender still rejects Max(conf,vis) < 0.45 for already-resolved joints.
+            var hiddenJoint = new TrackedJoint
+            {
+                name = PoseJointNames.RightKnee,
+                x = 0.5f,
+                y = 0.5f,
+                visibility = 0f,
+                confidence = 0f
+            };
+
+            Check(PoseDisplayCoordinateMapper.CanRender(visibleJoint),
+                "Visible joints must render in the mobile pose overlay.", failures);
+            Check(!PoseDisplayCoordinateMapper.CanRender(hiddenJoint),
+                "Zero-confidence landmarks must not render in the mobile pose overlay.", failures);
+            Check(Mathf.Approximately(PoseDisplayCoordinateMapper.MinimumRenderableScore, 0.45f),
+                "Renderable score threshold must stay aligned with realtime rule settings.", failures);
+
+            var resolveMethod = typeof(MediaPipePoseTrackingProvider).GetMethod(
+                "ResolveLandmarkScores",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            Check(resolveMethod != null,
+                "MediaPipePoseTrackingProvider.ResolveLandmarkScores must remain accessible for QA.", failures);
+            if (resolveMethod != null)
+            {
+                VerifyResolvedLandmarkScores(resolveMethod, 0f, 0f, 1f, 1f,
+                    "ResolveLandmarkScores(0,0) must default to (1,1).", failures);
+                VerifyResolvedLandmarkScores(resolveMethod, 0f, 0.8f, 0.8f, 0.8f,
+                    "ResolveLandmarkScores(0,0.8) must mutual-fallback to (0.8,0.8).", failures);
+                VerifyResolvedLandmarkScores(resolveMethod, 0.7f, 0f, 0.7f, 0.7f,
+                    "ResolveLandmarkScores(0.7,0) must mutual-fallback to (0.7,0.7).", failures);
+            }
+        }
+
+        private static void VerifyResolvedLandmarkScores(
+            MethodInfo resolveMethod,
+            float visibilityInput,
+            float presenceInput,
+            float expectedVisibility,
+            float expectedConfidence,
+            string message,
+            ICollection<string> failures)
+        {
+            var args = new object[] { visibilityInput, presenceInput, 0f, 0f };
+            resolveMethod.Invoke(null, args);
+            var visibility = (float)args[2];
+            var confidence = (float)args[3];
+            Check(Mathf.Approximately(visibility, expectedVisibility) &&
+                  Mathf.Approximately(confidence, expectedConfidence),
+                message, failures);
         }
 
         private static void VerifyLandmarkStability(ICollection<string> failures)
@@ -446,6 +509,53 @@ namespace Rag.Healthcare.Editor
             Check(secondKnee != null && thirdKnee != null &&
                   Mathf.Abs(thirdKneeX - secondKneeX) < 0.01f,
                 "A single large landmark jump must be rejected as an outlier.", failures);
+
+            var lowConfidence = SyntheticPoseFixtures.LowConfidence();
+            lowConfidence.timestampUnixMilliseconds = 1300L;
+            var held = stabilizer.Stabilize(lowConfidence, settings);
+            held.TryGetJoint(PoseJointNames.LeftKnee, out var heldKnee);
+            Check(stabilizer.HeldLowConfidenceJointCount > 0 &&
+                  heldKnee != null &&
+                  PoseFrameView.GetJointScore(heldKnee) < settings.minimumVisibility,
+                "Held coordinates must retain the current low confidence so analysis cannot treat them as observed.", failures);
+        }
+
+        private static void VerifyFrontCameraTrackingQuality(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var evaluator = new PoseTrackingQualityEvaluator();
+
+            PoseTrackingQualityReport report = null;
+            for (var i = 0; i < settings.trackingQualityGoodFrames; i++)
+            {
+                var standing = SyntheticPoseFixtures.Standing();
+                standing.timestampUnixMilliseconds = 1000L + i * 100L;
+                report = evaluator.Evaluate(standing, settings);
+            }
+
+            Check(report != null && report.State == PoseTrackingQualityState.Good,
+                "Stable front-camera core landmarks must enter Good after the configured warm-up frames.", failures);
+            Check(report != null && report.HasReliableCore && report.IsFrontal && report.IsFullyInFrame,
+                "Good tracking quality must require confidence, frontal span, and full-frame visibility.", failures);
+
+            var clipped = SyntheticPoseFixtures.Standing();
+            clipped.TryGetJoint(PoseJointNames.LeftAnkle, out var leftAnkle);
+            clipped.TryGetJoint(PoseJointNames.RightAnkle, out var rightAnkle);
+            if (leftAnkle != null) leftAnkle.y = 1f;
+            if (rightAnkle != null) rightAnkle.y = 1f;
+            report = evaluator.Evaluate(clipped, settings);
+            Check(report.State == PoseTrackingQualityState.Degraded && !report.IsFullyInFrame,
+                "Clipped ankles must degrade tracking and pause pose decisions.", failures);
+
+            for (var i = 0; i < settings.trackingQualityUnavailableFrames; i++)
+            {
+                var lowConfidence = SyntheticPoseFixtures.LowConfidence();
+                lowConfidence.timestampUnixMilliseconds = 2000L + i * 100L;
+                report = evaluator.Evaluate(lowConfidence, settings);
+            }
+
+            Check(report.State == PoseTrackingQualityState.Unavailable && !report.AllowsPoseAnalysis,
+                "Sustained low-confidence core landmarks must become Unavailable.", failures);
         }
 
         private static void VerifyHotPathObjectReuse(ICollection<string> failures)
@@ -498,8 +608,14 @@ namespace Rag.Healthcare.Editor
         {
             var settings = new RealtimePoseRuleSettings();
             var detector = new ExercisePhaseDetector();
+            // Standing entry at >= standingKneeAngle (150); exit hysteresis keeps Standing until < standingExit (140).
             detector.Update(PhaseFeature(170f, 0f, 1000L), settings);
-            detector.Update(PhaseFeature(145f, -100f, 1100L), settings);
+            Check(detector.State.CurrentPhase == ExercisePhase.Standing,
+                "Knee angle 170 must enter Standing with StandingKneeAngle=150.", failures);
+            detector.Update(PhaseFeature(165f, 0f, 1050L), settings);
+            Check(detector.State.CurrentPhase == ExercisePhase.Standing,
+                "Knee angle 165 must remain Standing.", failures);
+            detector.Update(PhaseFeature(139f, -100f, 1100L), settings);
             detector.Update(PhaseFeature(130f, -100f, 1200L), settings);
             var bottomPhase = detector.Update(PhaseFeature(128f, 10f, 1300L), settings).CurrentPhase;
             detector.Update(PhaseFeature(140f, 80f, 1400L), settings);
@@ -535,6 +651,27 @@ namespace Rag.Healthcare.Editor
             Check(accumulator.IsCorrect(settings),
                 "One transient warning frame must not invalidate an otherwise stable rep.", failures);
 
+            // Depth shallow style: low PersistenceRatio (window violation ratio) on a minority of frames.
+            accumulator.Reset();
+            var lowPersistenceDepthWarning = new[]
+            {
+                new FeedbackEvent
+                {
+                    Severity = FeedbackSeverity.Warning,
+                    PersistenceRatio = 0.2f,
+                    RuleId = "squat_depth_shallow"
+                }
+            };
+            for (var i = 0; i < 10; i++)
+            {
+                accumulator.Observe(
+                    true,
+                    i == 2 || i == 7 ? lowPersistenceDepthWarning : Array.Empty<FeedbackEvent>(),
+                    settings);
+            }
+            Check(accumulator.IsCorrect(settings),
+                "Low-persistence depth warnings on a minority of frames must keep CorrectRep.", failures);
+
             accumulator.Reset();
             var persistentWarning = new[]
             {
@@ -566,6 +703,221 @@ namespace Rag.Healthcare.Editor
                 "Depth evaluation must retain the minimum knee angle in the analysis window.", failures);
             Check(!hasShallowError,
                 "Standing frames in the analysis window must not make a sufficiently deep squat look shallow.", failures);
+        }
+
+        private static void VerifyShallowDepthInfoBand(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var buffer = new PoseWindowBuffer(8);
+            // Info band: maximumBottomKneeAngle(170) < depth ≤ maximumRecognizableBottomKneeAngle(175)
+            // HasReachedBottom=false so Info shallow can still fire in the rare Bottom-without-flag path.
+            for (var i = 0; i < 6; i++) buffer.Add(ReliableFeature(172f, 1000L + i * 50L));
+            var bottomFeature = ReliableFeature(172f, 1400L);
+            buffer.Add(bottomFeature);
+            var stats = PoseWindowStats.Calculate(buffer, settings);
+            var phase = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasReachedBottomInCurrentRep = false
+            };
+            var candidates = new RealtimePoseRuleEngine().Evaluate(bottomFeature, stats, phase, settings);
+
+            FeedbackEvent shallow = null;
+            foreach (var candidate in candidates)
+            {
+                if (candidate.RuleId == "squat_depth_shallow")
+                {
+                    shallow = candidate;
+                    break;
+                }
+            }
+
+            Check(shallow != null,
+                "170–175° bottom depth (reachedBottom=false) must emit squat_depth_shallow guidance.", failures);
+            Check(shallow != null && shallow.Severity == FeedbackSeverity.Info,
+                "170–175° bottom depth must be Info, not Warning, so CorrectRep is not forced false.", failures);
+            Check(Mathf.Approximately(stats.MinimumKneeAngle, 172f),
+                "Info-band fixture must keep MinimumKneeAngle at 172°.", failures);
+        }
+
+        private static void VerifyBottomReachedSuppressesShallowWarning(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            // Window has no usable knee samples (MinimumKneeAngle=0); depth must come from rep min.
+            var stats = new PoseWindowStats
+            {
+                FrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameRatio = 1f,
+                MinimumKneeAngle = 0f,
+                ShallowDepthViolationRatio = 0.5f
+            };
+            var phase = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasReachedBottomInCurrentRep = true,
+                MinimumKneeAngleInCurrentRep = 172f
+            };
+            var feature = ReliableFeature(172f, 2000L);
+            var candidates = new RealtimePoseRuleEngine().Evaluate(feature, stats, phase, settings);
+
+            FeedbackEvent shallow = null;
+            foreach (var candidate in candidates)
+            {
+                if (candidate.RuleId == "squat_depth_shallow")
+                {
+                    shallow = candidate;
+                    break;
+                }
+            }
+
+            Check(shallow == null,
+                "Bottom + HasReachedBottomInCurrentRep must not emit squat_depth_shallow (no shallow nagging).", failures);
+        }
+
+        private static void VerifyKneeAlignmentPhaseGateAndSeverity(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var feature = ReliableFeature(100f, 1500L);
+            feature.HasRightKneeValgus = true;
+            feature.RightKneeValgusOffset = settings.MaximumKneeValgusOffset * 2f;
+            var stats = new PoseWindowStats
+            {
+                FrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameRatio = 1f,
+                RightKneeObservationRatio = 1f,
+                RightKneeAlignmentViolationRatio = 1f
+            };
+            var standingPhase = new ExercisePhaseState { CurrentPhase = ExercisePhase.Standing, Exercise = "squat" };
+            var standingEvents = new RealtimePoseRuleEngine().Evaluate(feature, stats, standingPhase, settings);
+            var standingKneeAlignment = false;
+            foreach (var candidate in standingEvents)
+            {
+                if (candidate.RuleId == "squat_knee_alignment") standingKneeAlignment = true;
+            }
+
+            Check(!standingKneeAlignment,
+                "Standing phase must not emit knee alignment events even with high valgus.", failures);
+
+            feature.RightKneeValgusOffset = settings.MaximumKneeValgusOffset * 1.2f;
+            var bottomPhase = new ExercisePhaseState { CurrentPhase = ExercisePhase.Bottom, Exercise = "squat" };
+            var bottomEvents = new RealtimePoseRuleEngine().Evaluate(feature, stats, bottomPhase, settings);
+            FeedbackEvent mild = null;
+            foreach (var candidate in bottomEvents)
+            {
+                if (candidate.RuleId == "squat_knee_alignment")
+                {
+                    mild = candidate;
+                    break;
+                }
+            }
+
+            Check(mild != null,
+                "Bottom phase with mild valgus must emit a knee alignment event.", failures);
+            Check(mild != null && mild.Severity == FeedbackSeverity.Info,
+                "Mild valgus (offset <= MaximumKneeValgusOffset * 1.4) must be Info, not Warning.", failures);
+            Check(mild != null && mild.Side == "right",
+                "Mild valgus fixture must attribute the event to the right knee.", failures);
+        }
+
+        private static void VerifyTorsoAndPelvicGeometry(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var joints = new[]
+            {
+                Joint(PoseJointNames.LeftShoulder, 0.4f, 0.3f),
+                Joint(PoseJointNames.RightShoulder, 0.6f, 0.3f),
+                Joint(PoseJointNames.LeftHip, 0.4f, 0.55f),
+                Joint(PoseJointNames.RightHip, 0.6f, 0.55f),
+                Joint(PoseJointNames.LeftKnee, 0.4f, 0.75f),
+                Joint(PoseJointNames.RightKnee, 0.6f, 0.75f),
+                Joint(PoseJointNames.LeftAnkle, 0.4f, 0.95f),
+                Joint(PoseJointNames.RightAnkle, 0.6f, 0.95f)
+            };
+            var view = new PoseFrameView();
+            view.Reset(new JointTrackingFrame { timestampUnixMilliseconds = 1000L, joints = joints }, settings.MinimumVisibility);
+            var extractor = new PoseFeatureExtractor();
+            var upright = extractor.Extract(view, "squat", settings.MinimumVisibility);
+
+            Check(upright.HasTorsoTilt && upright.TorsoTiltDegrees < 0.1f,
+                "Upright shoulders above hips must produce approximately 0° torso tilt in image coordinates.", failures);
+            Check(upright.HasPelvicTilt && upright.PelvicTiltRatio < 0.01f,
+                "Level hips must produce approximately zero normalized pelvic tilt.", failures);
+
+            joints[3].y = 0.63f; // relative hip/shoulder line angle => tan(angle) = 0.40
+            view.Reset(new JointTrackingFrame { timestampUnixMilliseconds = 1100L, joints = joints }, settings.MinimumVisibility);
+            var tilted = extractor.Extract(view, "squat", settings.MinimumVisibility);
+            Check(tilted.HasPelvicTilt && Mathf.Abs(tilted.PelvicTiltRatio - 0.4f) < 0.01f,
+                "Pelvic tilt must be measured relative to the shoulder line.", failures);
+
+            var stats = new PoseWindowStats
+            {
+                FrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameRatio = 1f,
+                AveragePelvicTiltRatio = tilted.PelvicTiltRatio,
+                PelvicTiltViolationRatio = 1f
+            };
+            var events = new RealtimePoseRuleEngine().Evaluate(
+                tilted,
+                stats,
+                new ExercisePhaseState { CurrentPhase = ExercisePhase.Descent, Exercise = "squat" },
+                settings);
+            var hasPelvicFeedback = false;
+            foreach (var candidate in events)
+            {
+                if (candidate.RuleId == "squat_pelvic_tilt")
+                {
+                    hasPelvicFeedback = true;
+                    break;
+                }
+            }
+
+            Check(hasPelvicFeedback,
+                "Persistent normalized pelvic tilt must emit squat_pelvic_tilt feedback.", failures);
+
+            var standingEvents = new RealtimePoseRuleEngine().Evaluate(
+                tilted,
+                stats,
+                new ExercisePhaseState { CurrentPhase = ExercisePhase.Standing, Exercise = "squat" },
+                settings);
+            var hasStandingPelvicFeedback = false;
+            foreach (var candidate in standingEvents)
+            {
+                if (candidate.RuleId == "squat_pelvic_tilt")
+                {
+                    hasStandingPelvicFeedback = true;
+                    break;
+                }
+            }
+            Check(!hasStandingPelvicFeedback,
+                "Standing phase must not emit pelvis-alignment feedback.", failures);
+
+            // A rolled camera affects shoulder and hip lines equally. It must not be
+            // reported as a pelvis-only asymmetry.
+            joints[0].y = 0.34f;
+            joints[1].y = 0.38f;
+            joints[2].y = 0.59f;
+            joints[3].y = 0.63f;
+            view.Reset(new JointTrackingFrame { timestampUnixMilliseconds = 1200L, joints = joints }, settings.MinimumVisibility);
+            var cameraRolled = extractor.Extract(view, "squat", settings.MinimumVisibility);
+            Check(cameraRolled.HasPelvicTilt && cameraRolled.PelvicTiltRatio < 0.01f,
+                "Equal shoulder and hip slopes must be treated as camera/body roll, not pelvic tilt.", failures);
+        }
+
+        private static TrackedJoint Joint(string name, float x, float y)
+        {
+            return new TrackedJoint
+            {
+                name = name,
+                x = x,
+                y = y,
+                visibility = 1f,
+                confidence = 1f
+            };
         }
 
         private static void VerifyAnalysisWindowUsesTimestamps(ICollection<string> failures)

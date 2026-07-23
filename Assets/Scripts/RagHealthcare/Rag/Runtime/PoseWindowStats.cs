@@ -16,6 +16,7 @@ namespace Rag.Healthcare.Rag.Runtime
         public float AverageKneeAngle;
         public float MinimumKneeAngle = 180f;
         public float AverageTorsoTiltDegrees;
+        public float AveragePelvicTiltRatio;
         public float AverageCenterBalanceOffset;
         public float AverageLeftKneeValgusOffset;
         public float AverageRightKneeValgusOffset;
@@ -27,7 +28,10 @@ namespace Rag.Healthcare.Rag.Runtime
         public float RightKneeAlignmentViolationRatio;
         public float KneeAlignmentViolationRatio;
         public float TorsoTiltViolationRatio;
+        public float PelvicTiltViolationRatio;
         public float CenterBalanceViolationRatio;
+        public float ShallowDepthViolationRatio;
+        public float DeepDepthViolationRatio;
         public float AverageValidityScore;
         public PoseFeatureFrame LatestFrame;
 
@@ -59,6 +63,7 @@ namespace Rag.Healthcare.Rag.Runtime
 
             var kneeAngleCount = 0;
             var torsoCount = 0;
+            var pelvicTiltCount = 0;
             var balanceCount = 0;
             var leftValgusCount = 0;
             var rightValgusCount = 0;
@@ -67,7 +72,10 @@ namespace Rag.Healthcare.Rag.Runtime
             var leftKneeAlignmentViolations = 0;
             var rightKneeAlignmentViolations = 0;
             var torsoViolations = 0;
+            var pelvicTiltViolations = 0;
             var balanceViolations = 0;
+            var shallowDepthViolations = 0;
+            var deepDepthViolations = 0;
 
             var startIndex = ResolveAnalysisStartIndex(buffer, analysisWindowSeconds);
 
@@ -93,6 +101,14 @@ namespace Rag.Healthcare.Rag.Runtime
                     stats.AverageKneeAngle += frame.AverageKneeAngle;
                     stats.MinimumKneeAngle = Mathf.Min(stats.MinimumKneeAngle, frame.AverageKneeAngle);
                     kneeAngleCount++;
+                    if (frame.AverageKneeAngle > settings.MaximumBottomKneeAngle)
+                    {
+                        shallowDepthViolations++;
+                    }
+                    else if (frame.AverageKneeAngle < settings.MinimumBottomKneeAngle)
+                    {
+                        deepDepthViolations++;
+                    }
                 }
 
                 if (frame.HasTorsoTilt)
@@ -102,6 +118,16 @@ namespace Rag.Healthcare.Rag.Runtime
                     if (frame.TorsoTiltDegrees > settings.MaximumTorsoTiltDegrees)
                     {
                         torsoViolations++;
+                    }
+                }
+
+                if (frame.HasPelvicTilt)
+                {
+                    stats.AveragePelvicTiltRatio += frame.PelvicTiltRatio;
+                    pelvicTiltCount++;
+                    if (frame.PelvicTiltRatio > settings.MaximumPelvicTiltRatio)
+                    {
+                        pelvicTiltViolations++;
                     }
                 }
 
@@ -158,6 +184,8 @@ namespace Rag.Healthcare.Rag.Runtime
             if (kneeAngleCount > 0)
             {
                 stats.AverageKneeAngle /= kneeAngleCount;
+                stats.ShallowDepthViolationRatio = shallowDepthViolations / (float)kneeAngleCount;
+                stats.DeepDepthViolationRatio = deepDepthViolations / (float)kneeAngleCount;
             }
             else
             {
@@ -168,6 +196,12 @@ namespace Rag.Healthcare.Rag.Runtime
             {
                 stats.AverageTorsoTiltDegrees /= torsoCount;
                 stats.TorsoTiltViolationRatio = torsoViolations / (float)torsoCount;
+            }
+
+            if (pelvicTiltCount > 0)
+            {
+                stats.AveragePelvicTiltRatio /= pelvicTiltCount;
+                stats.PelvicTiltViolationRatio = pelvicTiltViolations / (float)pelvicTiltCount;
             }
 
             if (balanceCount > 0)
@@ -267,6 +301,7 @@ namespace Rag.Healthcare.Rag.Runtime
             AverageKneeAngle = 0f;
             MinimumKneeAngle = 180f;
             AverageTorsoTiltDegrees = 0f;
+            AveragePelvicTiltRatio = 0f;
             AverageCenterBalanceOffset = 0f;
             AverageLeftKneeValgusOffset = 0f;
             AverageRightKneeValgusOffset = 0f;
@@ -278,7 +313,10 @@ namespace Rag.Healthcare.Rag.Runtime
             RightKneeAlignmentViolationRatio = 0f;
             KneeAlignmentViolationRatio = 0f;
             TorsoTiltViolationRatio = 0f;
+            PelvicTiltViolationRatio = 0f;
             CenterBalanceViolationRatio = 0f;
+            ShallowDepthViolationRatio = 0f;
+            DeepDepthViolationRatio = 0f;
             AverageValidityScore = 0f;
             LatestFrame = null;
         }

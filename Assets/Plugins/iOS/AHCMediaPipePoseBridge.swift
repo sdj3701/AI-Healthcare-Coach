@@ -864,6 +864,10 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
 
     private func normalizedLandmarkPayload(_ landmarks: [NormalizedLandmark], rotationAngle: Int) -> [[String: Any]] {
         // Omit landmark "name": C# BuildFrame maps by index (PoseJointNames.MediaPipe33).
+        // MediaPipe Tasks Vision returns landmarks in input-buffer normalized coords even when
+        // inference uses MPImage orientation. UIImage orientation alone does not guarantee upright
+        // output, so map once here to the Provider contract (upright display-normalized).
+        // Do not re-apply camera rotation in the UI overlay.
         let normalizedLandmarks = landmarks.prefix(mediaPipeLandmarkCount)
         var payload: [[String: Any]] = []
         payload.reserveCapacity(normalizedLandmarks.count)
@@ -871,12 +875,13 @@ private final class AHCMediaPipePoseBridge: NSObject, PoseLandmarkerLiveStreamDe
         let normalizedAngle = ((rotationAngle % 360) + 360) % 360
 
         for (index, landmark) in normalizedLandmarks.enumerated() {
+            // Mutual fallback; ?? 1.0 only when both are nil (explicit 0.0 stays 0).
             let visibility = landmark.visibility?.floatValue ?? landmark.presence?.floatValue ?? 1.0
             let presence = landmark.presence?.floatValue ?? landmark.visibility?.floatValue ?? 1.0
-            
+
             var rx = landmark.x
             var ry = landmark.y
-            
+
             switch normalizedAngle {
             case 90:
                 rx = 1.0 - landmark.y

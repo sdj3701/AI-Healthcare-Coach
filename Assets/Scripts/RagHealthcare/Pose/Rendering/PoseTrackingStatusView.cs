@@ -94,6 +94,18 @@ namespace Rag.Healthcare.Pose.Rendering
             if (feedbackOrchestrator != null)
             {
                 var phaseState = feedbackOrchestrator.PhaseState;
+                var trackingQuality = feedbackOrchestrator.LatestTrackingQuality;
+                builder.Append("Tracking quality: ")
+                    .Append(trackingQuality == null ? "-" : trackingQuality.State.ToString());
+                if (trackingQuality != null && !string.IsNullOrWhiteSpace(trackingQuality.Reason))
+                {
+                    builder.Append(" (").Append(trackingQuality.Reason).Append(")");
+                }
+                builder.AppendLine();
+                if (feedbackOrchestrator.IsWaitingForStandingRearm)
+                {
+                    builder.AppendLine("Rep ready: stand upright to start");
+                }
                 builder.Append("Correct reps: ")
                     .Append(feedbackOrchestrator.CorrectRepCount)
                     .Append("/")

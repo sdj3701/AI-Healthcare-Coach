@@ -163,7 +163,8 @@ namespace Rag.Healthcare.Pose.Analysis
                 return;
             }
 
-            var tilt = Vector2.Angle(torsoVector, Vector2.down);
+            // Image-space y grows downward; shoulders above hips form an upward vector.
+            var tilt = Vector2.Angle(torsoVector, Vector2.up);
             if (tilt <= MaximumTorsoTiltDegrees)
             {
                 return;

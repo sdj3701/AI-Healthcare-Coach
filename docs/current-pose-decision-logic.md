@@ -26,6 +26,10 @@
 10. `FeedbackPrioritizer`가 중복/간격 제한을 적용해 하나의 피드백을 고른다.
 11. `FeedbackComposer`와 `RagRetriever`가 음성 문장을 만들고 `PoseFeedbackJsonReceiver`로 전달한다.
 
+2026-07-23부터 raw landmark의 전면 촬영 품질을 먼저 평가한다. 품질이 `Good`이 아니면 안정화 프레임은 준비하되 phase, 규칙, 반복 품질 판정은 보류한다. 양쪽 어깨·골반·무릎·발목 confidence, 화면상 전신 크기, 화면 잘림, hip/shoulder 가로 폭을 함께 사용하며, 정상 프레임이 연속 3개 들어온 뒤 분석을 재개한다.
+
+추적 품질이 끊겼다가 돌아오면 서 있는 준비 자세를 먼저 다시 확인한다. 앉은 상태나 상승 중간부터 분석이 재개된 경우에는 해당 구간을 새로운 반복으로 세지 않으며, 사용자가 다시 선 뒤 시작한 완전한 하강-바닥-상승 구간만 평가한다.
+
 관련 코드:
 
 - `Assets/Scripts/RagHealthcare/Pose/JointTrackingController.cs`
@@ -72,14 +76,15 @@
 | `LeftKneeAngle`, `RightKneeAngle` | hip-knee-ankle 2D 각도 | 스쿼트 깊이, phase, 좌우 대칭 |
 | `AverageKneeAngle` | 좌우 무릎 각도 평균 | phase와 깊이 판단 |
 | `LeftKneeValgusOffset`, `RightKneeValgusOffset` | knee와 hip-ankle 선 사이 거리 | 무릎 정렬 이탈 판단 |
-| `TorsoTiltDegrees` | shoulder center와 hip center 벡터의 각도 | 상체 과도한 숙임 판단 |
+| `TorsoTiltDegrees` | shoulder center와 hip center 벡터가 화면 위쪽 수직선에서 벗어난 각도 | 상체 과도한 숙임 판단 |
 | `CenterBalanceOffset` | hip center x와 ankle center x 차이 | 중심 쏠림 판단 |
 | `HipLevelDelta` | 좌우 hip y 차이 | 골반 높이 차이 참고 |
+| `PelvicTiltRatio` | 골반선과 어깨선의 상대 기울기 (`tan(relative angle)`) | 카메라 기울기·전신 기울기에 덜 민감한 골반 비대칭 판단 |
 | `ShoulderLevelDelta` | 좌우 shoulder y 차이 | 어깨 높이 차이 참고 |
 | `HipCenterYVelocityPerSecond` | 이전 프레임 대비 hip center y 변화 | 동작 흐름 참고 |
 | `KneeAngleVelocityDegreesPerSecond` | 이전 프레임 대비 무릎 각도 변화 | 하강/상승 phase 판단 |
 
-현재 실시간 규칙 엔진에서 직접 피드백으로 쓰는 항목은 무릎 정렬, 상체 기울기, 중심 균형, 좌우 무릎 대칭, 스쿼트 깊이다.
+현재 실시간 규칙 엔진에서 직접 피드백으로 쓰는 항목은 무릎 정렬, 상체 기울기, 골반 기울기, 중심 균형, 좌우 무릎 대칭, 스쿼트 깊이다.
 
 ## 현재 임계값
 
@@ -88,21 +93,25 @@
 | 설정 | 현재값 | 의미 |
 | --- | ---: | --- |
 | `analysisWindowSeconds` | `0.8` | 최근 0.8초 프레임을 보고 판단 |
-| `expectedPoseFps` | `15` | 분석 창 capacity 계산 기준 FPS |
+| `expectedPoseFps` | `12` | 분석 창 capacity 계산 기준 FPS |
 | `minimumVisibility` | `0.45` | 관절 사용 최소 신뢰도 |
 | `lowConfidenceGraceSeconds` | `0.35` | 저신뢰도 시 마지막 유효 좌표 유지 시간 |
 | `maximumConsecutiveOutlierFrames` | `3` | 연속 이상치로 허용하는 최대 프레임 |
 | `minimumValidCoreFrameRatio` | `0.45` | 핵심 자세가 잡힌 프레임 최소 비율 |
 | `minimumViolationRatio` | `0.35` | 오류가 반복됐다고 볼 최소 비율 |
-| `maximumKneeValgusOffset` | `0.10` | 무릎 정렬 이탈 허용치 |
-| `minimumKneeObservationRatio` | `0.5` | 좌/우 무릎 정렬·대칭 평가에 필요한 최소 관찰 비율 |
-| `standingKneeAngle` | `160` | 서 있는 phase 기준 무릎 각도 |
+| `maximumKneeValgusOffset` | `0.15` | 무릎 정렬 이탈 허용치 |
+| `minimumKneeObservationRatio` | `0.6` | 좌/우 무릎 정렬·대칭 평가에 필요한 최소 관찰 비율 |
+| `standingKneeAngle` | `150` | 서 있는 phase 기준 무릎 각도 |
+| `standingExitKneeAngle` | `140` | Standing 이탈 히스테리시스 (이 값 미만에서 하강 시작) |
 | `bottomKneeAngle` | `125` | 바닥 phase 진입 기준 무릎 각도 |
-| `maximumBottomKneeAngle` | `135` | 바닥 자세에서 이보다 크면 얕음 |
+| `bottomExitKneeAngle` | `150` | Bottom→Ascent 전환 여유 각도 |
+| `maximumBottomKneeAngle` | `170` | 정상 깊이 상한. 이보다 크면 얕음 계열 피드백 |
+| `maximumRecognizableBottomKneeAngle` | `175` | 이보다 크면 얕음 Warning. 170~175는 Info 권고 |
 | `minimumBottomKneeAngle` | `55` | 바닥 자세에서 이보다 작으면 너무 깊음 |
 | `maximumLeftRightKneeAngleDelta` | `18` | 좌우 무릎 각도 차이 허용치 |
-| `maximumTorsoTiltDegrees` | `35` | 상체 기울기 허용 각도 |
-| `maximumCenterBalanceOffset` | `0.12` | 중심 쏠림 허용치 |
+| `maximumTorsoTiltDegrees` | `42` | 상체 기울기 허용 각도 |
+| `maximumPelvicTiltRatio` | `0.25` | 골반선-어깨선 상대 기울기 허용치 (약 14°) |
+| `maximumCenterBalanceOffset` | `0.16` | 중심 쏠림 허용치 |
 | `phaseVelocityDeadZoneDegreesPerSecond` | `12` | phase 변화 무시 구간 |
 | `duplicateCooldownSeconds` | `3` | 같은 피드백 반복 제한 |
 | `minimumGlobalFeedbackIntervalSeconds` | `1.5` | 전체 피드백 최소 간격 |
@@ -117,17 +126,27 @@ Reliable squat core 조건:
 
 - 좌우 무릎 각도 계산 가능
 - 상체 기울기 계산 가능
-- 중심 균형 계산 가능
+
+발목 기반 중심 균형은 core 게이트에 포함하지 않으며, 중심 균형 규칙에서만 사용한다.
 
 ### 2. 무릎 정렬 이탈
 
 각 무릎에 대해 `hip -> ankle` 선과 knee 사이의 2D 거리를 계산한다.
 
-좌우를 독립적으로 평가한다. 해당 측의 관찰 비율(`Left/RightKneeObservationRatio`)이 `minimumKneeObservationRatio` 이상이고, 해당 측의 정렬 위반 비율이 `minimumViolationRatio` 이상일 때만 그 측 경고를 낸다. 양쪽이 모두 조건을 만족하면 offset이 더 큰 쪽 1건만 낸다. 한쪽 다리가 팔에 가려져 관찰이 부족하면 그 측은 평가하지 않는다.
+`Descent` / `Bottom` / `Ascent` phase에서만 평가한다. `Standing`·`Unknown`에서는 내지 않는다.
+
+좌우를 독립적으로 평가한다. 해당 측의 관찰 비율(`Left/RightKneeObservationRatio`)이 `minimumKneeObservationRatio`(0.6) 이상이고, 해당 측의 정렬 위반 비율이 `minimumViolationRatio` 이상일 때만 이벤트를 낸다. 양쪽이 모두 조건을 만족하면 offset이 더 큰 쪽 1건만 낸다. 한쪽 다리가 팔에 가려져 관찰이 부족하면 그 측은 평가하지 않는다.
+
+- offset ≤ `maximumKneeValgusOffset * 1.4`(허용 0.15 기준 약 0.21): `Info` (살짝 벌어짐 안내)
+- offset > 그 기준: `Warning` (기존 교정 메시지)
+
+`Info`는 `RepQualityAccumulator`에서 CorrectRep 실패로 쓰지 않는다.
 
 ### 3. 상체 과도한 기울기
 
 좌우 어깨 midpoint와 좌우 골반 midpoint를 연결한 torso vector를 만든다.
+
+카메라 landmark는 화면 아래쪽으로 갈수록 `y`가 커지므로, `shoulderCenter - hipCenter`의 정상 직립 기준은 수치상 `Vector2.down`이다. 2026-07-23 이전 구현 일부에서는 반대인 `Vector2.up`과 비교해 직립 자세를 약 `180°`로 계산했고, 이 값이 상체 기울기 Warning과 반복 실패로 이어질 수 있었다. 현재는 기준축을 `Vector2.down`으로 수정하고 직립 합성 자세가 약 `0°`인지 QA로 고정했다.
 
 이 벡터의 각도가 `maximumTorsoTiltDegrees`보다 큰 프레임 비율이 `minimumViolationRatio` 이상이면 상체 기울기 피드백을 낸다.
 
@@ -137,22 +156,34 @@ Reliable squat core 조건:
 
 이 값이 `maximumCenterBalanceOffset`보다 큰 프레임 비율이 `minimumViolationRatio` 이상이면 중심 균형 피드백을 낸다.
 
-### 5. 좌우 무릎 대칭
+### 5. 골반 기울기
+
+좌우 hip을 이은 골반선과 좌우 shoulder를 이은 어깨선의 상대 기울기를 `PelvicTiltRatio`로 사용한다. 원시 hip y 차이만 쓰면 카메라가 기울었거나 사용자가 상체와 골반을 함께 기울인 정상 프레임도 골반 오류로 판정될 수 있기 때문이다.
+
+hip 또는 shoulder의 화면상 가로 간격이 `0.08` 미만인 옆모습/가림 프레임은 골반 수평 판정을 하지 않는다. 또한 `Descent`·`Bottom`·`Ascent` 중 핵심 스쿼트 관절이 현재 프레임에서 모두 유효할 때만 평가한다. 유효 프레임에서 `PelvicTiltRatio`가 `maximumPelvicTiltRatio`를 넘는 비율이 `minimumViolationRatio` 이상일 때만 골반 교정 피드백을 낸다.
+
+### 6. 좌우 무릎 대칭
 
 좌우 무릎 각도의 차이 평균을 계산한다.
 
 양쪽 무릎 관찰 비율이 모두 `minimumKneeObservationRatio` 이상일 때만 평가한다. 한쪽이 불안정하면 대칭 판정을 건너뛴다. 양쪽이 충분히 관찰되고 각도 차이가 `maximumLeftRightKneeAngleDelta`보다 크며 위반 비율이 `minimumViolationRatio` 이상이면 좌우 무릎 굽힘이 다르다는 피드백을 낸다.
 
-### 6. 스쿼트 깊이
+### 7. 스쿼트 깊이
 
-스쿼트 phase가 `Bottom`일 때만 깊이 피드백을 낸다.
+스쿼트 phase가 `Bottom`일 때만 깊이 피드백을 낸다. 판정 각도 `depthAngle`은 분석 창의 `MinimumKneeAngle`과 이번 rep의 `MinimumKneeAngleInCurrentRep` 중 더 깊은(작은) 값을 쓴다. 창에 무릎 샘플이 없어 `MinimumKneeAngle=0`이면 rep 최저각만 사용한다.
 
-- `AverageKneeAngle > maximumBottomKneeAngle`: 너무 얕음
-- `AverageKneeAngle < minimumBottomKneeAngle`: 너무 깊음
+`HasReachedBottomInCurrentRep`이면 얕음(`squat_depth_shallow`)은 내지 않는다. 너무 깊은 경우(`depthAngle < minimumBottomKneeAngle`)만 Warning한다.
+
+- `HasReachedBottomInCurrentRep == false`이고 `depthAngle > maximumRecognizableBottomKneeAngle`(175): `Warning` + `ShallowDepthViolationRatio`
+- `HasReachedBottomInCurrentRep == false`이고 `maximumBottomKneeAngle`(170) < `depthAngle` ≤ 175: `Info` + shallow ratio (권고만)
+- `depthAngle < minimumBottomKneeAngle`(55): `Warning` + `DeepDepthViolationRatio`
+
+깊이 이벤트의 `PersistenceRatio`는 상수(0.8)가 아니라 창 내 무릎각 프레임 대비 shallow/deep 위반 비율이다. 소수 프레임만 위반이면 즉시 `HasPersistentWarning`로 실패하지 않는다.
 
 Phase는 평균 무릎 각도와 무릎 각도 변화 속도로 추정한다.
 
-- `AverageKneeAngle >= standingKneeAngle`: `Standing`
+- `AverageKneeAngle >= standingKneeAngle`(150): `Standing`
+- Standing 유지: `AverageKneeAngle >= standingExitKneeAngle`(140)
 - `AverageKneeAngle <= bottomKneeAngle`이고 각도 변화가 dead zone 안이면 `Bottom`
 - 무릎 각도가 줄어드는 중이면 `Descent`
 - 무릎 각도가 커지는 중이면 `Ascent`
@@ -168,7 +199,7 @@ Phase는 평균 무릎 각도와 무릎 각도 변화 속도로 추정한다.
 1. rep가 시작되면 `RepQualityAccumulator`의 시간 기반 증거를 초기화한다.
 2. `Descent`, `Bottom`, `Ascent` 중 핵심 관절이 유효한 프레임만 품질 평가에 포함한다.
 3. `Info` 안내는 실패 근거에서 제외하고 `Warning`/`Critical`만 누적한다.
-4. 단일 Warning은 실패로 고정하지 않는다. 최소 6개 유효 프레임과 35% 이상 Warning 비율, 75% 이상 지속 근거 또는 2개 이상 Critical 프레임 중 하나가 있어야 실패로 확정한다.
+4. 단일 Warning은 실패로 고정하지 않는다. 최소 4개 유효 프레임과 35% 이상 Warning 비율, 75% 이상 지속 근거 또는 2개 이상 Critical 프레임 중 하나가 있어야 실패로 확정한다.
 5. `ExercisePhaseDetector`의 `RepCount`가 증가하는 순간 충분한 유효 프레임이 있고 확정 오류가 없으면 `CorrectRepCount`를 1 증가시킨다.
 6. 유효 프레임이 부족한 rep는 성공/실패로 단정하지 않고 `관절 인식이 불안정해 이번 동작은 횟수에 포함하지 않았습니다.`라고 안내한다.
 7. 올바른 rep가 증가하면 `PoseFeedbackJsonReceiver`로 `정확합니다. {N}개.` TTS 메시지를 보낸다.
@@ -228,6 +259,7 @@ Stop 이후에는 `CameraPreviewDebugView`가 카메라 프리뷰 대신 `PoseJs
 ## 현재 한계
 
 - 현재 판별은 2D normalized 좌표 기반이다.
+- 골반 기울기는 2D 화면 투영 기준이며, 전후 골반 회전이나 실제 골반 관절의 의학적 정렬을 측정하지 않는다.
 - `z`와 `worldLandmarks`는 표준 자세 판별에 쓰지 않는다.
 - 카메라 각도, 거리, 미러링, 회전에 따라 threshold 체감이 달라질 수 있다.
 - "올바른 자세 점수"나 "종합 합격/불합격" 모델은 아직 없다.
@@ -250,8 +282,8 @@ Stop 이후에는 `CameraPreviewDebugView`가 카메라 프리뷰 대신 `PoseJs
 ### 처리 순서
 
 1. `PoseLandmarkStabilizer`가 관절별 최근 3프레임 중앙값을 구한다.
-2. 중앙값에 EMA `alpha=0.35`를 적용한다.
-3. 한 프레임에서 정규화 좌표가 `0.08`보다 크게 이동하면 단일 이상치로 보류한다.
+2. 중앙값에 EMA를 적용한다(에디터/비-iOS `alpha=0.35`, iOS 런타임 `Awake`에서 `0.55` 강제).
+3. 한 프레임에서 정규화 좌표가 `0.12`보다 크게 이동하면 단일 이상치로 보류한다.
 4. confidence가 잠깐 낮아지면 최대 `0.2초` 동안 마지막 유효 좌표를 유지한다.
 5. 평활화된 좌표로 각도와 속도를 계산한다.
 6. `ExercisePhaseDetector`는 정지 프레임뿐 아니라 하강 속도가 상승으로 반전되는 시점도 Bottom으로 인식한다.
@@ -259,26 +291,28 @@ Stop 이후에는 `CameraPreviewDebugView`가 카메라 프리뷰 대신 `PoseJs
 
 ### 현재 튜닝값
 
-- landmark EMA: `0.35`
-- 단일 관절 최대 이동: `0.08`
+- landmark EMA: 비-iOS `0.35` / iOS `0.55`
+- 단일 관절 최대 이동: `0.12`
 - 저신뢰도 grace: `0.35초`
 - 연속 이상치 허용: `3`프레임
 - 분석 창: `0.8초`
 - 최소 visibility: `0.45`
 - 최소 규칙 평가 프레임: `6`
-- 최소 rep 유효 프레임: `6`
+- 최소 rep 유효 프레임: `4`
+- Pose 추론: 카메라와 동일 `640×480`(inference downscale 끔), Pose `12` FPS, MediaPipe confidence `0.40`
 - rep Warning 비율: `35%`
 - 즉시 확정 지속 비율: `75%`
 - Critical 확인 프레임: `2`
-- Standing 진입/이탈: `160도 / 150도`
+- Standing 진입/이탈: `150도 / 140도`
 - 기본 Bottom: `125도`
-- 인식 가능한 Bottom 최대: `145도`
-- 정상 깊이 최대: `135도`
-- 무릎 valgus 허용: `0.10`
-- 무릎 최소 관찰 비율: `0.5`
+- Bottom 이탈: `150도`
+- 인식 가능한 Bottom 최대: `175도`
+- 정상 깊이 최대: `170도`
+- 무릎 valgus 허용: `0.15` (Standing 미평가; 경미=Info / 심각=Warning)
+- 무릎 최소 관찰 비율: `0.6`
 - 속도 dead zone: `12도/초`
 
-깊이 판정은 분석 창의 평균 각도가 아니라 최소 무릎 각도를 사용한다. 직전 Standing 프레임이 창에 남아 있어도 실제로 충분히 내려갔다면 얕은 스쿼트로 오판정하지 않는다.
+깊이 판정은 분석 창 `MinimumKneeAngle`과 이번 rep `MinimumKneeAngleInCurrentRep`의 최솟값을 사용한다. `HasReachedBottomInCurrentRep`이면 얕음 안내를 내지 않고, 너무 깊은 경우만 Warning한다. Bottom 미인식(rare)일 때만 170~175° Info / 175° 초과 Warning을 내며, persistence는 창 내 shallow/deep 위반 비율을 쓴다.
 
 ## 2026-07-21 팔-다리 가림 오판정 완화
 

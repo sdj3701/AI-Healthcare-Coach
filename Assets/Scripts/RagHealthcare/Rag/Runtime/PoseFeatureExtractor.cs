@@ -6,6 +6,10 @@ namespace Rag.Healthcare.Rag.Runtime
 {
     public sealed class PoseFeatureExtractor
     {
+        // Below this projected horizontal span, a frontal pelvic-level estimate is
+        // too sensitive to a single-landmark jitter or a near side-on camera view.
+        private const float MinimumFrontalPelvisSpan = 0.08f;
+
         private readonly PoseFeatureFrame workingFeature = new PoseFeatureFrame();
         private bool hasPreviousFrame;
         private long previousTimestampUnixMilliseconds;
@@ -82,6 +86,8 @@ namespace Rag.Healthcare.Rag.Runtime
             {
                 validFeatureCount++;
             }
+
+            feature.HasPelvicTilt = TryCalculatePelvicTilt(frameView, out feature.PelvicTiltRatio);
 
             feature.HasShoulderLevel = TryCalculateLevelDelta(
                 frameView,
@@ -172,7 +178,47 @@ namespace Rag.Healthcare.Rag.Runtime
                 return false;
             }
 
+            // Landmark coordinates use a screen origin at the top-left, so an
+            // upright shoulder-minus-hip vector has a negative y component.
             torsoTiltDegrees = Vector2.Angle(torsoVector, Vector2.down);
+            return true;
+        }
+
+        private static bool TryCalculatePelvicTilt(PoseFrameView frameView, out float pelvicTiltRatio)
+        {
+            pelvicTiltRatio = 0f;
+            if (!TryGetPosition(frameView, PoseJointNames.LeftHip, out var leftHip) ||
+                !TryGetPosition(frameView, PoseJointNames.RightHip, out var rightHip) ||
+                !TryGetPosition(frameView, PoseJointNames.LeftShoulder, out var leftShoulder) ||
+                !TryGetPosition(frameView, PoseJointNames.RightShoulder, out var rightShoulder))
+            {
+                return false;
+            }
+
+            var hipLine = rightHip - leftHip;
+            var shoulderLine = rightShoulder - leftShoulder;
+            // A nearly edge-on pose makes projected hip/shoulder width too small for
+            // a stable frontal pelvic-level judgement. Treat it as unavailable instead.
+            if (Mathf.Abs(hipLine.x) < MinimumFrontalPelvisSpan ||
+                Mathf.Abs(shoulderLine.x) < MinimumFrontalPelvisSpan)
+            {
+                return false;
+            }
+
+            // Compare the pelvis to the shoulder line instead of screen-horizontal.
+            // This removes camera-roll and whole-body lean that affect both lines in
+            // the same way, while retaining a true pelvis-only asymmetry.
+            var hipAngle = Mathf.Atan2(hipLine.y, hipLine.x) * Mathf.Rad2Deg;
+            var shoulderAngle = Mathf.Atan2(shoulderLine.y, shoulderLine.x) * Mathf.Rad2Deg;
+            var relativeAngle = Mathf.Abs(Mathf.DeltaAngle(hipAngle, shoulderAngle));
+            if (relativeAngle > 90f)
+            {
+                relativeAngle = 180f - relativeAngle;
+            }
+
+            // tan(90°) is numerically unstable; any relative angle near it is already
+            // an unambiguous outlier, so cap only the metric representation.
+            pelvicTiltRatio = Mathf.Tan(Mathf.Min(relativeAngle, 85f) * Mathf.Deg2Rad);
             return true;
         }
 

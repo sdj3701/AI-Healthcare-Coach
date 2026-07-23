@@ -29,12 +29,13 @@ namespace Rag.Healthcare.Pose.Providers
         [Header("MediaPipe")]
         [SerializeField] private bool useGpuDelegate = true;
         [SerializeField, Min(1)] private int numPoses = 1;
-        [SerializeField, Range(0f, 1f)] private float minPoseDetectionConfidence = 0.5f;
-        [SerializeField, Range(0f, 1f)] private float minPosePresenceConfidence = 0.5f;
-        [SerializeField, Range(0f, 1f)] private float minTrackingConfidence = 0.5f;
+        [SerializeField, Range(0f, 1f)] private float minPoseDetectionConfidence = 0.40f;
+        [SerializeField, Range(0f, 1f)] private float minPosePresenceConfidence = 0.40f;
+        [SerializeField, Range(0f, 1f)] private float minTrackingConfidence = 0.40f;
         [SerializeField, Tooltip("Camera metadata is used when this value is negative.")]
         private int imageRotationDegrees = -1;
-        [SerializeField] private bool mirrorXOutput;
+        [SerializeField, Tooltip("Front-camera display mirroring is handled in UI. Keep disabled unless debugging legacy paths.")]
+        private bool mirrorXOutput;
         [SerializeField] private bool invertYOutput;
 
         [Header("Runtime")]
@@ -43,10 +44,10 @@ namespace Rag.Healthcare.Pose.Providers
 
 #if !AHC_USE_HOMULER_MEDIAPIPE
         [Header("Inference Input")]
-        [SerializeField, Tooltip("Downscale only the pose inference input; the camera preview keeps its original resolution.")]
-        private bool enableInferenceDownscale = true;
-        [SerializeField, Min(16)] private int inferenceWidth = 480;
-        [SerializeField, Min(16)] private int inferenceHeight = 360;
+        [SerializeField, Tooltip("Downscale only the pose inference input; the camera preview keeps its original resolution. Disabled by default so inference matches the 640x480 webcam capture.")]
+        private bool enableInferenceDownscale = false;
+        [SerializeField, Min(16)] private int inferenceWidth = 640;
+        [SerializeField, Min(16)] private int inferenceHeight = 480;
 #endif
 
         private static readonly ProfilerMarker ReadbackMarker =
@@ -63,7 +64,7 @@ namespace Rag.Healthcare.Pose.Providers
 #if !AHC_USE_HOMULER_MEDIAPIPE
         [Header("Editor Python Fallback")]
         [SerializeField] private bool useEditorPythonMediaPipeFallback = true;
-        [SerializeField, Min(1)] private int targetPoseFps = 8;
+        [SerializeField, Min(1)] private int targetPoseFps = 12;
         [SerializeField] private string editorPythonExecutablePath = string.Empty;
         [SerializeField] private string editorPythonWorkerRelativePath = "MediaPipe/editor_pose_worker.py";
 #endif
@@ -1094,13 +1095,11 @@ namespace Rag.Healthcare.Pose.Providers
                 for (var i = 0; i < ExpectedLandmarkCount; i++)
                 {
                     var landmark = result.landmarks[i];
-                    var visibility = landmark.visibility > 0f ? landmark.visibility : landmark.presence;
-                    if (visibility <= 0f)
-                    {
-                        visibility = 1f;
-                    }
-
-                    var confidence = landmark.presence > 0f ? landmark.presence : visibility;
+                    ResolveLandmarkScores(
+                        landmark.visibility,
+                        landmark.presence,
+                        out var visibility,
+                        out var confidence);
                     var x = mirrorXOutput ? 1f - landmark.x : landmark.x;
                     var y = invertYOutput ? 1f - landmark.y : landmark.y;
 
@@ -1243,8 +1242,11 @@ namespace Rag.Healthcare.Pose.Providers
                 for (var i = 0; i < ExpectedLandmarkCount; i++)
                 {
                     var landmark = landmarks[i];
-                    var visibility = landmark.visibility ?? landmark.presence ?? 1f;
-                    var confidence = landmark.presence ?? landmark.visibility ?? visibility;
+                    ResolveLandmarkScores(
+                        landmark.visibility ?? 0f,
+                        landmark.presence ?? 0f,
+                        out var visibility,
+                        out var confidence);
                     var x = mirrorXOutput ? 1f - landmark.x : landmark.x;
                     var y = invertYOutput ? 1f - landmark.y : landmark.y;
 
@@ -1271,6 +1273,27 @@ namespace Rag.Healthcare.Pose.Providers
             }
         }
 #endif
+
+        private static void ResolveLandmarkScores(
+            float visibilityInput,
+            float presenceInput,
+            out float visibility,
+            out float confidence)
+        {
+            // Mutual fallback when one score is missing/zero.
+            visibility = visibilityInput > 0f ? visibilityInput : presenceInput;
+            confidence = presenceInput > 0f ? presenceInput : visibility;
+            // pose_landmarker_lite often reports visibility/presence as 0; treat both-zero as
+            // unknown-but-present so joints are not dropped before minimumVisibility gating.
+            if (visibility <= 0f && confidence <= 0f)
+            {
+                visibility = 1f;
+                confidence = 1f;
+            }
+
+            visibility = Mathf.Clamp01(visibility);
+            confidence = Mathf.Clamp01(confidence);
+        }
 
         private int ResolveImageRotation(Texture source)
         {

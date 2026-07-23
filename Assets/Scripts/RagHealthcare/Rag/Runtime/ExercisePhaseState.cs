@@ -8,5 +8,6 @@ namespace Rag.Healthcare.Rag.Runtime
         public int RepCount;
         public long PhaseStartedAtUnixMilliseconds;
         public bool HasReachedBottomInCurrentRep;
+        public float MinimumKneeAngleInCurrentRep = 180f;
     }
 }

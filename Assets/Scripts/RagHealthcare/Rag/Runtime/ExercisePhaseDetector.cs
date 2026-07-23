@@ -23,7 +23,9 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             var nextPhase = ResolvePhase(feature, settings);
-            if (state.CurrentPhase == ExercisePhase.Bottom)
+            // Mark bottom as soon as this frame enters or stays in Bottom so same-frame
+            // depth evaluation does not emit a CorrectRep-blocking shallow Warning.
+            if (state.CurrentPhase == ExercisePhase.Bottom || nextPhase == ExercisePhase.Bottom)
             {
                 state.HasReachedBottomInCurrentRep = true;
             }
@@ -66,6 +68,13 @@ namespace Rag.Healthcare.Rag.Runtime
             ResetRepMotion();
         }
 
+        public void Suspend(long timestampUnixMilliseconds)
+        {
+            SetPhase(ExercisePhase.Unknown, timestampUnixMilliseconds);
+            state.HasReachedBottomInCurrentRep = false;
+            ResetRepMotion();
+        }
+
         private ExercisePhase ResolvePhase(PoseFeatureFrame feature, RealtimePoseRuleSettings settings)
         {
             if (feature.AverageKneeAngle >= settings.StandingKneeAngle)
@@ -88,6 +97,8 @@ namespace Rag.Healthcare.Rag.Runtime
             {
                 minimumKneeAngleInCurrentRep = Mathf.Min(minimumKneeAngleInCurrentRep, feature.AverageKneeAngle);
             }
+
+            state.MinimumKneeAngleInCurrentRep = minimumKneeAngleInCurrentRep;
 
             var velocity = feature.KneeAngleVelocityDegreesPerSecond;
             var deadZone = settings.PhaseVelocityDeadZoneDegreesPerSecond;
@@ -145,6 +156,7 @@ namespace Rag.Healthcare.Rag.Runtime
         private void ResetRepMotion()
         {
             minimumKneeAngleInCurrentRep = 180f;
+            state.MinimumKneeAngleInCurrentRep = 180f;
             previousKneeVelocity = 0f;
             bottomCandidateStartedAt = 0L;
             repMotionStarted = false;

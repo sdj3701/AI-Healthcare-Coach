@@ -15,6 +15,9 @@ namespace Rag.Healthcare.Performance
         public float averageFrameFps;
         public float averagePoseFps;
         public float averageInferenceMs;
+        public float p95InferenceMs;
+        public float maxInferenceMs;
+        public int poseFrameCount;
         public int droppedFrames;
         public long managedMemoryPeakBytes;
         public float batteryStart;
@@ -73,6 +76,8 @@ namespace Rag.Healthcare.Performance
 
     public sealed class DevicePerformanceProfiler : MonoBehaviour
     {
+        private const int InferenceHistogramBucketMilliseconds = 5;
+        private const int InferenceHistogramBucketCount = 121;
         public const string BenchKind60s = "60s";
         public const string BenchKind10m = "10m";
         public const float Duration60sSeconds = 60f;
@@ -83,11 +88,13 @@ namespace Rag.Healthcare.Performance
 
         private float startedAt;
         private float frameFpsTotal;
-        private float poseFpsTotal;
         private float inferenceTotal;
         private float lastPoseFps;
         private float lastInferenceMs;
         private int samples;
+        private int poseFrameCount;
+        private float maximumInferenceMs;
+        private readonly int[] inferenceLatencyHistogram = new int[InferenceHistogramBucketCount];
         private long memoryPeak;
         private float batteryStart;
         private bool running;
@@ -108,8 +115,24 @@ namespace Rag.Healthcare.Performance
         public PerformanceBenchReport LastReport { get; private set; }
 
         private void Awake() => trackingController ??= FindFirstObjectByType<JointTrackingController>();
-        private void OnEnable() => Application.lowMemory += HandleLowMemory;
-        private void OnDisable() => Application.lowMemory -= HandleLowMemory;
+
+        private void OnEnable()
+        {
+            Application.lowMemory += HandleLowMemory;
+            if (trackingController != null)
+            {
+                trackingController.TrackingFrameReceived += HandleTrackingFrame;
+            }
+        }
+
+        private void OnDisable()
+        {
+            Application.lowMemory -= HandleLowMemory;
+            if (trackingController != null)
+            {
+                trackingController.TrackingFrameReceived -= HandleTrackingFrame;
+            }
+        }
 
         public void BeginBench(string kind)
         {
@@ -130,9 +153,12 @@ namespace Rag.Healthcare.Performance
             }
 
             startedAt = Time.realtimeSinceStartup;
-            frameFpsTotal = poseFpsTotal = inferenceTotal = 0f;
+            frameFpsTotal = inferenceTotal = 0f;
             lastPoseFps = lastInferenceMs = 0f;
             samples = 0;
+            poseFrameCount = 0;
+            maximumInferenceMs = 0f;
+            Array.Clear(inferenceLatencyHistogram, 0, inferenceLatencyHistogram.Length);
             memoryPeak = 0;
             batteryStart = SystemInfo.batteryLevel;
             lowMemory = false;
@@ -145,8 +171,6 @@ namespace Rag.Healthcare.Performance
             frameFpsTotal += 1f / Mathf.Max(0.0001f, Time.unscaledDeltaTime);
             lastPoseFps = trackingController == null ? 0f : trackingController.PoseFps;
             lastInferenceMs = trackingController == null ? 0f : trackingController.LastInferenceMilliseconds;
-            poseFpsTotal += lastPoseFps;
-            inferenceTotal += lastInferenceMs;
             memoryPeak = Math.Max(memoryPeak, GC.GetTotalMemory(false));
             samples++;
             if (Time.realtimeSinceStartup - startedAt >= benchmarkSeconds) Finish();
@@ -167,8 +191,11 @@ namespace Rag.Healthcare.Performance
                 endedAtUtc = DateTime.UtcNow.ToString("o"),
                 durationSeconds = Mathf.Max(0f, Time.realtimeSinceStartup - startedAt),
                 averageFrameFps = samples == 0 ? 0f : frameFpsTotal / samples,
-                averagePoseFps = samples == 0 ? 0f : poseFpsTotal / samples,
-                averageInferenceMs = samples == 0 ? 0f : inferenceTotal / samples,
+                averagePoseFps = poseFrameCount == 0 ? 0f : poseFrameCount / Mathf.Max(0.0001f, Time.realtimeSinceStartup - startedAt),
+                averageInferenceMs = poseFrameCount == 0 ? 0f : inferenceTotal / poseFrameCount,
+                p95InferenceMs = EstimateInferencePercentile(0.95f),
+                maxInferenceMs = maximumInferenceMs,
+                poseFrameCount = poseFrameCount,
                 droppedFrames = trackingController == null ? 0 : trackingController.DroppedFrameCount,
                 managedMemoryPeakBytes = memoryPeak,
                 batteryStart = batteryStart,
@@ -295,5 +322,50 @@ namespace Rag.Healthcare.Performance
         }
 
         private void HandleLowMemory() => lowMemory = true;
+
+        private void HandleTrackingFrame(JointTrackingFrame _)
+        {
+            if (!running || trackingController == null)
+            {
+                return;
+            }
+
+            var inferenceMs = Mathf.Max(0f, trackingController.LastInferenceMilliseconds);
+            lastInferenceMs = inferenceMs;
+            inferenceTotal += inferenceMs;
+            maximumInferenceMs = Mathf.Max(maximumInferenceMs, inferenceMs);
+            poseFrameCount++;
+
+            var bucket = Mathf.Clamp(
+                Mathf.FloorToInt(inferenceMs / InferenceHistogramBucketMilliseconds),
+                0,
+                InferenceHistogramBucketCount - 1);
+            inferenceLatencyHistogram[bucket]++;
+        }
+
+        private float EstimateInferencePercentile(float percentile)
+        {
+            if (poseFrameCount <= 0)
+            {
+                return 0f;
+            }
+
+            var targetCount = Mathf.Clamp(
+                Mathf.CeilToInt(poseFrameCount * Mathf.Clamp01(percentile)),
+                1,
+                poseFrameCount);
+            var accumulated = 0;
+            for (var i = 0; i < inferenceLatencyHistogram.Length; i++)
+            {
+                accumulated += inferenceLatencyHistogram[i];
+                if (accumulated >= targetCount)
+                {
+                    // The last bucket represents this value or anything slower.
+                    return i * InferenceHistogramBucketMilliseconds;
+                }
+            }
+
+            return maximumInferenceMs;
+        }
     }
 }
