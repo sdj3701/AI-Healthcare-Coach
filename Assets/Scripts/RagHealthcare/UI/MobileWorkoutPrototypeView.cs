@@ -45,10 +45,11 @@ namespace Rag.Healthcare.UI
 
         private enum ScreenStep
         {
-            Calibration = 0,
-            Exercise = 1,
-            Target = 2,
-            Session = 3
+            Profile = 1,
+            Calibration = 2,
+            Exercise = 3,
+            Target = 4,
+            Session = 5
         }
 
         private enum PreviewMode
@@ -160,7 +161,7 @@ namespace Rag.Healthcare.UI
         private string performanceBenchStatusText = "Perf bench: idle";
         private bool performanceBenchSubscribed;
 
-        private ScreenStep currentStep = ScreenStep.Calibration;
+        private ScreenStep currentStep = ScreenStep.Profile;
         private string selectedExerciseId = "squat";
         private string selectedCategory = "하체";
         private int repsPerSet = 15;
@@ -766,7 +767,7 @@ namespace Rag.Healthcare.UI
             row.style.paddingRight = 8f;
             row.style.alignItems = Align.Center;
 
-            progressPips = new VisualElement[3];
+            progressPips = new VisualElement[4];
             for (var i = 0; i < progressPips.Length; i++)
             {
                 var pip = new VisualElement { name = "step-pip-" + (i + 1) };
@@ -780,7 +781,7 @@ namespace Rag.Healthcare.UI
                 progressPips[i] = pip;
             }
 
-            stepLabel = Label("STEP 1 / 3", 11, ColorFromHex(0x34D399), FontStyle.Bold);
+            stepLabel = Label("1 / 4 정보수집", 11, ColorFromHex(0x34D399), FontStyle.Bold);
             stepLabel.style.flexGrow = 1f;
             stepLabel.style.unityTextAlign = TextAnchor.MiddleRight;
             row.Add(stepLabel);
@@ -796,38 +797,51 @@ namespace Rag.Healthcare.UI
 
             contentRoot.Clear();
             ResetStepReferences();
-            UpdateProgress();
 
-            if (Application.isPlaying &&
-                profileStatus != null &&
-                !profileStatus.HasCompletedProfile)
+            // Hard order: 1) profile → 2) calibration → 3) exercise → 4) session
+            profileStatus ??= FindFirstObjectByType<OnboardingStatusManager>();
+            if (Application.isPlaying && profileStatus == null)
             {
-                showingProfileOnboarding = true;
-                RenderProfileOnboardingStep();
-                RefreshDynamicText();
-                RefreshPreviewTexture();
-                if (contentScroll != null)
-                {
-                    contentScroll.scrollOffset = Vector2.zero;
-                }
-
-                return;
+                profileStatus = gameObject.AddComponent<OnboardingStatusManager>();
             }
 
-            showingProfileOnboarding = false;
+            var profileReady = profileStatus != null && profileStatus.HasCompletedProfile;
+            if (!profileReady)
+            {
+                currentStep = ScreenStep.Profile;
+            }
+            else if (currentStep == ScreenStep.Profile)
+            {
+                currentStep = ScreenStep.Calibration;
+            }
+            else if (!hasCompletedCalibrationThisLaunch &&
+                     currentStep > ScreenStep.Calibration)
+            {
+                currentStep = ScreenStep.Calibration;
+            }
+
+            UpdateProgress();
 
             switch (currentStep)
             {
+                case ScreenStep.Profile:
+                    showingProfileOnboarding = true;
+                    RenderProfileOnboardingStep();
+                    break;
                 case ScreenStep.Calibration:
+                    showingProfileOnboarding = false;
                     RenderCalibrationStep();
                     break;
                 case ScreenStep.Exercise:
+                    showingProfileOnboarding = false;
                     RenderExerciseStep();
                     break;
                 case ScreenStep.Target:
+                    showingProfileOnboarding = false;
                     RenderTargetStep();
                     break;
                 case ScreenStep.Session:
+                    showingProfileOnboarding = false;
                     RenderSessionStep();
                     if (Application.isPlaying && previewMode == PreviewMode.Camera)
                     {
@@ -848,7 +862,13 @@ namespace Rag.Healthcare.UI
         {
             if (stepLabel != null)
             {
-                stepLabel.text = "PROFILE";
+                stepLabel.text = "1 / 4 정보수집";
+            }
+
+            if (profileStatus == null)
+            {
+                AddHeader("건강 프로필", "Play 모드에서 기본 정보를 입력할 수 있어요.");
+                return;
             }
 
             var onboarding = new HealthProfileOnboardingView(
@@ -2587,31 +2607,32 @@ namespace Rag.Healthcare.UI
 
         private void UpdateProgress()
         {
-            if (currentStep == ScreenStep.Calibration)
+            string label;
+            int activePip;
+            switch (currentStep)
             {
-                if (stepLabel != null)
-                {
-                    stepLabel.text = "CALIBRATION";
-                }
-
-                if (progressPips == null)
-                {
-                    return;
-                }
-
-                for (var i = 0; i < progressPips.Length; i++)
-                {
-                    progressPips[i].style.width = 18f;
-                    progressPips[i].style.backgroundColor = ColorFromHex(0x334155);
-                }
-
-                return;
+                case ScreenStep.Profile:
+                    label = "1 / 4 정보수집";
+                    activePip = 0;
+                    break;
+                case ScreenStep.Calibration:
+                    label = "2 / 4 전신측정";
+                    activePip = 1;
+                    break;
+                case ScreenStep.Exercise:
+                case ScreenStep.Target:
+                    label = currentStep == ScreenStep.Target ? "3 / 4 목표설정" : "3 / 4 운동선택";
+                    activePip = 2;
+                    break;
+                default:
+                    label = "4 / 4 운동피드백";
+                    activePip = 3;
+                    break;
             }
 
-            var step = Mathf.Max(1, (int)currentStep);
             if (stepLabel != null)
             {
-                stepLabel.text = "STEP " + step + " / 3";
+                stepLabel.text = label;
             }
 
             if (progressPips == null)
@@ -2621,7 +2642,7 @@ namespace Rag.Healthcare.UI
 
             for (var i = 0; i < progressPips.Length; i++)
             {
-                var active = i + 1 == step;
+                var active = i == activePip;
                 progressPips[i].style.width = active ? 42f : 18f;
                 progressPips[i].style.backgroundColor = active ? ColorFromHex(0x34D399) : ColorFromHex(0x334155);
             }
