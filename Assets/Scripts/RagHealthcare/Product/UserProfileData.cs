@@ -92,10 +92,16 @@ namespace Rag.Healthcare.Product
 
         public RomSafetyProfile romSafety = new RomSafetyProfile();
 
+        // Full-body calibration persistence (same profile blob as body/workout info).
+        public bool calibrationCompleted;
+        public string calibrationCompletedAtUtc;
+
         public bool IsComplete =>
             heightCm > 0f &&
             weightKg > 0f &&
             ageYears > 0 &&
             gender != Gender.Unspecified;
+
+        public bool IsCalibrationComplete => calibrationCompleted;
     }
 }

@@ -155,6 +155,8 @@ namespace Rag.Healthcare.UI
         private bool hasCompletedCalibrationThisLaunch;
         private bool calibrationFlowRunning;
         private bool calibrationSucceededThisFlow;
+        private bool forceShowProfileEditor;
+        private bool forceShowCalibration;
         private Label calibrationStatusLabel;
         private Button calibrationContinueButton;
         private Coroutine calibrationFlowCoroutine;
@@ -806,16 +808,22 @@ namespace Rag.Healthcare.UI
             }
 
             var profileReady = profileStatus != null && profileStatus.HasCompletedProfile;
-            if (!profileReady)
+            SyncCalibrationLaunchFlagFromProfile();
+            var calibrationReady = HasCalibrationReady();
+
+            if (!profileReady || forceShowProfileEditor)
             {
                 currentStep = ScreenStep.Profile;
             }
-            else if (currentStep == ScreenStep.Profile)
+            else if (forceShowCalibration)
             {
                 currentStep = ScreenStep.Calibration;
             }
-            else if (!hasCompletedCalibrationThisLaunch &&
-                     currentStep > ScreenStep.Calibration)
+            else if (currentStep == ScreenStep.Profile)
+            {
+                currentStep = calibrationReady ? ScreenStep.Exercise : ScreenStep.Calibration;
+            }
+            else if (!calibrationReady && currentStep > ScreenStep.Calibration)
             {
                 currentStep = ScreenStep.Calibration;
             }
@@ -876,9 +884,16 @@ namespace Rag.Healthcare.UI
                 () =>
                 {
                     showingProfileOnboarding = false;
-                    currentStep = ScreenStep.Calibration;
-                    hasCompletedCalibrationThisLaunch = false;
-                    calibrationSucceededThisFlow = false;
+                    forceShowProfileEditor = false;
+                    SyncCalibrationLaunchFlagFromProfile();
+                    currentStep = HasCalibrationReady()
+                        ? ScreenStep.Exercise
+                        : ScreenStep.Calibration;
+                    if (!HasCalibrationReady())
+                    {
+                        calibrationSucceededThisFlow = false;
+                    }
+
                     RenderCurrentStep();
                 },
                 ResolveRuntimeFont());
@@ -1030,7 +1045,24 @@ namespace Rag.Healthcare.UI
             }
 
             contentRoot.Add(list);
-            contentRoot.Add(Spacer(24f));
+            contentRoot.Add(Spacer(16f));
+
+            var editRow = Row("profile-calib-edit-row", 44f, 8f);
+            editRow.Add(ActionButton(
+                "정보 수정",
+                ColorFromHex(0x161B22),
+                Color.white,
+                44f,
+                OpenProfileEditor));
+            editRow.Add(ActionButton(
+                "전신 다시 측정",
+                ColorFromHex(0x161B22),
+                Color.white,
+                44f,
+                OpenCalibrationRemeasure));
+            contentRoot.Add(editRow);
+
+            contentRoot.Add(Spacer(12f));
             contentRoot.Add(ActionButton("개수 설정하러 가기 (다음)  ›", ColorFromHex(0x14B8A6), Color.black, 52f, () =>
             {
                 previewMode = PreviewMode.None;
@@ -1038,6 +1070,39 @@ namespace Rag.Healthcare.UI
                 currentStep = ScreenStep.Target;
                 RenderCurrentStep();
             }));
+        }
+
+        private void OpenProfileEditor()
+        {
+            forceShowProfileEditor = true;
+            forceShowCalibration = false;
+            currentStep = ScreenStep.Profile;
+            RenderCurrentStep();
+        }
+
+        private void OpenCalibrationRemeasure()
+        {
+            forceShowProfileEditor = false;
+            forceShowCalibration = true;
+            hasCompletedCalibrationThisLaunch = false;
+            calibrationSucceededThisFlow = false;
+            profileStatus?.ClearCalibration();
+            currentStep = ScreenStep.Calibration;
+            RenderCurrentStep();
+        }
+
+        private bool HasCalibrationReady()
+        {
+            return hasCompletedCalibrationThisLaunch ||
+                   (profileStatus != null && profileStatus.HasCompletedCalibration);
+        }
+
+        private void SyncCalibrationLaunchFlagFromProfile()
+        {
+            if (profileStatus != null && profileStatus.HasCompletedCalibration)
+            {
+                hasCompletedCalibrationThisLaunch = true;
+            }
         }
 
         private void RenderTargetStep()
@@ -1082,10 +1147,11 @@ namespace Rag.Healthcare.UI
             }));
             row.Add(ActionButton("운동 화면으로", ColorFromHex(0x22C55E), ColorFromHex(0x07110C), 52f, () =>
             {
-                if (!hasCompletedCalibrationThisLaunch)
+                if (!HasCalibrationReady())
                 {
                     previewMode = PreviewMode.None;
                     replayPlayer?.StopReplay();
+                    forceShowCalibration = true;
                     currentStep = ScreenStep.Calibration;
                     RenderCurrentStep();
                     return;
@@ -1951,7 +2017,7 @@ namespace Rag.Healthcare.UI
                 coachTts ??= FindFirstObjectByType<CoachTtsController>();
                 coachTts?.BeginSession();
                 feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
-                feedbackOrchestrator?.BeginWorkoutSession(skipCalibration: hasCompletedCalibrationThisLaunch);
+                feedbackOrchestrator?.BeginWorkoutSession(skipCalibration: HasCalibrationReady());
                 sessionStartedAt = Time.unscaledTime;
                 workoutRunning = true;
                 RefreshPreviewTexture();
@@ -2105,7 +2171,7 @@ namespace Rag.Healthcare.UI
                 return;
             }
 
-            if (!calibrationSucceededThisFlow && !hasCompletedCalibrationThisLaunch)
+            if (!calibrationSucceededThisFlow && !HasCalibrationReady())
             {
                 return;
             }
@@ -2116,7 +2182,10 @@ namespace Rag.Healthcare.UI
                 calibrationFlowCoroutine = null;
             }
 
+            profileStatus ??= FindFirstObjectByType<OnboardingStatusManager>();
+            profileStatus?.MarkCalibrationComplete();
             hasCompletedCalibrationThisLaunch = true;
+            forceShowCalibration = false;
             calibrationFlowRunning = false;
             feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
             feedbackOrchestrator?.EndWorkoutSession();

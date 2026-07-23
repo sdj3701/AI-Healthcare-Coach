@@ -13,6 +13,7 @@ namespace Rag.Healthcare.Product
 
         public UserProfileData Profile { get; private set; }
         public bool HasCompletedProfile => Profile != null && Profile.IsComplete;
+        public bool HasCompletedCalibration => Profile != null && Profile.IsCalibrationComplete;
         public event Action<UserProfileData> Changed;
 
         private void Awake()
@@ -62,6 +63,22 @@ namespace Rag.Healthcare.Product
                 Profile.romSafety = evaluator.Evaluate(Profile);
             }
 
+            SaveAndNotify();
+        }
+
+        public void MarkCalibrationComplete()
+        {
+            EnsureProfile();
+            Profile.calibrationCompleted = true;
+            Profile.calibrationCompletedAtUtc = DateTime.UtcNow.ToString("o");
+            SaveAndNotify();
+        }
+
+        public void ClearCalibration()
+        {
+            EnsureProfile();
+            Profile.calibrationCompleted = false;
+            Profile.calibrationCompletedAtUtc = string.Empty;
             SaveAndNotify();
         }
 
