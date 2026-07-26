@@ -271,9 +271,22 @@ namespace Rag.Healthcare.Tts
 
         public void SpeakPoseFeedback(PoseFeedbackMessage feedback)
         {
+            if (!TrySpeakPoseFeedback(feedback, out var statusMessage) &&
+                !string.IsNullOrWhiteSpace(statusMessage))
+            {
+                Debug.LogWarning($"[TTS] Pose feedback request rejected: {statusMessage}");
+            }
+        }
+
+        public bool TrySpeakPoseFeedback(
+            PoseFeedbackMessage feedback,
+            out string statusMessage)
+        {
             if (feedback == null)
             {
-                return;
+                statusMessage = "TTS로 읽을 자세 피드백이 없습니다.";
+                LastStatusMessage = statusMessage;
+                return false;
             }
 
             var priority = ToPriority(feedback.severity);
@@ -281,16 +294,12 @@ namespace Rag.Healthcare.Tts
             var semanticId = string.IsNullOrWhiteSpace(feedback.id)
                 ? feedback.text
                 : feedback.id;
-            if (!TrySchedule(
-                    feedback.text,
-                    semanticId,
-                    priority,
-                    ttlSeconds,
-                    out var statusMessage) &&
-                !string.IsNullOrWhiteSpace(statusMessage))
-            {
-                Debug.LogWarning(statusMessage);
-            }
+            return TrySchedule(
+                feedback.text,
+                semanticId,
+                priority,
+                ttlSeconds,
+                out statusMessage);
         }
 
         public void Stop()
@@ -303,12 +312,18 @@ namespace Rag.Healthcare.Tts
         {
             if (destroyed)
             {
+                LastStatusMessage = "TTS 컨트롤러가 종료되어 새 세션을 시작할 수 없습니다.";
+                LogSessionAdmissionFailure();
                 return false;
             }
 
             if (IsAdmissionOpen)
             {
-                EndSessionInternal(false);
+                // OnEnable prepares the backend before the workout screen appears.
+                // Treat a second BeginSession call as idempotent so an asynchronous
+                // native Stop cannot make the workout-start announcement disappear.
+                LastStatusMessage = $"{ActiveBackend} TTS 세션 준비 완료";
+                return true;
             }
 
             EnsureScheduler();
@@ -318,6 +333,7 @@ namespace Rag.Healthcare.Tts
                 acceptingRequests = false;
                 resumeWhenBackendIdle = true;
                 LastStatusMessage = "TTS backend 종료를 기다린 뒤 새 세션의 음성 안내를 시작합니다.";
+                LogSessionAdmissionFailure();
                 return false;
             }
 
@@ -330,6 +346,12 @@ namespace Rag.Healthcare.Tts
             DrainBackendEvents(false);
             if (!backendHealthy)
             {
+                if (string.IsNullOrWhiteSpace(LastStatusMessage))
+                {
+                    LastStatusMessage = "TTS backend가 안전하지 않아 새 세션을 시작할 수 없습니다.";
+                }
+
+                LogSessionAdmissionFailure();
                 return false;
             }
 
@@ -338,6 +360,7 @@ namespace Rag.Healthcare.Tts
                 lastDroppedEventCount = eventSource.DroppedEventCount;
             }
 
+            LastStatusMessage = $"{ActiveBackend} TTS 세션 준비 완료";
             return true;
         }
 
@@ -756,7 +779,14 @@ namespace Rag.Healthcare.Tts
         private void ReportPlaybackFailure(string statusMessage)
         {
             LastStatusMessage = statusMessage;
+            Debug.LogWarning($"[TTS] Playback failed ({ActiveBackend}): {statusMessage}");
             PlaybackFailed?.Invoke(statusMessage);
+        }
+
+        private void LogSessionAdmissionFailure()
+        {
+            Debug.LogWarning(
+                $"[TTS] Could not begin session ({ActiveBackend}): {LastStatusMessage}");
         }
 
         private string BuildScheduleStatus(TtsEnqueueResult result)

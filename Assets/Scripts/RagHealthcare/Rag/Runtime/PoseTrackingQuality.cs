@@ -20,9 +20,17 @@ namespace Rag.Healthcare.Rag.Runtime
         public bool HasReliableCore;
         public bool IsFrontal;
         public bool IsFullyInFrame;
+        public int ConsecutiveGoodFrames;
+        public int ConsecutiveUnavailableFrames;
         public string Reason = string.Empty;
 
         public bool AllowsPoseAnalysis => State == PoseTrackingQualityState.Good;
+        // Degraded is a hold signal: callers should skip new pose decisions while
+        // preserving their phase/window state. Only sustained Unavailable is a
+        // hard-reset signal.
+        public bool CanPreservePoseAnalysis => State != PoseTrackingQualityState.Unavailable;
+        public bool ShouldHoldPoseAnalysis => State == PoseTrackingQualityState.Degraded;
+        public bool RequiresPoseAnalysisReset => State == PoseTrackingQualityState.Unavailable;
 
         public void Reset()
         {
@@ -34,6 +42,8 @@ namespace Rag.Healthcare.Rag.Runtime
             HasReliableCore = false;
             IsFrontal = false;
             IsFullyInFrame = false;
+            ConsecutiveGoodFrames = 0;
+            ConsecutiveUnavailableFrames = 0;
             Reason = string.Empty;
         }
     }
@@ -74,8 +84,19 @@ namespace Rag.Healthcare.Rag.Runtime
             report.HipSpan = Mathf.Abs(core.RightHip.x - core.LeftHip.x);
             report.ShoulderSpan = Mathf.Abs(core.RightShoulder.x - core.LeftShoulder.x);
             var shoulderCenter = (core.LeftShoulder + core.RightShoulder) * 0.5f;
-            var ankleCenter = (core.LeftAnkle + core.RightAnkle) * 0.5f;
-            report.BodyHeight = Mathf.Abs(ankleCenter.y - shoulderCenter.y);
+            var hipCenter = (core.LeftHip + core.RightHip) * 0.5f;
+            var averageThighLength =
+                (Vector2.Distance(core.LeftHip, core.LeftKnee) +
+                 Vector2.Distance(core.RightHip, core.RightKnee)) * 0.5f;
+            var averageShinLength =
+                (Vector2.Distance(core.LeftKnee, core.LeftAnkle) +
+                 Vector2.Distance(core.RightKnee, core.RightAnkle)) * 0.5f;
+            // A shoulder-to-ankle vertical projection shrinks during a legitimate
+            // deep squat. Segment-chain scale stays comparable as the joints bend.
+            report.BodyHeight =
+                Vector2.Distance(shoulderCenter, hipCenter) +
+                averageThighLength +
+                averageShinLength;
             report.IsFrontal = report.HipSpan >= settings.MinimumFrontalBodySpan &&
                                report.ShoulderSpan >= settings.MinimumFrontalBodySpan;
 
@@ -115,11 +136,13 @@ namespace Rag.Healthcare.Rag.Runtime
             {
                 report.State = PoseTrackingQualityState.Degraded;
                 report.Reason = ReasonAcquiring;
+                ApplyFrameCounts();
                 return report;
             }
 
             report.State = PoseTrackingQualityState.Good;
             report.Reason = string.Empty;
+            ApplyFrameCounts();
             return report;
         }
 
@@ -138,6 +161,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 ? PoseTrackingQualityState.Unavailable
                 : PoseTrackingQualityState.Degraded;
             report.Reason = reason;
+            ApplyFrameCounts();
         }
 
         private void ApplyDegraded(string reason)
@@ -145,6 +169,13 @@ namespace Rag.Healthcare.Rag.Runtime
             consecutiveGoodFrames = 0;
             report.State = PoseTrackingQualityState.Degraded;
             report.Reason = reason;
+            ApplyFrameCounts();
+        }
+
+        private void ApplyFrameCounts()
+        {
+            report.ConsecutiveGoodFrames = consecutiveGoodFrames;
+            report.ConsecutiveUnavailableFrames = consecutiveUnavailableFrames;
         }
 
         private static bool TryGetCore(JointTrackingFrame frame, out CoreJoints core, out float minimumConfidence)

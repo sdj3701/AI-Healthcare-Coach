@@ -12,21 +12,21 @@ namespace Rag.Healthcare.Pose
         [SerializeField, Min(0f)] private float duplicateCooldownSeconds = 2f;
 
         private readonly Dictionary<string, float> lastSpokenTimes = new Dictionary<string, float>();
+        private bool missingCoachTtsWarningLogged;
 
         public event Action<PoseFeedbackMessage> FeedbackAccepted;
 
         public bool VoiceEnabled { get; set; } = true;
+        public CoachTtsController CoachTts => coachTts;
 
         public PoseFeedbackMessage LatestFeedback { get; private set; }
         public string LatestFeedbackText { get; private set; } = string.Empty;
         public float LatestFeedbackTime { get; private set; } = -1f;
+        public string LastVoiceStatusMessage { get; private set; } = string.Empty;
 
         private void Awake()
         {
-            if (coachTts == null)
-            {
-                coachTts = FindFirstObjectByType<CoachTtsController>();
-            }
+            ResolveCoachTts();
         }
 
         public void ReceiveFeedbackJson(string json)
@@ -65,9 +65,49 @@ namespace Rag.Healthcare.Pose
 
             if (VoiceEnabled)
             {
-                coachTts ??= FindFirstObjectByType<CoachTtsController>();
-                coachTts?.SpeakPoseFeedback(feedback);
+                var resolvedCoachTts = ResolveCoachTts();
+                if (resolvedCoachTts == null)
+                {
+                    LastVoiceStatusMessage = "음성 코칭 컨트롤러가 연결되지 않아 자세 피드백을 읽을 수 없습니다.";
+                    if (!missingCoachTtsWarningLogged)
+                    {
+                        missingCoachTtsWarningLogged = true;
+                        Debug.LogWarning($"[PoseFeedbackJsonReceiver] {LastVoiceStatusMessage}");
+                    }
+
+                    return;
+                }
+
+                if (!resolvedCoachTts.TrySpeakPoseFeedback(feedback, out var statusMessage))
+                {
+                    LastVoiceStatusMessage = statusMessage;
+                    if (!string.IsNullOrWhiteSpace(statusMessage))
+                    {
+                        Debug.LogWarning(
+                            $"[PoseFeedbackJsonReceiver] TTS request was rejected " +
+                            $"({resolvedCoachTts.ActiveBackend}): {statusMessage}");
+                    }
+
+                    return;
+                }
+
+                LastVoiceStatusMessage = statusMessage;
             }
+        }
+
+        private CoachTtsController ResolveCoachTts()
+        {
+            if (coachTts == null)
+            {
+                coachTts = FindFirstObjectByType<CoachTtsController>();
+            }
+
+            if (coachTts != null)
+            {
+                missingCoachTtsWarningLogged = false;
+            }
+
+            return coachTts;
         }
 
         private bool IsDuplicateCoolingDown(PoseFeedbackMessage feedback)

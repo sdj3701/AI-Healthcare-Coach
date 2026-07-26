@@ -25,6 +25,8 @@ namespace Rag.Healthcare.Pose.Session
         [Range(0.1f, 3f)]
         public float outOfFrameGraceSeconds = 0.5f;
 
+        // Used only by the dedicated calibration flow after it has reached
+        // InWorkout. Real workout sessions remain paused until tracking recovers.
         [Range(0.1f, 3f)]
         public float reReadyDebounceSeconds = 0.5f;
 

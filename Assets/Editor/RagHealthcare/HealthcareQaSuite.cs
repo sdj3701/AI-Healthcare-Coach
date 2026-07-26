@@ -60,6 +60,7 @@ namespace Rag.Healthcare.Editor
             VerifyProfileCompletionGate(failures);
             VerifyHotPathObjectReuse(failures);
             VerifyPhaseReversalRecognition(failures);
+            VerifyJointCoordinateSquatPipeline(failures);
             VerifyDepthUsesMinimumAngle(failures);
             VerifyShallowDepthInfoBand(failures);
             VerifyBottomReachedSuppressesShallowWarning(failures);
@@ -578,7 +579,7 @@ namespace Rag.Healthcare.Editor
             var calibrationConfirmedCount = 0;
             machine.CalibrationConfirmed += () => calibrationConfirmedCount++;
 
-            machine.BeginSession();
+            machine.BeginCalibrationSession();
             machine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.1f);
             Check(machine.State == WorkoutTrackingState.ReadyForCalibration,
                 "Calibration must remain ready until the configured hold duration is met.", failures);
@@ -589,32 +590,48 @@ namespace Rag.Healthcare.Editor
 
             machine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.15f);
             machine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.16f);
-            Check(machine.State == WorkoutTrackingState.InWorkout && calibrationConfirmedCount == 1,
-                "Countdown completion must enter the workout and confirm calibration exactly once.", failures);
-
-            machine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.1f);
-            Check(machine.State == WorkoutTrackingState.InWorkout,
-                "A brief tracking degradation must stay inside the out-of-frame grace period.", failures);
-
-            machine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.11f);
-            Check(machine.State == WorkoutTrackingState.PausedOutOfFrame,
-                "Sustained tracking degradation must pause pose analysis.", failures);
-
-            machine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.1f);
-            Check(machine.State == WorkoutTrackingState.InWorkout,
-                "Tracking recovery inside the debounce window must resume the workout.", failures);
-
-            machine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.21f);
-            machine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.21f);
-            Check(machine.State == WorkoutTrackingState.ReadyForCalibration,
-                "A prolonged out-of-frame pause must require full-body calibration again.", failures);
+            Check(machine.State == WorkoutTrackingState.InWorkout &&
+                  calibrationConfirmedCount == 1 &&
+                  !machine.AllowsPoseAnalysis,
+                "Countdown completion must confirm calibration exactly once without starting workout pose analysis.", failures);
 
             var rollbackMachine = new WorkoutSessionStateMachine(settings);
-            rollbackMachine.BeginSession();
+            rollbackMachine.BeginCalibrationSession();
             rollbackMachine.Tick(SyntheticPoseFixtures.Standing(), goodQuality, 0.21f);
             rollbackMachine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.01f);
             Check(rollbackMachine.State == WorkoutTrackingState.ReadyForCalibration,
                 "Losing full-body visibility during countdown must roll back to calibration.", failures);
+
+            var workoutMachine = new WorkoutSessionStateMachine(settings);
+            workoutMachine.BeginWorkoutSession();
+            Check(workoutMachine.State == WorkoutTrackingState.InWorkout &&
+                  workoutMachine.AllowsPoseAnalysis &&
+                  Mathf.Approximately(workoutMachine.CountdownRemainingSeconds, 0f),
+                "An already calibrated workout must begin analysis immediately without a countdown.", failures);
+
+            workoutMachine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.1f);
+            Check(workoutMachine.State == WorkoutTrackingState.InWorkout,
+                "A brief workout tracking degradation must stay inside the out-of-frame grace period.", failures);
+
+            workoutMachine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 0.11f);
+            Check(workoutMachine.State == WorkoutTrackingState.PausedOutOfFrame &&
+                  !workoutMachine.AllowsPoseAnalysis,
+                "Sustained workout tracking degradation must pause pose analysis.", failures);
+
+            workoutMachine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 1f);
+            workoutMachine.Tick(SyntheticPoseFixtures.LowConfidence(), degradedQuality, 1f);
+            Check(workoutMachine.State == WorkoutTrackingState.PausedOutOfFrame &&
+                  Mathf.Approximately(workoutMachine.CountdownRemainingSeconds, 0f),
+                "A prolonged workout pause must never re-enter calibration or countdown.", failures);
+
+            workoutMachine.Tick(SyntheticPoseFixtures.LowConfidence(), goodQuality, 0.01f);
+            Check(workoutMachine.State == WorkoutTrackingState.InWorkout &&
+                  workoutMachine.AllowsPoseAnalysis,
+                "One recovered workout-quality frame must resume analysis immediately without full-body calibration.", failures);
+
+            workoutMachine.EndSession();
+            Check(!workoutMachine.IsSessionActive && !workoutMachine.AllowsPoseAnalysis,
+                "Ending a workout session must disable pose analysis.", failures);
         }
 
         private static void VerifyPersonalizedRomSafety(ICollection<string> failures)
@@ -733,6 +750,297 @@ namespace Rag.Healthcare.Editor
                 "Descent-to-ascent reversal must recognize the squat bottom without a full stop.", failures);
             Check(completed.RepCount == 1,
                 "A stabilized standing-descent-bottom-ascent-standing sequence must count one rep.", failures);
+
+            var naturalStandingSettings = new RealtimePoseRuleSettings
+            {
+                standingKneeAngle = 165f,
+                standingExitKneeAngle = 160f,
+                minimumPhaseKneeAngleExcursion = 8f
+            };
+            var naturalStandingDetector = new ExercisePhaseDetector();
+            naturalStandingDetector.Update(
+                PhaseFeature(165f, 0f, 2000L),
+                naturalStandingSettings);
+            naturalStandingDetector.Update(
+                PhaseFeature(158f, -20f, 2100L),
+                naturalStandingSettings);
+            naturalStandingDetector.Update(
+                PhaseFeature(158f, 0f, 2200L),
+                naturalStandingSettings);
+            var naturalStandingRecovered = naturalStandingDetector.Update(
+                PhaseFeature(165f, 20f, 2300L),
+                naturalStandingSettings);
+            Check(naturalStandingRecovered.RepCount == 0 &&
+                  naturalStandingRecovered.CurrentPhase == ExercisePhase.Standing,
+                "A user standing naturally at 165° with a 7° wobble must not inherit a synthetic 180° baseline or count a rep.", failures);
+        }
+
+        private static void VerifyJointCoordinateSquatPipeline(ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var normal = RunSquatPipeline(
+                SyntheticPoseFixtures.SquatRepSequence(),
+                settings);
+            Check(normal.SawStanding &&
+                  normal.SawDescent &&
+                  normal.SawBottom &&
+                  normal.SawAscent &&
+                  !normal.SawBottomAfterAscent,
+                "Joint-coordinate squat fixtures must traverse Standing, Descent, Bottom, and Ascent after stabilization.", failures);
+            Check(normal.RepCount == 1 && normal.SawSufficientBottom,
+                "A full joint-coordinate squat sequence must count exactly one sufficiently deep rep.", failures);
+
+            var shallow = RunSquatPipeline(
+                SyntheticPoseFixtures.ShallowSquatSequence(),
+                settings);
+            Check(shallow.SawBottom && shallow.SawBottomWithoutSufficientDepth,
+                "A shallow full movement must still expose Bottom for depth guidance without marking sufficient depth.", failures);
+            Check(shallow.RepCount == 0,
+                "A shallow joint-coordinate movement must not increment the rep count.", failures);
+
+            var noise = RunSquatPipeline(
+                BuildStandingKneeNoiseSequence(),
+                settings);
+            Check(noise.MinimumKneeAngle >= 170f &&
+                  !noise.SawBottom &&
+                  noise.RepCount == 0,
+                "Small standing noise near 175 degrees must never create a Bottom phase or rep.", failures);
+
+            var transformedFrames = TransformPoseSequence(
+                SyntheticPoseFixtures.SquatRepSequence(),
+                0.82f,
+                new Vector2(0.04f, 0.015f),
+                true);
+            var transformed = RunSquatPipeline(transformedFrames, settings);
+            Check(transformed.SawStanding &&
+                  transformed.SawDescent &&
+                  transformed.SawBottom &&
+                  transformed.SawAscent &&
+                  transformed.RepCount == 1,
+                "Scale, translation, and horizontal mirroring must preserve the squat phases and rep count.", failures);
+
+            var originalBottomFeature = ExtractSinglePoseFeature(
+                SyntheticPoseFixtures.SquatBottom(),
+                settings);
+            var originalLeftValgus = originalBottomFeature.LeftKneeValgusOffset;
+            var originalHipCoordinate = originalBottomFeature.HipCenterY;
+            var transformedBottom = TransformPoseSequence(
+                new[] { SyntheticPoseFixtures.SquatBottom() },
+                0.82f,
+                new Vector2(0.04f, 0.015f),
+                true)[0];
+            var transformedBottomFeature = ExtractSinglePoseFeature(
+                transformedBottom,
+                settings);
+            Check(Mathf.Abs(originalLeftValgus - transformedBottomFeature.LeftKneeValgusOffset) < 0.01f &&
+                  Mathf.Abs(originalHipCoordinate - transformedBottomFeature.HipCenterY) < 0.01f,
+                "Body-scale normalized knee offset and hip coordinate must remain stable after scale/translate/mirror transforms.", failures);
+
+            VerifyPoseQualityHysteresisAndSquatScale(settings, failures);
+        }
+
+        private static SquatPipelineResult RunSquatPipeline(
+            JointTrackingFrame[] frames,
+            RealtimePoseRuleSettings settings)
+        {
+            var result = new SquatPipelineResult();
+            var stabilizer = new PoseLandmarkStabilizer();
+            var normalizer = new PoseFrameNormalizer();
+            var extractor = new PoseFeatureExtractor();
+            var detector = new ExercisePhaseDetector();
+            var hasSeenAscent = false;
+
+            if (frames == null)
+            {
+                return result;
+            }
+
+            foreach (var frame in frames)
+            {
+                var stabilized = stabilizer.Stabilize(frame, settings);
+                var view = normalizer.Normalize(stabilized, settings.MinimumVisibility);
+                var feature = extractor.Extract(view, "squat", settings);
+                var phase = detector.Update(feature, settings);
+                result.MinimumKneeAngle = Mathf.Min(
+                    result.MinimumKneeAngle,
+                    feature.AverageKneeAngle);
+                result.SawStanding |= phase.CurrentPhase == ExercisePhase.Standing;
+                result.SawDescent |= phase.CurrentPhase == ExercisePhase.Descent;
+                result.SawBottom |= phase.CurrentPhase == ExercisePhase.Bottom;
+                result.SawBottomAfterAscent |=
+                    hasSeenAscent &&
+                    phase.CurrentPhase == ExercisePhase.Bottom;
+                result.SawAscent |= phase.CurrentPhase == ExercisePhase.Ascent;
+                hasSeenAscent |= phase.CurrentPhase == ExercisePhase.Ascent;
+                result.SawSufficientBottom |=
+                    phase.CurrentPhase == ExercisePhase.Bottom &&
+                    phase.HasReachedBottomInCurrentRep;
+                result.SawBottomWithoutSufficientDepth |=
+                    phase.CurrentPhase == ExercisePhase.Bottom &&
+                    !phase.HasReachedBottomInCurrentRep;
+            }
+
+            result.RepCount = detector.State.RepCount;
+            return result;
+        }
+
+        private static PoseFeatureFrame ExtractSinglePoseFeature(
+            JointTrackingFrame frame,
+            RealtimePoseRuleSettings settings)
+        {
+            var view = new PoseFrameNormalizer().Normalize(
+                frame,
+                settings.MinimumVisibility);
+            return new PoseFeatureExtractor().Extract(view, "squat", settings);
+        }
+
+        private static JointTrackingFrame[] BuildStandingKneeNoiseSequence()
+        {
+            const int frameCount = 10;
+            var frames = new JointTrackingFrame[frameCount];
+            for (var i = 0; i < frameCount; i++)
+            {
+                var timestamp = 1000L + i * 100L;
+                var offset = i % 2 == 0 ? -0.003f : 0.002f;
+                var frame = CloneWithJointOffset(
+                    SyntheticPoseFixtures.Standing(),
+                    PoseJointNames.LeftKnee,
+                    offset,
+                    timestamp);
+                frames[i] = CloneWithJointOffset(
+                    frame,
+                    PoseJointNames.RightKnee,
+                    -offset,
+                    timestamp);
+            }
+
+            return frames;
+        }
+
+        private static JointTrackingFrame[] TransformPoseSequence(
+            JointTrackingFrame[] source,
+            float scale,
+            Vector2 translation,
+            bool mirrorHorizontally)
+        {
+            if (source == null)
+            {
+                return Array.Empty<JointTrackingFrame>();
+            }
+
+            var transformed = new JointTrackingFrame[source.Length];
+            for (var frameIndex = 0; frameIndex < source.Length; frameIndex++)
+            {
+                var sourceFrame = source[frameIndex];
+                if (sourceFrame == null || sourceFrame.joints == null)
+                {
+                    transformed[frameIndex] = sourceFrame;
+                    continue;
+                }
+
+                var joints = new TrackedJoint[sourceFrame.joints.Length];
+                for (var jointIndex = 0; jointIndex < sourceFrame.joints.Length; jointIndex++)
+                {
+                    var sourceJoint = sourceFrame.joints[jointIndex];
+                    if (sourceJoint == null)
+                    {
+                        continue;
+                    }
+
+                    var x =
+                        (sourceJoint.x - 0.5f) * scale +
+                        0.5f +
+                        translation.x;
+                    if (mirrorHorizontally)
+                    {
+                        x = 1f - x;
+                    }
+
+                    joints[jointIndex] = new TrackedJoint
+                    {
+                        name = sourceJoint.name,
+                        x = Mathf.Clamp01(x),
+                        y = Mathf.Clamp01(
+                            (sourceJoint.y - 0.5f) * scale +
+                            0.5f +
+                            translation.y),
+                        z = sourceJoint.z * scale,
+                        visibility = sourceJoint.visibility,
+                        confidence = sourceJoint.confidence
+                    };
+                }
+
+                transformed[frameIndex] = new JointTrackingFrame
+                {
+                    id = sourceFrame.id,
+                    sessionId = sourceFrame.sessionId,
+                    timestampUnixMilliseconds = sourceFrame.timestampUnixMilliseconds,
+                    joints = joints,
+                    feedback = sourceFrame.feedback
+                };
+            }
+
+            return transformed;
+        }
+
+        private static void VerifyPoseQualityHysteresisAndSquatScale(
+            RealtimePoseRuleSettings settings,
+            ICollection<string> failures)
+        {
+            var evaluator = new PoseTrackingQualityEvaluator();
+            PoseTrackingQualityReport report = null;
+            for (var i = 0; i < settings.TrackingQualityGoodFrames; i++)
+            {
+                var standing = SyntheticPoseFixtures.Standing();
+                standing.timestampUnixMilliseconds = 1000L + i * 100L;
+                report = evaluator.Evaluate(standing, settings);
+            }
+
+            var transientLowConfidence = SyntheticPoseFixtures.LowConfidence();
+            transientLowConfidence.timestampUnixMilliseconds = 2000L;
+            report = evaluator.Evaluate(transientLowConfidence, settings);
+            Check(report.State == PoseTrackingQualityState.Degraded &&
+                  report.ShouldHoldPoseAnalysis &&
+                  report.CanPreservePoseAnalysis &&
+                  !report.RequiresPoseAnalysisReset,
+                "One low-confidence frame must hold new analysis while preserving phase/window state.", failures);
+
+            for (var i = 1; i < settings.TrackingQualityUnavailableFrames; i++)
+            {
+                var lowConfidence = SyntheticPoseFixtures.LowConfidence();
+                lowConfidence.timestampUnixMilliseconds = 2000L + i * 100L;
+                report = evaluator.Evaluate(lowConfidence, settings);
+            }
+
+            Check(report.State == PoseTrackingQualityState.Unavailable &&
+                  report.RequiresPoseAnalysisReset &&
+                  !report.CanPreservePoseAnalysis,
+                "Sustained low-confidence frames must reach the hard-reset tracking state.", failures);
+
+            var bottomEvaluator = new PoseTrackingQualityEvaluator();
+            for (var i = 0; i < settings.TrackingQualityGoodFrames; i++)
+            {
+                var bottom = SyntheticPoseFixtures.SquatBottom();
+                bottom.timestampUnixMilliseconds = 3000L + i * 100L;
+                report = bottomEvaluator.Evaluate(bottom, settings);
+            }
+
+            Check(report.State == PoseTrackingQualityState.Good &&
+                  report.BodyHeight >= settings.MinimumTrackedBodyHeight,
+                "A deep squat must retain sufficient segment-chain body scale instead of being misclassified as TooSmall.", failures);
+        }
+
+        private sealed class SquatPipelineResult
+        {
+            public bool SawStanding;
+            public bool SawDescent;
+            public bool SawBottom;
+            public bool SawAscent;
+            public bool SawSufficientBottom;
+            public bool SawBottomWithoutSufficientDepth;
+            public bool SawBottomAfterAscent;
+            public int RepCount;
+            public float MinimumKneeAngle = 180f;
         }
 
         private static void VerifyTemporalRepQuality(ICollection<string> failures)

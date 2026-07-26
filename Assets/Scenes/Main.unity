@@ -270,6 +270,17 @@ MonoBehaviour:
   startupMessage: "\uCF54\uCE6D \uC2DC\uC2A4\uD15C\uC774 \uC900\uBE44\uB418\uC5C8\uC2B5\uB2C8\uB2E4."
   windowsVoiceRate: 0
   windowsVoiceVolume: 100
+  macOsVoice:
+  macOsWordsPerMinute: 185
+  requestSchedulingEnabled: 1
+  duplicateCooldownSeconds: 2
+  infoTtlSeconds: 1.5
+  warningTtlSeconds: 3
+  criticalTtlSeconds: 6
+  backendPollIntervalSeconds: 0.05
+  startObservationGraceSeconds: 0.5
+  stopTimeoutSeconds: 0.75
+  nativeStartTimeoutSeconds: 2
 --- !u!114 &1954474666
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -405,6 +416,23 @@ MonoBehaviour:
     maximumNormalizedJointJump: 0.12
     lowConfidenceGraceSeconds: 0.35
     maximumConsecutiveOutlierFrames: 3
+    stationarySmoothingAlpha: 0.24
+    movingSmoothingAlpha: 0.72
+    adaptiveMotionSpeed: 1.2
+    maximumBodyScaleJointJump: 0.6
+    minimumBodyScaleJointJump: 0.04
+    maximumTrackingHoldSeconds: 0.25
+    minimumTrackingQualityConfidence: 0.45
+    minimumFrontalBodySpan: 0.08
+    minimumTrackedBodyHeight: 0.35
+    minimumBodyFrameMargin: 0.01
+    trackingQualityGoodFrames: 3
+    trackingQualityUnavailableFrames: 3
+    standingHipDropTolerance: 0.025
+    minimumRecognizableHipDrop: 0.04
+    minimumBottomHipDrop: 0.08
+    phaseHipVelocityDeadZonePerSecond: 0.08
+    minimumPhaseKneeAngleExcursion: 8
     minimumValidCoreFrameRatio: 0.45
     minimumViolationRatio: 0.35
     minimumRuleEvaluationFrames: 6
@@ -423,9 +451,20 @@ MonoBehaviour:
     minimumBottomKneeAngle: 55
     maximumLeftRightKneeAngleDelta: 18
     maximumTorsoTiltDegrees: 42
+    maximumPelvicTiltRatio: 0.25
     maximumCenterBalanceOffset: 0.16
     phaseVelocityDeadZoneDegreesPerSecond: 12
     minimumBottomDwellSeconds: 0.15
+    offsetNormalizationReferenceBodyScale: 0.5
+  calibrationSettings:
+    calibrationVisibilityThreshold: 0.85
+    calibrationHoldSeconds: 1.5
+    countdownSeconds: 3
+    pauseVisibilityThreshold: 0.6
+    outOfFrameGraceSeconds: 0.5
+    reReadyDebounceSeconds: 0.5
+    requireHeadLandmark: 1
+    runCalibrationProfileSampling: 1
 --- !u!114 &1954474672
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -460,6 +499,7 @@ MonoBehaviour:
   trackingController: {fileID: 1954474667}
   feedbackOrchestrator: {fileID: 1954474671}
   feedbackReceiver: {fileID: 1954474663}
+  coachTts: {fileID: 1954474664}
   replayPlayer: {fileID: 1954474672}
   hideLegacyDebugView: 1
   hideGeneratedDesktopCanvas: 1

@@ -128,28 +128,35 @@ namespace Rag.Healthcare.Rag.Runtime
             }
         }
 
+        public void BeginCalibrationSession()
+        {
+            PrepareSession();
+            sessionState.BeginCalibrationSession();
+        }
+
+        public void BeginExerciseSession()
+        {
+            PrepareSession();
+            sessionState.BeginWorkoutSession();
+        }
+
+        [System.Obsolete("Use BeginCalibrationSession() or BeginExerciseSession() so the session intent is explicit.")]
         public void BeginWorkoutSession(bool skipCalibration = false)
         {
-            ApplyPersonalizedRomFromProfile();
-            lastSessionFrameTimestampMilliseconds = 0L;
-            poseAnalysisSuspended = false;
-            sessionState.Configure(calibrationSettings);
             if (skipCalibration)
             {
-                sessionState.BeginCalibratedSession();
+                BeginExerciseSession();
+                return;
             }
-            else
-            {
-                sessionState.BeginSession();
-            }
+
+            BeginCalibrationSession();
         }
 
         public void EndWorkoutSession()
         {
             sessionState.EndSession();
-            lastSessionFrameTimestampMilliseconds = 0L;
-            poseAnalysisSuspended = false;
             RestoreBaseRuleSettings();
+            ResetTrackingContinuity(preserveCorrectRepCount: true);
         }
 
         public void ResetRuntimeState()
@@ -160,6 +167,11 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             RestoreBaseRuleSettings();
+            ResetTrackingContinuity(preserveCorrectRepCount: false);
+        }
+
+        private void ResetTrackingContinuity(bool preserveCorrectRepCount)
+        {
             windowBuffer?.Clear();
             trackingQualityEvaluator.Reset();
             landmarkStabilizer.Reset();
@@ -170,7 +182,11 @@ namespace Rag.Healthcare.Rag.Runtime
             reusableStats.Reset();
             LatestStats = null;
             LatestTrackingQuality = null;
-            CorrectRepCount = 0;
+            if (!preserveCorrectRepCount)
+            {
+                CorrectRepCount = 0;
+            }
+
             currentRepInProgress = false;
             currentRepHasViolation = false;
             LastCompletedRepWasCorrect = false;
@@ -199,7 +215,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 LatestTrackingQuality,
                 ResolvePoseDeltaSeconds(frame.timestampUnixMilliseconds));
 
-            if (sessionState.IsSessionActive && !sessionState.AllowsPoseAnalysis)
+            if (!sessionState.IsSessionActive || !sessionState.AllowsPoseAnalysis)
             {
                 SuspendPoseAnalysis(frame.timestampUnixMilliseconds);
                 return;
@@ -210,12 +226,21 @@ namespace Rag.Healthcare.Rag.Runtime
 
             if (LatestTrackingQuality == null || !LatestTrackingQuality.AllowsPoseAnalysis)
             {
+                if (LatestTrackingQuality != null &&
+                    LatestTrackingQuality.CanPreservePoseAnalysis &&
+                    !LatestTrackingQuality.RequiresPoseAnalysisReset)
+                {
+                    // Hold new decisions during short confidence dips without
+                    // discarding the active squat phase or temporal evidence.
+                    return;
+                }
+
                 SuspendPoseAnalysis(frame.timestampUnixMilliseconds);
                 return;
             }
 
             var view = normalizer.Normalize(stabilizedFrame, settings.minimumVisibility);
-            var feature = featureExtractor.Extract(view, exercise, settings.minimumVisibility);
+            var feature = featureExtractor.Extract(view, exercise, settings);
             if (requiresStandingRearm)
             {
                 // Do not resume halfway through a squat after an occlusion. A partial
@@ -229,7 +254,7 @@ namespace Rag.Healthcare.Rag.Runtime
 
                 requiresStandingRearm = false;
                 featureExtractor.Reset();
-                feature = featureExtractor.Extract(view, exercise, settings.minimumVisibility);
+                feature = featureExtractor.Extract(view, exercise, settings);
             }
 
             poseAnalysisSuspended = false;
@@ -283,6 +308,7 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             windowBuffer?.Clear();
+            landmarkStabilizer.Reset();
             featureExtractor.Reset();
             reusableStats.Reset();
             LatestStats = null;
@@ -370,6 +396,13 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             workingRuleSettings = CloneRuleSettings(sourceSettings);
+        }
+
+        private void PrepareSession()
+        {
+            ApplyPersonalizedRomFromProfile();
+            ResetTrackingContinuity(preserveCorrectRepCount: true);
+            sessionState.Configure(calibrationSettings);
         }
 
         private float ResolvePoseDeltaSeconds(long timestampUnixMilliseconds)

@@ -5,7 +5,9 @@ using UnityEngine;
 namespace Rag.Healthcare.Pose.Session
 {
     /// <summary>
-    /// Pure session lifecycle: Ready → Countdown → InWorkout ↔ PausedOutOfFrame.
+    /// Pure lifecycle for either initial calibration or an already calibrated workout.
+    /// Calibration uses Ready → Countdown → InWorkout, while an actual workout is
+    /// restricted to InWorkout ↔ PausedOutOfFrame until the session ends.
     /// Consumes <see cref="PoseTrackingQualityReport"/> and full-body calibration; does not mutate them.
     /// </summary>
     public sealed class WorkoutSessionStateMachine
@@ -27,6 +29,7 @@ namespace Rag.Healthcare.Pose.Session
             this.settings = settings ?? new CalibrationSettings();
             LatestCalibration = calibrationEvaluator.Latest;
             State = WorkoutTrackingState.ReadyForCalibration;
+            SessionMode = WorkoutSessionMode.None;
         }
 
         public WorkoutTrackingState State { get; private set; }
@@ -37,9 +40,20 @@ namespace Rag.Healthcare.Pose.Session
 
         public CalibrationSettings Settings => settings;
 
-        public bool AllowsPoseAnalysis => State == WorkoutTrackingState.InWorkout;
+        public bool AllowsPoseAnalysis =>
+            sessionActive &&
+            SessionMode == WorkoutSessionMode.Workout &&
+            State == WorkoutTrackingState.InWorkout;
 
         public bool IsSessionActive => sessionActive;
+
+        public WorkoutSessionMode SessionMode { get; private set; }
+
+        public bool IsCalibrationSession =>
+            sessionActive && SessionMode == WorkoutSessionMode.Calibration;
+
+        public bool IsWorkoutSession =>
+            sessionActive && SessionMode == WorkoutSessionMode.Workout;
 
         public event Action<WorkoutTrackingState> StateChanged;
 
@@ -52,38 +66,57 @@ namespace Rag.Healthcare.Pose.Session
             settings = nextSettings ?? new CalibrationSettings();
         }
 
-        public void BeginSession()
+        /// <summary>
+        /// Starts the one-time full-body calibration flow. Stable visibility hold,
+        /// countdown, and countdown rollback all remain enabled in this mode.
+        /// </summary>
+        public void BeginCalibrationSession()
         {
             sessionActive = true;
+            SessionMode = WorkoutSessionMode.Calibration;
             calibrationConfirmedFired = false;
-            outOfFrameElapsed = 0f;
-            pausedElapsed = 0f;
-            CountdownRemainingSeconds = 0f;
-            calibrationEvaluator.Reset();
-            LatestCalibration = calibrationEvaluator.Latest;
+            ResetSessionTracking();
             SetState(WorkoutTrackingState.ReadyForCalibration);
         }
 
-        /// <summary>Dedicated calibration already done; start analysis immediately.</summary>
-        public void BeginCalibratedSession()
+        /// <summary>
+        /// Starts an actual workout after dedicated calibration has completed.
+        /// Analysis begins immediately and tracking loss can only pause the workout;
+        /// it never re-enters calibration or starts another countdown.
+        /// </summary>
+        public void BeginWorkoutSession()
         {
             sessionActive = true;
+            SessionMode = WorkoutSessionMode.Workout;
             calibrationConfirmedFired = true;
-            outOfFrameElapsed = 0f;
-            pausedElapsed = 0f;
-            CountdownRemainingSeconds = 0f;
+            ResetSessionTracking();
             SetState(WorkoutTrackingState.InWorkout);
+        }
+
+        /// <summary>
+        /// Compatibility wrapper for callers that start the initial calibration flow.
+        /// </summary>
+        [Obsolete("Use BeginCalibrationSession() to make the session purpose explicit.")]
+        public void BeginSession()
+        {
+            BeginCalibrationSession();
+        }
+
+        /// <summary>
+        /// Compatibility wrapper for callers that start an already calibrated workout.
+        /// </summary>
+        [Obsolete("Use BeginWorkoutSession() to make the session purpose explicit.")]
+        public void BeginCalibratedSession()
+        {
+            BeginWorkoutSession();
         }
 
         public void EndSession()
         {
             sessionActive = false;
+            SessionMode = WorkoutSessionMode.None;
             calibrationConfirmedFired = false;
-            outOfFrameElapsed = 0f;
-            pausedElapsed = 0f;
-            CountdownRemainingSeconds = 0f;
-            calibrationEvaluator.Reset();
-            LatestCalibration = calibrationEvaluator.Latest;
+            ResetSessionTracking();
             SetState(WorkoutTrackingState.ReadyForCalibration);
         }
 
@@ -98,8 +131,12 @@ namespace Rag.Healthcare.Pose.Session
             }
 
             var dt = Mathf.Max(0f, deltaSeconds);
-            var calibration = calibrationEvaluator.Evaluate(frame, settings, quality, dt);
-            LatestCalibration = calibration;
+            FullBodyCalibrationReport calibration = null;
+            if (SessionMode == WorkoutSessionMode.Calibration)
+            {
+                calibration = calibrationEvaluator.Evaluate(frame, settings, quality, dt);
+                LatestCalibration = calibration;
+            }
 
             switch (State)
             {
@@ -193,6 +230,14 @@ namespace Rag.Healthcare.Pose.Session
                 return;
             }
 
+            // A calibrated workout must never fall back into the one-time
+            // calibration pipeline. Keep it paused for any duration and resume on
+            // the first recovered frame.
+            if (SessionMode == WorkoutSessionMode.Workout)
+            {
+                return;
+            }
+
             pausedElapsed += dt;
             if (pausedElapsed >= Mathf.Max(0f, settings.reReadyDebounceSeconds))
             {
@@ -208,6 +253,14 @@ namespace Rag.Healthcare.Pose.Session
             FullBodyCalibrationReport calibration,
             PoseTrackingQualityReport quality)
         {
+            if (SessionMode == WorkoutSessionMode.Workout)
+            {
+                // The one-time full-body calibration includes strict head/ankle
+                // visibility requirements that are not valid workout pause gates.
+                // During exercise, consume only the workout-specific quality signal.
+                return quality == null || quality.State != PoseTrackingQualityState.Good;
+            }
+
             if (quality != null && quality.State != PoseTrackingQualityState.Good)
             {
                 return true;
@@ -215,6 +268,15 @@ namespace Rag.Healthcare.Pose.Session
 
             return calibration != null &&
                    calibration.MinimumGroupScore < settings.pauseVisibilityThreshold;
+        }
+
+        private void ResetSessionTracking()
+        {
+            outOfFrameElapsed = 0f;
+            pausedElapsed = 0f;
+            CountdownRemainingSeconds = 0f;
+            calibrationEvaluator.Reset();
+            LatestCalibration = calibrationEvaluator.Latest;
         }
 
         private void SetState(WorkoutTrackingState next)

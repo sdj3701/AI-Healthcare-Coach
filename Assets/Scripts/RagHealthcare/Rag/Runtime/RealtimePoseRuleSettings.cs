@@ -33,6 +33,16 @@ namespace Rag.Healthcare.Rag.Runtime
         [Range(1, 10)] public int trackingQualityGoodFrames = 3;
         [Range(1, 10)] public int trackingQualityUnavailableFrames = 3;
 
+        [Header("Front camera squat phase")]
+        [Tooltip("Normalized hip drop allowed while the body is still considered standing.")]
+        [Range(0.005f, 0.15f)] public float standingHipDropTolerance = 0.025f;
+        [Tooltip("Minimum normalized hip drop or knee excursion needed before a direction reversal can be a squat bottom.")]
+        [Range(0.01f, 0.25f)] public float minimumRecognizableHipDrop = 0.04f;
+        [Tooltip("Minimum normalized hip drop required, together with knee depth, for a completed rep.")]
+        [Range(0.02f, 0.35f)] public float minimumBottomHipDrop = 0.08f;
+        [Range(0.01f, 1f)] public float phaseHipVelocityDeadZonePerSecond = 0.08f;
+        [Range(1f, 45f)] public float minimumPhaseKneeAngleExcursion = 8f;
+
         [Header("Temporal evidence")]
         [Range(0f, 1f)] public float minimumValidCoreFrameRatio = 0.45f;
         [Range(0f, 1f)] public float minimumViolationRatio = 0.35f;
@@ -59,6 +69,8 @@ namespace Rag.Healthcare.Rag.Runtime
         [Range(0f, 0.5f)] public float maximumCenterBalanceOffset = 0.16f;
         [Range(0f, 180f)] public float phaseVelocityDeadZoneDegreesPerSecond = 12f;
         [Range(0f, 0.5f)] public float minimumBottomDwellSeconds = 0.15f;
+        [Tooltip("Body-height reference used to keep legacy screen-space offset thresholds comparable after scale normalization.")]
+        [Range(0.2f, 0.8f)] public float offsetNormalizationReferenceBodyScale = 0.5f;
 
         public float MinimumVisibility => minimumVisibility;
         // Unity can deserialize newly added fields as zero on older scene/prefab data.
@@ -97,6 +109,24 @@ namespace Rag.Healthcare.Rag.Runtime
         public int TrackingQualityUnavailableFrames => trackingQualityUnavailableFrames > 0
             ? Mathf.Clamp(trackingQualityUnavailableFrames, 1, 10)
             : 3;
+        public float StandingHipDropTolerance => standingHipDropTolerance > 0f
+            ? Mathf.Clamp(standingHipDropTolerance, 0.005f, 0.15f)
+            : 0.025f;
+        public float MinimumRecognizableHipDrop => minimumRecognizableHipDrop > 0f
+            ? Mathf.Clamp(minimumRecognizableHipDrop, 0.01f, 0.25f)
+            : 0.04f;
+        public float MinimumBottomHipDrop => minimumBottomHipDrop > 0f
+            ? Mathf.Clamp(minimumBottomHipDrop, 0.02f, 0.35f)
+            : 0.08f;
+        public float PhaseHipVelocityDeadZonePerSecond => phaseHipVelocityDeadZonePerSecond > 0f
+            ? Mathf.Clamp(phaseHipVelocityDeadZonePerSecond, 0.01f, 1f)
+            : 0.08f;
+        public float MinimumPhaseKneeAngleExcursion => minimumPhaseKneeAngleExcursion > 0f
+            ? Mathf.Clamp(minimumPhaseKneeAngleExcursion, 1f, 45f)
+            : 8f;
+        public float OffsetNormalizationReferenceBodyScale => offsetNormalizationReferenceBodyScale > 0f
+            ? Mathf.Clamp(offsetNormalizationReferenceBodyScale, 0.2f, 0.8f)
+            : 0.5f;
         public float MinimumValidCoreFrameRatio => minimumValidCoreFrameRatio;
         public float MinimumViolationRatio => minimumViolationRatio;
         public float MaximumKneeValgusOffset => maximumKneeValgusOffset;

@@ -24,6 +24,7 @@ namespace Rag.Healthcare.UI
         private const string PanelSettingsResourcePath = "UI/MobileWorkoutPanelSettings";
         private const string RuntimeThemeResourcePath = "UI/UnityDefaultRuntimeTheme";
         private const string BundledKoreanFontResourcePath = "Fonts/NotoSansKR-Regular";
+        private const string WorkoutStartSpeech = "스쿼트 실시간 코칭을 시작합니다.";
         private const float BaseHorizontalPadding = 16f;
         private const float BaseTopPadding = 12f;
         private const float BaseBottomPadding = 14f;
@@ -144,6 +145,7 @@ namespace Rag.Healthcare.UI
         private Label poseFpsLabel;
         private Label phaseLabel;
         private Label feedbackLabel;
+        private Label ttsStatusLabel;
         private Label cameraStateLabel;
         private Label replayStateLabel;
         private Label performanceBenchStatusLabel;
@@ -161,6 +163,8 @@ namespace Rag.Healthcare.UI
         private Coroutine calibrationFlowCoroutine;
         private string performanceBenchStatusText = "Perf bench: idle";
         private bool performanceBenchSubscribed;
+        private CoachTtsController subscribedCoachTts;
+        private string ttsConnectionStatus = string.Empty;
 
         private ScreenStep currentStep = ScreenStep.Profile;
         private string selectedExerciseId = "squat";
@@ -246,6 +250,7 @@ namespace Rag.Healthcare.UI
                     trackingController.TrackingFrameReceived += HandleTrackingFrameReceived;
                 }
 
+                SubscribeCoachTts();
                 SubscribePerformanceProfiler();
             }
         }
@@ -279,6 +284,7 @@ namespace Rag.Healthcare.UI
                 trackingController.TrackingFrameReceived -= HandleTrackingFrameReceived;
             }
 
+            UnsubscribeCoachTts();
             UnsubscribePerformanceProfiler();
 
             if (!Application.isPlaying && document != null)
@@ -289,6 +295,7 @@ namespace Rag.Healthcare.UI
 
         private void OnDestroy()
         {
+            UnsubscribeCoachTts();
             UnsubscribePerformanceProfiler();
 
             if (runtimePanelSettings != null)
@@ -401,6 +408,10 @@ namespace Rag.Healthcare.UI
             trackingController ??= FindFirstObjectByType<JointTrackingController>();
             feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
+            if (coachTts == null && feedbackReceiver != null)
+            {
+                coachTts = feedbackReceiver.CoachTts;
+            }
             coachTts ??= FindFirstObjectByType<CoachTtsController>();
             replayPlayer ??= FindFirstObjectByType<PoseJsonReplayPlayer>();
             performanceProfiler ??= FindFirstObjectByType<DevicePerformanceProfiler>();
@@ -423,6 +434,7 @@ namespace Rag.Healthcare.UI
 
             if (Application.isPlaying)
             {
+                SubscribeCoachTts();
                 SubscribePerformanceProfiler();
             }
         }
@@ -1184,6 +1196,11 @@ namespace Rag.Healthcare.UI
             feedbackLabel.style.marginTop = 6f;
             contentRoot.Add(feedbackLabel);
 
+            ttsStatusLabel = Label("음성 코칭: 확인 중", 9, ColorFromHex(0x64748B));
+            ttsStatusLabel.style.height = 24f;
+            ttsStatusLabel.style.whiteSpace = WhiteSpace.Normal;
+            contentRoot.Add(ttsStatusLabel);
+
             var utilityRow = Row("utility-row", 38f, 7f);
             utilityRow.Add(ActionButton("카메라 전환", ColorFromHex(0x161B22), Color.white, 38f, SwitchCamera));
             utilityRow.Add(ActionButton(
@@ -1276,6 +1293,39 @@ namespace Rag.Healthcare.UI
 
             performanceProfiler.Completed += HandlePerformanceBenchCompleted;
             performanceBenchSubscribed = true;
+        }
+
+        private void SubscribeCoachTts()
+        {
+            if (!Application.isPlaying || subscribedCoachTts == coachTts)
+            {
+                return;
+            }
+
+            UnsubscribeCoachTts();
+            if (coachTts == null)
+            {
+                return;
+            }
+
+            coachTts.PlaybackFailed += HandleTtsPlaybackFailed;
+            subscribedCoachTts = coachTts;
+        }
+
+        private void UnsubscribeCoachTts()
+        {
+            if (subscribedCoachTts != null)
+            {
+                subscribedCoachTts.PlaybackFailed -= HandleTtsPlaybackFailed;
+            }
+
+            subscribedCoachTts = null;
+        }
+
+        private void HandleTtsPlaybackFailed(string statusMessage)
+        {
+            ttsConnectionStatus = statusMessage ?? string.Empty;
+            RefreshTtsStatus();
         }
 
         private void UnsubscribePerformanceProfiler()
@@ -1607,6 +1657,8 @@ namespace Rag.Healthcare.UI
                 feedbackLabel.text = "최근 피드백: " + Trim(feedback, 62);
             }
 
+            RefreshTtsStatus();
+
             if (cameraStateLabel != null)
             {
                 cameraStateLabel.text = BuildCameraStateText();
@@ -1620,9 +1672,8 @@ namespace Rag.Healthcare.UI
             var showCalibUi = feedbackOrchestrator != null &&
                               feedbackOrchestrator.SessionStateMachine != null &&
                               feedbackOrchestrator.SessionStateMachine.IsSessionActive &&
-                              (workoutRunning ||
-                               calibrationFlowRunning ||
-                               currentStep == ScreenStep.Calibration);
+                              currentStep == ScreenStep.Calibration &&
+                              calibrationFlowRunning;
             if (showCalibUi && calibrationOverlay != null)
             {
                 calibrationOverlay.Update(
@@ -1641,6 +1692,34 @@ namespace Rag.Healthcare.UI
             {
                 RefreshPerformanceBenchStatus();
             }
+        }
+
+        private void RefreshTtsStatus()
+        {
+            if (ttsStatusLabel == null)
+            {
+                return;
+            }
+
+            if (coachTts == null)
+            {
+                var missingStatus = string.IsNullOrWhiteSpace(ttsConnectionStatus)
+                    ? "음성 코칭 컨트롤러가 연결되지 않았습니다."
+                    : ttsConnectionStatus;
+                ttsStatusLabel.text = "음성 코칭: " + Trim(missingStatus, 74);
+                ttsStatusLabel.style.color = ColorFromHex(0xF87171);
+                return;
+            }
+
+            var statusMessage = string.IsNullOrWhiteSpace(coachTts.LastStatusMessage)
+                ? "상태 정보 없음"
+                : coachTts.LastStatusMessage;
+            ttsStatusLabel.text =
+                "음성 코칭 [" + coachTts.ActiveBackend + "]: " +
+                Trim(statusMessage, 66);
+            ttsStatusLabel.style.color = coachTts.IsBackendHealthy
+                ? ColorFromHex(0x94A3B8)
+                : ColorFromHex(0xF87171);
         }
 
         private void RefreshCalibrationUiState()
@@ -2007,18 +2086,55 @@ namespace Rag.Healthcare.UI
                     yield break;
                 }
 
-                coachTts ??= FindFirstObjectByType<CoachTtsController>();
-                coachTts?.BeginSession();
                 feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
-                feedbackOrchestrator?.BeginWorkoutSession(skipCalibration: HasCalibrationReady());
+                feedbackOrchestrator?.BeginExerciseSession();
                 sessionStartedAt = Time.unscaledTime;
                 workoutRunning = true;
+                StartWorkoutVoiceCoaching();
                 RefreshPreviewTexture();
             }
             finally
             {
                 CompleteSessionTransition();
             }
+        }
+
+        private void StartWorkoutVoiceCoaching()
+        {
+            ResolveReferences();
+            if (coachTts == null)
+            {
+                ttsConnectionStatus = "음성 코칭 컨트롤러가 연결되지 않아 시작 안내를 재생할 수 없습니다.";
+                Debug.LogWarning($"[MobileWorkoutPrototypeView] {ttsConnectionStatus}");
+                RefreshTtsStatus();
+                return;
+            }
+
+            if (!coachTts.BeginSession())
+            {
+                ttsConnectionStatus = string.IsNullOrWhiteSpace(coachTts.LastStatusMessage)
+                    ? "TTS 세션을 시작하지 못했습니다."
+                    : coachTts.LastStatusMessage;
+                Debug.LogWarning(
+                    $"[MobileWorkoutPrototypeView] TTS session did not open " +
+                    $"({coachTts.ActiveBackend}): {ttsConnectionStatus}");
+                RefreshTtsStatus();
+                return;
+            }
+
+            ttsConnectionStatus = string.Empty;
+            Debug.Log(
+                $"[MobileWorkoutPrototypeView] Workout TTS session opened " +
+                $"with backend {coachTts.ActiveBackend}.");
+            if (!coachTts.TrySpeak(WorkoutStartSpeech, out var statusMessage))
+            {
+                ttsConnectionStatus = statusMessage;
+                Debug.LogWarning(
+                    $"[MobileWorkoutPrototypeView] Workout start TTS request was rejected " +
+                    $"({coachTts.ActiveBackend}): {statusMessage}");
+            }
+
+            RefreshTtsStatus();
         }
 
         private void StartCalibrationFlow()
@@ -2135,7 +2251,7 @@ namespace Rag.Healthcare.UI
                 }
 
                 feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
-                feedbackOrchestrator?.BeginWorkoutSession(skipCalibration: false);
+                feedbackOrchestrator?.BeginCalibrationSession();
                 calibrationFlowRunning = true;
                 workoutRunning = false;
                 RefreshPreviewTexture();
@@ -2297,7 +2413,12 @@ namespace Rag.Healthcare.UI
             {
                 previewMode = PreviewMode.Camera;
                 replayPlayer?.StopReplay();
-                var shouldResumeTracking = workoutRunning || (trackingController != null && trackingController.IsTracking);
+                var shouldResumeWorkout = workoutRunning;
+                var shouldResumeCalibration = calibrationFlowRunning;
+                var shouldResumeTracking =
+                    shouldResumeWorkout ||
+                    shouldResumeCalibration ||
+                    trackingController != null && trackingController.IsTracking;
                 if (cameraSource == null)
                 {
                     cameraOperationError = "카메라 소스가 없습니다.";
@@ -2316,12 +2437,19 @@ namespace Rag.Healthcare.UI
                     yield break;
                 }
 
-                if (workoutRunning)
+                if (shouldResumeWorkout)
                 {
                     elapsedBeforePause += Time.unscaledTime - sessionStartedAt;
                 }
 
+                if (shouldResumeWorkout || shouldResumeCalibration)
+                {
+                    feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
+                    feedbackOrchestrator?.EndWorkoutSession();
+                }
+
                 workoutRunning = false;
+                calibrationFlowRunning = false;
                 coachTts ??= FindFirstObjectByType<CoachTtsController>();
                 coachTts?.Suspend();
                 trackingController?.StopTracking();
@@ -2375,9 +2503,20 @@ namespace Rag.Healthcare.UI
 
                     if (trackingController != null && trackingController.IsTracking && !pendingWorkoutStop)
                     {
-                        coachTts?.Resume();
-                        workoutRunning = true;
-                        sessionStartedAt = Time.unscaledTime;
+                        if (shouldResumeWorkout)
+                        {
+                            feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
+                            feedbackOrchestrator?.BeginExerciseSession();
+                            coachTts?.Resume();
+                            workoutRunning = true;
+                            sessionStartedAt = Time.unscaledTime;
+                        }
+                        else if (shouldResumeCalibration)
+                        {
+                            feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
+                            feedbackOrchestrator?.BeginCalibrationSession();
+                            calibrationFlowRunning = true;
+                        }
                     }
                     else
                     {
@@ -2726,6 +2865,7 @@ namespace Rag.Healthcare.UI
             poseFpsLabel = null;
             phaseLabel = null;
             feedbackLabel = null;
+            ttsStatusLabel = null;
             cameraStateLabel = null;
             replayStateLabel = null;
             performanceBenchStatusLabel = null;
@@ -2776,7 +2916,10 @@ namespace Rag.Healthcare.UI
                 feedbackOrchestrator.SessionStateMachine.IsSessionActive)
             {
                 var sessionState = feedbackOrchestrator.SessionState;
-                if (sessionState == WorkoutTrackingState.CountingDown)
+                var isCalibrationScreen =
+                    currentStep == ScreenStep.Calibration || calibrationFlowRunning;
+                if (isCalibrationScreen &&
+                    sessionState == WorkoutTrackingState.CountingDown)
                 {
                     var seconds = Mathf.Max(1, Mathf.CeilToInt(feedbackOrchestrator.CountdownRemaining));
                     return "전신 감지 완료! " + seconds + "초 후 시작합니다";
@@ -2787,7 +2930,8 @@ namespace Rag.Healthcare.UI
                     return "전신이 화면을 벗어났어요. 다시 프레임 안으로 들어와 주세요";
                 }
 
-                if (sessionState == WorkoutTrackingState.ReadyForCalibration)
+                if (isCalibrationScreen &&
+                    sessionState == WorkoutTrackingState.ReadyForCalibration)
                 {
                     var calibration = feedbackOrchestrator.LatestCalibration;
                     if (calibration != null && !string.IsNullOrWhiteSpace(calibration.GuidanceReason))
@@ -2796,6 +2940,11 @@ namespace Rag.Healthcare.UI
                     }
 
                     return "카메라 뒤로 물러서주세요. 전신이 보이도록 서 주세요.";
+                }
+
+                if (workoutRunning && sessionState != WorkoutTrackingState.InWorkout)
+                {
+                    return "실시간 운동 추적을 준비하고 있습니다.";
                 }
             }
 

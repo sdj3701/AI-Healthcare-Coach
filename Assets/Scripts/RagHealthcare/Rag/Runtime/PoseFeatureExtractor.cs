@@ -9,6 +9,8 @@ namespace Rag.Healthcare.Rag.Runtime
         // Below this projected horizontal span, a frontal pelvic-level estimate is
         // too sensitive to a single-landmark jitter or a near side-on camera view.
         private const float MinimumFrontalPelvisSpan = 0.08f;
+        private const float MinimumBodyScale = 0.05f;
+        private const float LegacyReferenceBodyScale = 0.5f;
 
         private readonly PoseFeatureFrame workingFeature = new PoseFeatureFrame();
         private bool hasPreviousFrame;
@@ -18,6 +20,35 @@ namespace Rag.Healthcare.Rag.Runtime
 
         // The returned feature is a reusable view and is valid until the next Extract call.
         public PoseFeatureFrame Extract(PoseFrameView frameView, string exercise, float minimumVisibility)
+        {
+            return ExtractInternal(
+                frameView,
+                exercise,
+                minimumVisibility,
+                LegacyReferenceBodyScale);
+        }
+
+        // Prefer this overload in the live pipeline. The float overload remains for
+        // source compatibility with existing QA/editor callers.
+        public PoseFeatureFrame Extract(
+            PoseFrameView frameView,
+            string exercise,
+            RealtimePoseRuleSettings settings)
+        {
+            return ExtractInternal(
+                frameView,
+                exercise,
+                settings == null ? 0.45f : settings.MinimumVisibility,
+                settings == null
+                    ? LegacyReferenceBodyScale
+                    : settings.OffsetNormalizationReferenceBodyScale);
+        }
+
+        private PoseFeatureFrame ExtractInternal(
+            PoseFrameView frameView,
+            string exercise,
+            float minimumVisibility,
+            float offsetReferenceBodyScale)
         {
             var feature = workingFeature;
             feature.Reset();
@@ -31,12 +62,17 @@ namespace Rag.Healthcare.Rag.Runtime
 
             var validFeatureCount = 0;
             var totalFeatureCount = 8;
+            var hasBodyScale = TryCalculateBodyScale(frameView, out var bodyScale);
+            var offsetScale = hasBodyScale
+                ? Mathf.Max(MinimumBodyScale, offsetReferenceBodyScale) / bodyScale
+                : 1f;
 
             feature.HasLeftKneeAngle = TryCalculateKnee(
                 frameView,
                 PoseJointNames.LeftHip,
                 PoseJointNames.LeftKnee,
                 PoseJointNames.LeftAnkle,
+                offsetScale,
                 out feature.LeftKneeAngle,
                 out feature.LeftKneeValgusOffset);
             feature.HasLeftKneeValgus = feature.HasLeftKneeAngle;
@@ -50,6 +86,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 PoseJointNames.RightHip,
                 PoseJointNames.RightKnee,
                 PoseJointNames.RightAnkle,
+                offsetScale,
                 out feature.RightKneeAngle,
                 out feature.RightKneeValgusOffset);
             feature.HasRightKneeValgus = feature.HasRightKneeAngle;
@@ -99,7 +136,12 @@ namespace Rag.Healthcare.Rag.Runtime
                 validFeatureCount++;
             }
 
-            feature.HasCenterBalance = TryCalculateCenterBalance(frameView, out feature.CenterBalanceOffset, out feature.HipCenterY);
+            feature.HasCenterBalance = TryCalculateCenterBalance(
+                frameView,
+                hasBodyScale ? bodyScale : 0f,
+                offsetScale,
+                out feature.CenterBalanceOffset,
+                out feature.HipCenterY);
             if (feature.HasCenterBalance)
             {
                 validFeatureCount++;
@@ -140,6 +182,7 @@ namespace Rag.Healthcare.Rag.Runtime
             string hipName,
             string kneeName,
             string ankleName,
+            float offsetScale,
             out float kneeAngle,
             out float kneeValgusOffset)
         {
@@ -154,7 +197,9 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             kneeAngle = PoseGeometry.Angle(hip, knee, ankle);
-            kneeValgusOffset = PoseGeometry.DistancePointToLine(knee, hip, ankle);
+            kneeValgusOffset =
+                PoseGeometry.DistancePointToLine(knee, hip, ankle) *
+                Mathf.Max(0f, offsetScale);
             return true;
         }
 
@@ -236,7 +281,12 @@ namespace Rag.Healthcare.Rag.Runtime
             return true;
         }
 
-        private static bool TryCalculateCenterBalance(PoseFrameView frameView, out float centerBalanceOffset, out float hipCenterY)
+        private static bool TryCalculateCenterBalance(
+            PoseFrameView frameView,
+            float bodyScale,
+            float offsetScale,
+            out float centerBalanceOffset,
+            out float hipCenterY)
         {
             centerBalanceOffset = 0f;
             hipCenterY = 0f;
@@ -251,9 +301,45 @@ namespace Rag.Healthcare.Rag.Runtime
 
             var hipCenter = PoseGeometry.Midpoint(leftHip, rightHip);
             var ankleCenter = PoseGeometry.Midpoint(leftAnkle, rightAnkle);
-            centerBalanceOffset = Mathf.Abs(hipCenter.x - ankleCenter.x);
-            hipCenterY = hipCenter.y;
+            centerBalanceOffset =
+                Mathf.Abs(hipCenter.x - ankleCenter.x) *
+                Mathf.Max(0f, offsetScale);
+            // Translation- and scale-invariant vertical hip coordinate. It becomes
+            // less negative (positive velocity) as the hips descend toward the feet.
+            hipCenterY = bodyScale > MinimumBodyScale
+                ? (hipCenter.y - ankleCenter.y) / bodyScale
+                : hipCenter.y;
             return true;
+        }
+
+        private static bool TryCalculateBodyScale(PoseFrameView frameView, out float bodyScale)
+        {
+            bodyScale = 0f;
+            if (!TryGetPosition(frameView, PoseJointNames.LeftShoulder, out var leftShoulder) ||
+                !TryGetPosition(frameView, PoseJointNames.RightShoulder, out var rightShoulder) ||
+                !TryGetPosition(frameView, PoseJointNames.LeftHip, out var leftHip) ||
+                !TryGetPosition(frameView, PoseJointNames.RightHip, out var rightHip) ||
+                !TryGetPosition(frameView, PoseJointNames.LeftKnee, out var leftKnee) ||
+                !TryGetPosition(frameView, PoseJointNames.RightKnee, out var rightKnee) ||
+                !TryGetPosition(frameView, PoseJointNames.LeftAnkle, out var leftAnkle) ||
+                !TryGetPosition(frameView, PoseJointNames.RightAnkle, out var rightAnkle))
+            {
+                return false;
+            }
+
+            var shoulderCenter = PoseGeometry.Midpoint(leftShoulder, rightShoulder);
+            var hipCenter = PoseGeometry.Midpoint(leftHip, rightHip);
+            var averageThighLength =
+                (Vector2.Distance(leftHip, leftKnee) +
+                 Vector2.Distance(rightHip, rightKnee)) * 0.5f;
+            var averageShinLength =
+                (Vector2.Distance(leftKnee, leftAnkle) +
+                 Vector2.Distance(rightKnee, rightAnkle)) * 0.5f;
+            bodyScale =
+                Vector2.Distance(shoulderCenter, hipCenter) +
+                averageThighLength +
+                averageShinLength;
+            return bodyScale > MinimumBodyScale;
         }
 
         private static bool HasFootVisibility(PoseFrameView frameView, string ankleName, string heelName, string footIndexName)

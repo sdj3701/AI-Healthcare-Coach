@@ -78,12 +78,13 @@ namespace Rag.Healthcare.Editor
 
             SetObject(feedbackReceiver, "coachTts", coachTts);
             SetEnum(coachTts, "backend", (int)TtsBackend.Auto);
+            SetBool(coachTts, "speakOnStart", false);
 
             SetObject(orchestrator, "trackingController", trackingController);
             SetObject(orchestrator, "feedbackReceiver", feedbackReceiver);
             SetObject(orchestrator, "ragRetriever", ragRetriever);
             SetObject(orchestrator, "sessionLogger", sessionLogger);
-            SetBool(orchestrator, "startTrackingOnStart", true);
+            SetBool(orchestrator, "startTrackingOnStart", false);
 
             SetObject(debugView, "cameraSource", cameraSource);
             SetObject(debugView, "trackingController", trackingController);
@@ -99,6 +100,7 @@ namespace Rag.Healthcare.Editor
             SetObject(mobileView, "trackingController", trackingController);
             SetObject(mobileView, "feedbackReceiver", feedbackReceiver);
             SetObject(mobileView, "feedbackOrchestrator", orchestrator);
+            SetObject(mobileView, "coachTts", coachTts);
             SetObject(mobileView, "replayPlayer", replayPlayer);
             SetObject(mobileView, "performanceProfiler", performanceProfiler);
             SetBool(mobileView, "showUiInEditMode", true);
