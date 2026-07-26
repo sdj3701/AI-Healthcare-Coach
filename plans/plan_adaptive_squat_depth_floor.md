@@ -52,7 +52,7 @@ hipToKneeDepth = (hipCenterY - kneeCenterY) / bodyScale
 - [x] 합성 관절 fixture와 QA에 동일 높이 통과, 무릎보다 높은 엉덩이 거부, 2프레임 안정성, 3회 개인화, 좌우 반전·크기 변화 불변, 저신뢰 프레임 학습 금지 테스트를 추가한다.
 - [x] Unity C# 런타임/Editor 컴파일과 `HealthcareQaSuite`를 실행해 회귀 오류가 없음을 검증한다.
 - [x] 관련 Linear PBI를 구현·QA 근거와 함께 Done으로 갱신한다.
-- [ ] 계획서 체크박스를 완료 처리하고 변경 파일을 Git 커밋 후 원격 저장소에 푸시한다.
+- [x] 계획서 체크박스를 완료 처리하고 변경 파일을 Git 커밋 후 원격 저장소에 푸시한다.
 
 ## 4. 주요 수정 예상 파일
 
@@ -84,4 +84,4 @@ hipToKneeDepth = (hipCenterY - kneeCenterY) / bodyScale
 - 별도 임시 Unity 프로젝트 `HealthcareQaSuite.RunBatch`: `AI_HEALTHCARE_QA_PASSED`
 - 추가 QA: 첫 유효 반복 즉시 인정, 3회 개인화, 1프레임 스침 거부, 엉덩이가 무릎보다 높은 깊은 무릎각 거부, 저신뢰 프레임 학습 금지, 빠른 상승 복구, 좌표 변환 불변
 - Linear: [AI-148 / PBI-111](https://linear.app/ai-healthcare-coach/issue/AI-148) 완료 코멘트 추가 및 `Done` 전환
-- Git: 최종 커밋·푸시 단계에서 완료 예정
+- Git: 구현 커밋 `8c39af9`를 원격 `main`에 푸시 완료
