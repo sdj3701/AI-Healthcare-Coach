@@ -121,6 +121,28 @@ namespace Rag.Healthcare.Pose.Rendering
                     .Append(phaseState == null ? "Unknown" : phaseState.CurrentPhase.ToString())
                     .Append(feedbackOrchestrator.CurrentRepHasViolation ? " (needs correction)" : " (clean)")
                     .AppendLine();
+                if (phaseState != null)
+                {
+                    builder.Append("Hip/knee depth: ")
+                        .Append(phaseState.HasHipToKneeDepth
+                            ? phaseState.CurrentHipToKneeDepth.ToString("+0.000;-0.000;0.000")
+                            : "-")
+                        .Append(" / ")
+                        .Append(phaseState.RequiredHipToKneeDepth.ToString("0.000"))
+                        .Append(phaseState.HasReachedHipToKneeDepthInCurrentRep
+                            ? " (passed)"
+                            : " (not passed)")
+                        .AppendLine();
+                    builder.Append("Adaptive bottom angle: ")
+                        .Append(phaseState.AdaptiveBottomSampleCount > 0
+                            ? phaseState.AdaptiveBottomKneeAngle.ToString("0.0") + " deg"
+                            : "-")
+                        .Append(" (")
+                        .Append(phaseState.AdaptiveBottomSampleCount)
+                        .Append("/")
+                        .Append(phaseState.AdaptiveBottomSampleTarget)
+                        .AppendLine(")");
+                }
             }
 
             if (trackingController.TrackingProvider is MediaPipePoseTrackingProvider mediaPipeProvider)

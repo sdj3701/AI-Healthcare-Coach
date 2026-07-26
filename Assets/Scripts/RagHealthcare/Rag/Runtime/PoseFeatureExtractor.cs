@@ -61,7 +61,7 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             var validFeatureCount = 0;
-            var totalFeatureCount = 8;
+            var totalFeatureCount = 9;
             var hasBodyScale = TryCalculateBodyScale(frameView, out var bodyScale);
             var offsetScale = hasBodyScale
                 ? Mathf.Max(MinimumBodyScale, offsetReferenceBodyScale) / bodyScale
@@ -143,6 +143,15 @@ namespace Rag.Healthcare.Rag.Runtime
                 out feature.CenterBalanceOffset,
                 out feature.HipCenterY);
             if (feature.HasCenterBalance)
+            {
+                validFeatureCount++;
+            }
+
+            feature.HasHipToKneeDepth = TryCalculateHipToKneeDepth(
+                frameView,
+                hasBodyScale ? bodyScale : 0f,
+                out feature.HipToKneeDepth);
+            if (feature.HasHipToKneeDepth)
             {
                 validFeatureCount++;
             }
@@ -340,6 +349,29 @@ namespace Rag.Healthcare.Rag.Runtime
                 averageThighLength +
                 averageShinLength;
             return bodyScale > MinimumBodyScale;
+        }
+
+        private static bool TryCalculateHipToKneeDepth(
+            PoseFrameView frameView,
+            float bodyScale,
+            out float hipToKneeDepth)
+        {
+            hipToKneeDepth = 0f;
+            if (bodyScale <= MinimumBodyScale ||
+                !TryGetPosition(frameView, PoseJointNames.LeftHip, out var leftHip) ||
+                !TryGetPosition(frameView, PoseJointNames.RightHip, out var rightHip) ||
+                !TryGetPosition(frameView, PoseJointNames.LeftKnee, out var leftKnee) ||
+                !TryGetPosition(frameView, PoseJointNames.RightKnee, out var rightKnee))
+            {
+                return false;
+            }
+
+            var hipCenter = PoseGeometry.Midpoint(leftHip, rightHip);
+            var kneeCenter = PoseGeometry.Midpoint(leftKnee, rightKnee);
+            // Screen-space y grows downward. This signed value therefore reaches
+            // zero at knee height and becomes positive only below the knees.
+            hipToKneeDepth = (hipCenter.y - kneeCenter.y) / bodyScale;
+            return true;
         }
 
         private static bool HasFootVisibility(PoseFrameView frameView, string ankleName, string heelName, string footIndexName)

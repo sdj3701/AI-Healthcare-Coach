@@ -12,10 +12,18 @@ namespace Rag.Healthcare.Qa
         public static JointTrackingFrame SquatDescent(float confidence = 0.95f) =>
             BuildPose(0.38f, 0.62f, 0.36f, 0.71f, 0f, confidence);
 
-        // The former fixture produced an average knee angle near 153°, outside the
-        // configured Bottom zone. These coordinates produce a clear ~80° bottom.
+        // The hip center is below the knee center and the knee angle remains above
+        // the excessive-depth warning floor.
         public static JointTrackingFrame SquatBottom(float confidence = 0.95f) =>
-            BuildPose(0.43f, 0.68f, 0.35f, 0.72f, 0f, confidence);
+            BuildPose(0.43f, 0.74f, 0.35f, 0.72f, 0f, confidence);
+
+        public static JointTrackingFrame HipAtKneeSquatBottom(
+            float confidence = 0.95f) =>
+            BuildPose(0.43f, 0.72f, 0.35f, 0.72f, 0f, confidence);
+
+        public static JointTrackingFrame DeepKneeHipAboveSquatBottom(
+            float confidence = 0.95f) =>
+            BuildPose(0.43f, 0.69f, 0.35f, 0.72f, 0f, confidence);
 
         public static JointTrackingFrame SquatAscent(float confidence = 0.95f) =>
             BuildPose(0.37f, 0.60f, 0.37f, 0.71f, 0f, confidence);
@@ -51,6 +59,7 @@ namespace Rag.Healthcare.Qa
                 Standing(confidence),
                 SquatDescent(confidence),
                 SquatDescent(confidence),
+                SquatBottom(confidence),
                 SquatBottom(confidence),
                 SquatBottom(confidence),
                 SquatAscent(confidence),

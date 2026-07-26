@@ -43,6 +43,16 @@ namespace Rag.Healthcare.Rag.Runtime
         [Range(0.01f, 1f)] public float phaseHipVelocityDeadZonePerSecond = 0.08f;
         [Range(1f, 45f)] public float minimumPhaseKneeAngleExcursion = 8f;
 
+        [Header("Adaptive squat completion")]
+        [Tooltip("Hard normalized floor for a counted squat. Zero means the hip center must reach knee-center height.")]
+        [Range(0f, 0.15f)] public float minimumHipToKneeDepth = 0f;
+        [Tooltip("Consecutive reliable frames required at or below the hard depth floor.")]
+        [Range(1, 6)] public int minimumHipToKneeDepthFrames = 2;
+        [Tooltip("Accepted reps used to learn the session-specific bottom knee angle.")]
+        [Range(1, 6)] public int adaptiveBottomSampleCount = 3;
+        [Tooltip("Bounded recognition margin added to the learned knee angle. It never bypasses the hip-to-knee floor.")]
+        [Range(0f, 20f)] public float adaptiveBottomKneeAngleMargin = 8f;
+
         [Header("Temporal evidence")]
         [Range(0f, 1f)] public float minimumValidCoreFrameRatio = 0.45f;
         [Range(0f, 1f)] public float minimumViolationRatio = 0.35f;
@@ -123,6 +133,17 @@ namespace Rag.Healthcare.Rag.Runtime
             : 0.08f;
         public float MinimumPhaseKneeAngleExcursion => minimumPhaseKneeAngleExcursion > 0f
             ? Mathf.Clamp(minimumPhaseKneeAngleExcursion, 1f, 45f)
+            : 8f;
+        public float MinimumHipToKneeDepth =>
+            Mathf.Clamp(minimumHipToKneeDepth, 0f, 0.15f);
+        public int MinimumHipToKneeDepthFrames => minimumHipToKneeDepthFrames > 0
+            ? Mathf.Clamp(minimumHipToKneeDepthFrames, 1, 6)
+            : 2;
+        public int AdaptiveBottomSampleCount => adaptiveBottomSampleCount > 0
+            ? Mathf.Clamp(adaptiveBottomSampleCount, 1, 6)
+            : 3;
+        public float AdaptiveBottomKneeAngleMargin => adaptiveBottomKneeAngleMargin > 0f
+            ? Mathf.Clamp(adaptiveBottomKneeAngleMargin, 0f, 20f)
             : 8f;
         public float OffsetNormalizationReferenceBodyScale => offsetNormalizationReferenceBodyScale > 0f
             ? Mathf.Clamp(offsetNormalizationReferenceBodyScale, 0.2f, 0.8f)

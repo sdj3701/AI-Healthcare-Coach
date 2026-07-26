@@ -140,10 +140,12 @@ namespace Rag.Healthcare.UI
         private VisualElement previewPlaceholder;
         private Label stepLabel;
         private Label timerLabel;
+        private Label totalCountLabel;
         private Label correctCountLabel;
         private Label targetCountLabel;
         private Label poseFpsLabel;
         private Label phaseLabel;
+        private Label depthStatusLabel;
         private Label feedbackLabel;
         private Label ttsStatusLabel;
         private Label cameraStateLabel;
@@ -1191,6 +1193,15 @@ namespace Rag.Healthcare.UI
             contentRoot.Add(BuildPreviewPanel());
             contentRoot.Add(BuildMetricRow());
 
+            depthStatusLabel = Label(
+                "깊이 기준: 엉덩이가 무릎 높이에 도달해야 카운트됩니다.",
+                9,
+                ColorFromHex(0x94A3B8));
+            depthStatusLabel.style.height = 28f;
+            depthStatusLabel.style.marginTop = 5f;
+            depthStatusLabel.style.whiteSpace = WhiteSpace.Normal;
+            contentRoot.Add(depthStatusLabel);
+
             feedbackLabel = Label("최근 피드백: -", 10, ColorFromHex(0x9AA7BB));
             feedbackLabel.style.height = 34f;
             feedbackLabel.style.marginTop = 6f;
@@ -1473,6 +1484,7 @@ namespace Rag.Healthcare.UI
         {
             var row = Row("metric-row", 64f, 7f);
             row.style.marginTop = 8f;
+            totalCountLabel = AddMetric(row, "전체 스쿼트", "0");
             correctCountLabel = AddMetric(row, "정확한 자세", "0");
             targetCountLabel = AddMetric(row, "목표", GetTargetCount().ToString());
             poseFpsLabel = AddMetric(row, "Pose FPS", "0.0");
@@ -1616,10 +1628,21 @@ namespace Rag.Healthcare.UI
         private void RefreshDynamicText()
         {
             var elapsed = workoutRunning ? Time.unscaledTime - sessionStartedAt + elapsedBeforePause : elapsedBeforePause;
+            var phaseState = feedbackOrchestrator == null
+                ? null
+                : feedbackOrchestrator.PhaseState;
             if (timerLabel != null)
             {
                 var seconds = Mathf.FloorToInt(Mathf.Max(0f, elapsed));
                 timerLabel.text = (seconds / 60).ToString("00") + ":" + (seconds % 60).ToString("00");
+            }
+
+            if (totalCountLabel != null)
+            {
+                totalCountLabel.text =
+                    phaseState == null
+                        ? "0"
+                        : phaseState.RepCount.ToString();
             }
 
             if (correctCountLabel != null)
@@ -1641,12 +1664,18 @@ namespace Rag.Healthcare.UI
 
             if (phaseLabel != null)
             {
-                var currentPhase = feedbackOrchestrator == null || feedbackOrchestrator.PhaseState == null
+                var currentPhase = phaseState == null
                     ? ExercisePhase.Unknown
-                    : feedbackOrchestrator.PhaseState.CurrentPhase;
+                    : phaseState.CurrentPhase;
                 var phase = currentPhase.ToString();
                 var status = BuildPoseDecisionStatus(currentPhase);
                 phaseLabel.text = GetSelectedExercise().Name + "\nPhase: " + phase + " / " + status;
+            }
+
+            if (depthStatusLabel != null)
+            {
+                depthStatusLabel.text =
+                    BuildAdaptiveDepthStatus(phaseState);
             }
 
             if (feedbackLabel != null)
@@ -1692,6 +1721,55 @@ namespace Rag.Healthcare.UI
             {
                 RefreshPerformanceBenchStatus();
             }
+        }
+
+        private static string BuildAdaptiveDepthStatus(
+            ExercisePhaseState phaseState)
+        {
+            if (phaseState == null)
+            {
+                return "깊이 측정 대기 · 개인 기준 학습 대기";
+            }
+
+            var learning =
+                phaseState.AdaptiveBottomSampleCount > 0
+                    ? "개인 무릎각 " +
+                      phaseState.AdaptiveBottomKneeAngle.ToString("0") +
+                      "° (" +
+                      phaseState.AdaptiveBottomSampleCount +
+                      "/" +
+                      phaseState.AdaptiveBottomSampleTarget +
+                      ")"
+                    : "개인 무릎각 학습 0/" +
+                      phaseState.AdaptiveBottomSampleTarget;
+            if (phaseState.CurrentPhase == ExercisePhase.Standing ||
+                phaseState.CurrentPhase == ExercisePhase.Unknown)
+            {
+                return "깊이 기준: 엉덩이–무릎 " +
+                       phaseState.RequiredHipToKneeDepth.ToString("0.00") +
+                       " · " +
+                       learning;
+            }
+
+            if (!phaseState.HasHipToKneeDepth)
+            {
+                return "엉덩이–무릎 깊이를 측정할 수 없습니다 · " +
+                       learning;
+            }
+
+            var verdict =
+                phaseState.HasReachedHipToKneeDepthInCurrentRep
+                    ? "카운트 깊이 통과"
+                    : "무릎 높이까지 더 내려가세요";
+            return "실시간 깊이 " +
+                   phaseState.CurrentHipToKneeDepth.ToString(
+                       "+0.00;-0.00;0.00") +
+                   " / 기준 " +
+                   phaseState.RequiredHipToKneeDepth.ToString("0.00") +
+                   " · " +
+                   verdict +
+                   " · " +
+                   learning;
         }
 
         private void RefreshTtsStatus()
@@ -2506,7 +2584,7 @@ namespace Rag.Healthcare.UI
                         if (shouldResumeWorkout)
                         {
                             feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
-                            feedbackOrchestrator?.BeginExerciseSession();
+                            feedbackOrchestrator?.ResumeExerciseSession();
                             coachTts?.Resume();
                             workoutRunning = true;
                             sessionStartedAt = Time.unscaledTime;
@@ -2860,10 +2938,12 @@ namespace Rag.Healthcare.UI
             InvalidatePreviewLayout();
             previewPlaceholder = null;
             timerLabel = null;
+            totalCountLabel = null;
             correctCountLabel = null;
             targetCountLabel = null;
             poseFpsLabel = null;
             phaseLabel = null;
+            depthStatusLabel = null;
             feedbackLabel = null;
             ttsStatusLabel = null;
             cameraStateLabel = null;

@@ -130,13 +130,21 @@ namespace Rag.Healthcare.Rag.Runtime
 
         public void BeginCalibrationSession()
         {
-            PrepareSession();
+            PrepareSession(preserveAdaptiveDepthProfile: false);
             sessionState.BeginCalibrationSession();
         }
 
         public void BeginExerciseSession()
         {
-            PrepareSession();
+            // START after a temporary stop continues the same workout totals.
+            // SetCorrectRepTarget/ResetRuntimeState define a genuinely new session.
+            PrepareSession(preserveAdaptiveDepthProfile: true);
+            sessionState.BeginWorkoutSession();
+        }
+
+        public void ResumeExerciseSession()
+        {
+            PrepareSession(preserveAdaptiveDepthProfile: true);
             sessionState.BeginWorkoutSession();
         }
 
@@ -156,7 +164,9 @@ namespace Rag.Healthcare.Rag.Runtime
         {
             sessionState.EndSession();
             RestoreBaseRuleSettings();
-            ResetTrackingContinuity(preserveCorrectRepCount: true);
+            ResetTrackingContinuity(
+                preserveCorrectRepCount: true,
+                preserveAdaptiveDepthProfile: true);
         }
 
         public void ResetRuntimeState()
@@ -167,16 +177,20 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             RestoreBaseRuleSettings();
-            ResetTrackingContinuity(preserveCorrectRepCount: false);
+            ResetTrackingContinuity(
+                preserveCorrectRepCount: false,
+                preserveAdaptiveDepthProfile: false);
         }
 
-        private void ResetTrackingContinuity(bool preserveCorrectRepCount)
+        private void ResetTrackingContinuity(
+            bool preserveCorrectRepCount,
+            bool preserveAdaptiveDepthProfile)
         {
             windowBuffer?.Clear();
             trackingQualityEvaluator.Reset();
             landmarkStabilizer.Reset();
             featureExtractor.Reset();
-            phaseDetector.Reset();
+            phaseDetector.Reset(preserveAdaptiveDepthProfile);
             prioritizer.Reset();
             repQuality.Reset();
             reusableStats.Reset();
@@ -398,10 +412,12 @@ namespace Rag.Healthcare.Rag.Runtime
             workingRuleSettings = CloneRuleSettings(sourceSettings);
         }
 
-        private void PrepareSession()
+        private void PrepareSession(bool preserveAdaptiveDepthProfile)
         {
             ApplyPersonalizedRomFromProfile();
-            ResetTrackingContinuity(preserveCorrectRepCount: true);
+            ResetTrackingContinuity(
+                preserveCorrectRepCount: true,
+                preserveAdaptiveDepthProfile: preserveAdaptiveDepthProfile);
             sessionState.Configure(calibrationSettings);
         }
 

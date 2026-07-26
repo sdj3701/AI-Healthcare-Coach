@@ -12,6 +12,7 @@ namespace Rag.Healthcare.Rag.Runtime
         public bool HasPelvicTilt;
         public bool HasShoulderLevel;
         public bool HasCenterBalance;
+        public bool HasHipToKneeDepth;
         public bool HasLeftKneeValgus;
         public bool HasRightKneeValgus;
         public bool HasLeftFootVisibility;
@@ -30,6 +31,9 @@ namespace Rag.Healthcare.Rag.Runtime
         public float LeftKneeValgusOffset;
         public float RightKneeValgusOffset;
         public float HipCenterY;
+        // Signed, body-scale-normalized vertical depth. Zero means the hip
+        // center is level with the knee center; positive means it is lower.
+        public float HipToKneeDepth;
         public float HipCenterYVelocityPerSecond;
         public float KneeAngleVelocityDegreesPerSecond;
         public float ValidityScore;
@@ -37,7 +41,8 @@ namespace Rag.Healthcare.Rag.Runtime
         public bool HasReliableSquatCore =>
             HasLeftKneeAngle &&
             HasRightKneeAngle &&
-            HasTorsoTilt;
+            HasTorsoTilt &&
+            HasHipToKneeDepth;
 
         public void CopyFrom(PoseFeatureFrame source)
         {
@@ -56,6 +61,7 @@ namespace Rag.Healthcare.Rag.Runtime
             HasPelvicTilt = source.HasPelvicTilt;
             HasShoulderLevel = source.HasShoulderLevel;
             HasCenterBalance = source.HasCenterBalance;
+            HasHipToKneeDepth = source.HasHipToKneeDepth;
             HasLeftKneeValgus = source.HasLeftKneeValgus;
             HasRightKneeValgus = source.HasRightKneeValgus;
             HasLeftFootVisibility = source.HasLeftFootVisibility;
@@ -71,6 +77,7 @@ namespace Rag.Healthcare.Rag.Runtime
             LeftKneeValgusOffset = source.LeftKneeValgusOffset;
             RightKneeValgusOffset = source.RightKneeValgusOffset;
             HipCenterY = source.HipCenterY;
+            HipToKneeDepth = source.HipToKneeDepth;
             HipCenterYVelocityPerSecond = source.HipCenterYVelocityPerSecond;
             KneeAngleVelocityDegreesPerSecond = source.KneeAngleVelocityDegreesPerSecond;
             ValidityScore = source.ValidityScore;
@@ -87,6 +94,7 @@ namespace Rag.Healthcare.Rag.Runtime
             HasPelvicTilt = false;
             HasShoulderLevel = false;
             HasCenterBalance = false;
+            HasHipToKneeDepth = false;
             HasLeftKneeValgus = false;
             HasRightKneeValgus = false;
             HasLeftFootVisibility = false;
@@ -102,6 +110,7 @@ namespace Rag.Healthcare.Rag.Runtime
             LeftKneeValgusOffset = 0f;
             RightKneeValgusOffset = 0f;
             HipCenterY = 0f;
+            HipToKneeDepth = 0f;
             HipCenterYVelocityPerSecond = 0f;
             KneeAngleVelocityDegreesPerSecond = 0f;
             ValidityScore = 0f;

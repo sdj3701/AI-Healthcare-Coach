@@ -288,54 +288,37 @@ namespace Rag.Healthcare.Rag.Runtime
                 return;
             }
 
-            // Bottom phase but flag false (rare): only warn when clearly too shallow.
-            if (depthAngle > settings.MaximumRecognizableBottomKneeAngle)
+            if (!phaseState.HasHipToKneeDepth ||
+                float.IsNegativeInfinity(
+                    phaseState.MaximumHipToKneeDepthInCurrentRep))
             {
+                return;
+            }
+
+            // The learned knee angle may help recognize Bottom, but it must never
+            // replace this absolute anti-abuse floor.
+            if (!phaseState.HasReachedHipToKneeDepthInCurrentRep)
+            {
+                var maximumDepth =
+                    phaseState.MaximumHipToKneeDepthInCurrentRep;
+                var shortage = Mathf.Max(
+                    0f,
+                    settings.MinimumHipToKneeDepth - maximumDepth);
                 AddEvent(
                     "squat_depth_shallow",
                     "squat_depth_shallow",
-                    PoseJointNames.LeftKnee,
+                    PoseJointNames.LeftHip,
                     string.Empty,
                     FeedbackSeverity.Warning,
-                    ConfidenceFromOffset(depthAngle, settings.MaximumRecognizableBottomKneeAngle),
-                    stats.ShallowDepthViolationRatio,
+                    Mathf.Clamp01(0.65f + shortage * 4f),
+                    Mathf.Max(
+                        stats.ShallowDepthViolationRatio,
+                        0.5f),
                     feature.TimestampUnixMilliseconds,
-                    "가능한 범위 안에서 엉덩이를 조금 더 낮춰 주세요.",
+                    "엉덩이를 무릎 높이까지 내려가야 횟수로 인정됩니다.",
                     phaseState,
-                    "averageKneeAngle",
-                    depthAngle);
-            }
-            else if (depthAngle > settings.MaximumBottomKneeAngle)
-            {
-                AddEvent(
-                    "squat_depth_shallow",
-                    "squat_depth_shallow",
-                    PoseJointNames.LeftKnee,
-                    string.Empty,
-                    FeedbackSeverity.Info,
-                    ConfidenceFromOffset(depthAngle, settings.MaximumBottomKneeAngle),
-                    stats.ShallowDepthViolationRatio,
-                    feature.TimestampUnixMilliseconds,
-                    "괜찮습니다. 가능하면 조금 더 앉아도 좋아요.",
-                    phaseState,
-                    "averageKneeAngle",
-                    depthAngle);
-            }
-            else if (depthAngle < settings.MinimumBottomKneeAngle)
-            {
-                AddEvent(
-                    "squat_depth_deep",
-                    "squat_depth_deep",
-                    PoseJointNames.LeftKnee,
-                    string.Empty,
-                    FeedbackSeverity.Warning,
-                    ConfidenceFromOffset(settings.MinimumBottomKneeAngle, depthAngle),
-                    stats.DeepDepthViolationRatio,
-                    feature.TimestampUnixMilliseconds,
-                    "너무 깊게 내려갔습니다. 무릎과 허리에 부담이 없도록 깊이를 조금 줄여 주세요.",
-                    phaseState,
-                    "averageKneeAngle",
-                    depthAngle);
+                    "hipToKneeDepth",
+                    maximumDepth);
             }
         }
 

@@ -60,9 +60,10 @@ namespace Rag.Healthcare.Editor
             VerifyProfileCompletionGate(failures);
             VerifyHotPathObjectReuse(failures);
             VerifyPhaseReversalRecognition(failures);
+            VerifyAdaptiveSquatDepthFloor(failures);
             VerifyJointCoordinateSquatPipeline(failures);
             VerifyDepthUsesMinimumAngle(failures);
-            VerifyShallowDepthInfoBand(failures);
+            VerifyHipToKneeDepthFloorFeedback(failures);
             VerifyBottomReachedSuppressesShallowWarning(failures);
             VerifyKneeAlignmentPhaseGateAndSeverity(failures);
             VerifyTorsoAndPelvicGeometry(failures);
@@ -775,6 +776,197 @@ namespace Rag.Healthcare.Editor
                 "A user standing naturally at 165° with a 7° wobble must not inherit a synthetic 180° baseline or count a rep.", failures);
         }
 
+        private static void VerifyAdaptiveSquatDepthFloor(
+            ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings
+            {
+                minimumHipToKneeDepth = 0f,
+                minimumHipToKneeDepthFrames = 2,
+                adaptiveBottomSampleCount = 3,
+                adaptiveBottomKneeAngleMargin = 8f
+            };
+
+            var oneFrameDetector = new ExercisePhaseDetector();
+            var timestamp = 3000L;
+            RunDepthRep(
+                oneFrameDetector,
+                settings,
+                ref timestamp,
+                132f,
+                0f,
+                1);
+            Check(oneFrameDetector.State.RepCount == 0 &&
+                  oneFrameDetector.State.AdaptiveBottomSampleCount == 0,
+                "One frame at the hip-to-knee floor must not count or train the adaptive profile.", failures);
+
+            var adaptiveDetector = new ExercisePhaseDetector();
+            timestamp = 5000L;
+            RunDepthRep(
+                adaptiveDetector,
+                settings,
+                ref timestamp,
+                132f,
+                0f,
+                2);
+            Check(adaptiveDetector.State.RepCount == 1 &&
+                  adaptiveDetector.State.AdaptiveBottomSampleCount == 1,
+                "The first complete rep with two stable frames exactly at knee height must count immediately. " +
+                $"Observed reps={adaptiveDetector.State.RepCount}, samples={adaptiveDetector.State.AdaptiveBottomSampleCount}, " +
+                $"phase={adaptiveDetector.State.CurrentPhase}, reached={adaptiveDetector.State.HasReachedHipToKneeDepthInCurrentRep}.", failures);
+
+            RunDepthRep(
+                adaptiveDetector,
+                settings,
+                ref timestamp,
+                136f,
+                0.02f,
+                2);
+            RunDepthRep(
+                adaptiveDetector,
+                settings,
+                ref timestamp,
+                134f,
+                0.01f,
+                2);
+            Check(adaptiveDetector.State.RepCount == 3 &&
+                  adaptiveDetector.State.AdaptiveBottomSampleCount == 3 &&
+                  Mathf.Abs(
+                      adaptiveDetector.State.AdaptiveBottomKneeAngle -
+                      134f) < 0.01f,
+                "Three accepted reps must learn their session-average bottom knee angle.", failures);
+            Check(Mathf.Abs(
+                      adaptiveDetector.State.EffectiveBottomKneeAngle -
+                      142f) < 0.01f,
+                "The learned bottom angle must apply only its bounded recognition margin.", failures);
+
+            var learnedAngle =
+                adaptiveDetector.State.AdaptiveBottomKneeAngle;
+            RunDepthRep(
+                adaptiveDetector,
+                settings,
+                ref timestamp,
+                100f,
+                0.03f,
+                2);
+            Check(adaptiveDetector.State.RepCount == 4 &&
+                  adaptiveDetector.State.AdaptiveBottomSampleCount == 3 &&
+                  Mathf.Approximately(
+                      adaptiveDetector.State.AdaptiveBottomKneeAngle,
+                      learnedAngle),
+                "The adaptive profile must freeze after the configured three accepted samples.", failures);
+
+            var aboveKneeDetector = new ExercisePhaseDetector();
+            timestamp = 9000L;
+            RunDepthRep(
+                aboveKneeDetector,
+                settings,
+                ref timestamp,
+                90f,
+                -0.01f,
+                3);
+            Check(aboveKneeDetector.State.RepCount == 0 &&
+                  aboveKneeDetector.State.AdaptiveBottomSampleCount == 0,
+                "Even a deeply bent knee angle must not count while the hip center remains above knee height.", failures);
+
+            var interruptedEvidenceDetector =
+                new ExercisePhaseDetector();
+            timestamp = 11000L;
+            interruptedEvidenceDetector.Update(
+                PhaseFeature(170f, 0f, timestamp, -0.25f),
+                settings);
+            timestamp += 100L;
+            interruptedEvidenceDetector.Update(
+                PhaseFeature(139f, -100f, timestamp, -0.08f),
+                settings);
+            timestamp += 100L;
+            interruptedEvidenceDetector.Update(
+                PhaseFeature(132f, -60f, timestamp, 0.01f),
+                settings);
+            timestamp += 100L;
+            var unreliableBottom =
+                PhaseFeature(132f, 0f, timestamp, 0.01f);
+            unreliableBottom.HasHipToKneeDepth = false;
+            interruptedEvidenceDetector.Update(
+                unreliableBottom,
+                settings);
+            timestamp += 100L;
+            interruptedEvidenceDetector.Update(
+                PhaseFeature(132f, 0f, timestamp, 0.01f),
+                settings);
+            timestamp += 100L;
+            interruptedEvidenceDetector.Update(
+                PhaseFeature(150f, 100f, timestamp, -0.08f),
+                settings);
+            timestamp += 100L;
+            interruptedEvidenceDetector.Update(
+                PhaseFeature(170f, 100f, timestamp, -0.25f),
+                settings);
+            Check(interruptedEvidenceDetector.State.RepCount == 0 &&
+                  interruptedEvidenceDetector.State.AdaptiveBottomSampleCount == 0,
+                "A missing/unreliable depth frame must break consecutive floor evidence and must not train the profile.", failures);
+
+            adaptiveDetector.Suspend(timestamp + 100L);
+            Check(adaptiveDetector.State.AdaptiveBottomSampleCount == 3 &&
+                  Mathf.Approximately(
+                      adaptiveDetector.State.AdaptiveBottomKneeAngle,
+                      learnedAngle),
+                "A temporary tracking suspension must preserve the session adaptive depth profile.", failures);
+            adaptiveDetector.Reset();
+            Check(adaptiveDetector.State.AdaptiveBottomSampleCount == 0 &&
+                  Mathf.Approximately(
+                      adaptiveDetector.State.AdaptiveBottomKneeAngle,
+                      0f),
+                "A new-session reset must clear the adaptive depth profile.", failures);
+        }
+
+        private static void RunDepthRep(
+            ExercisePhaseDetector detector,
+            RealtimePoseRuleSettings settings,
+            ref long timestamp,
+            float bottomKneeAngle,
+            float hipToKneeDepth,
+            int stableDepthFrames)
+        {
+            detector.Update(
+                PhaseFeature(170f, 0f, timestamp, -0.25f),
+                settings);
+            timestamp += 100L;
+            detector.Update(
+                PhaseFeature(
+                    Mathf.Min(139f, bottomKneeAngle + 10f),
+                    -100f,
+                    timestamp,
+                    -0.08f),
+                settings);
+            timestamp += 100L;
+
+            for (var i = 0; i < stableDepthFrames; i++)
+            {
+                detector.Update(
+                    PhaseFeature(
+                        bottomKneeAngle,
+                        i == 0 ? -60f : -5f,
+                        timestamp,
+                        hipToKneeDepth),
+                    settings);
+                timestamp += 100L;
+            }
+
+            detector.Update(
+                PhaseFeature(
+                    Mathf.Min(155f, bottomKneeAngle + 18f),
+                    100f,
+                    timestamp,
+                    -0.08f),
+                settings);
+            timestamp += 100L;
+            detector.Update(
+                PhaseFeature(170f, 100f, timestamp, -0.25f),
+                settings);
+            timestamp += 100L;
+        }
+
         private static void VerifyJointCoordinateSquatPipeline(ICollection<string> failures)
         {
             var settings = new RealtimePoseRuleSettings();
@@ -789,6 +981,8 @@ namespace Rag.Healthcare.Editor
                 "Joint-coordinate squat fixtures must traverse Standing, Descent, Bottom, and Ascent after stabilization.", failures);
             Check(normal.RepCount == 1 && normal.SawSufficientBottom,
                 "A full joint-coordinate squat sequence must count exactly one sufficiently deep rep.", failures);
+            Check(normal.MaximumHipToKneeDepth >= settings.MinimumHipToKneeDepth,
+                "A counted joint-coordinate squat must place the hip center at knee height or lower.", failures);
 
             var shallow = RunSquatPipeline(
                 SyntheticPoseFixtures.ShallowSquatSequence(),
@@ -822,8 +1016,24 @@ namespace Rag.Healthcare.Editor
             var originalBottomFeature = ExtractSinglePoseFeature(
                 SyntheticPoseFixtures.SquatBottom(),
                 settings);
+            var atKneeFeature = ExtractSinglePoseFeature(
+                SyntheticPoseFixtures.HipAtKneeSquatBottom(),
+                settings);
+            var aboveKneeFeature = ExtractSinglePoseFeature(
+                SyntheticPoseFixtures.DeepKneeHipAboveSquatBottom(),
+                settings);
+            Check(atKneeFeature.HasHipToKneeDepth &&
+                  Mathf.Abs(atKneeFeature.HipToKneeDepth) < 0.001f,
+                "Hip and knee centers at the same y coordinate must extract a zero depth-floor value.", failures);
+            Check(aboveKneeFeature.HasHipToKneeDepth &&
+                  aboveKneeFeature.HipToKneeDepth < 0f &&
+                  aboveKneeFeature.AverageKneeAngle <
+                  settings.BottomKneeAngle,
+                "The extractor must keep a deeply bent but above-knee hip pose below the hard depth floor.", failures);
             var originalLeftValgus = originalBottomFeature.LeftKneeValgusOffset;
             var originalHipCoordinate = originalBottomFeature.HipCenterY;
+            var originalHipToKneeDepth =
+                originalBottomFeature.HipToKneeDepth;
             var transformedBottom = TransformPoseSequence(
                 new[] { SyntheticPoseFixtures.SquatBottom() },
                 0.82f,
@@ -833,8 +1043,11 @@ namespace Rag.Healthcare.Editor
                 transformedBottom,
                 settings);
             Check(Mathf.Abs(originalLeftValgus - transformedBottomFeature.LeftKneeValgusOffset) < 0.01f &&
-                  Mathf.Abs(originalHipCoordinate - transformedBottomFeature.HipCenterY) < 0.01f,
-                "Body-scale normalized knee offset and hip coordinate must remain stable after scale/translate/mirror transforms.", failures);
+                  Mathf.Abs(originalHipCoordinate - transformedBottomFeature.HipCenterY) < 0.01f &&
+                  Mathf.Abs(
+                      originalHipToKneeDepth -
+                      transformedBottomFeature.HipToKneeDepth) < 0.01f,
+                "Body-scale normalized knee offset, hip coordinate, and hip-to-knee depth must remain stable after scale/translate/mirror transforms.", failures);
 
             VerifyPoseQualityHysteresisAndSquatScale(settings, failures);
         }
@@ -864,6 +1077,12 @@ namespace Rag.Healthcare.Editor
                 result.MinimumKneeAngle = Mathf.Min(
                     result.MinimumKneeAngle,
                     feature.AverageKneeAngle);
+                if (feature.HasHipToKneeDepth)
+                {
+                    result.MaximumHipToKneeDepth = Mathf.Max(
+                        result.MaximumHipToKneeDepth,
+                        feature.HipToKneeDepth);
+                }
                 result.SawStanding |= phase.CurrentPhase == ExercisePhase.Standing;
                 result.SawDescent |= phase.CurrentPhase == ExercisePhase.Descent;
                 result.SawBottom |= phase.CurrentPhase == ExercisePhase.Bottom;
@@ -1041,6 +1260,8 @@ namespace Rag.Healthcare.Editor
             public bool SawBottomAfterAscent;
             public int RepCount;
             public float MinimumKneeAngle = 180f;
+            public float MaximumHipToKneeDepth =
+                float.NegativeInfinity;
         }
 
         private static void VerifyTemporalRepQuality(ICollection<string> failures)
@@ -1107,7 +1328,15 @@ namespace Rag.Healthcare.Editor
             var bottomFeature = ReliableFeature(130f, 1300L);
             buffer.Add(bottomFeature);
             var stats = PoseWindowStats.Calculate(buffer, settings);
-            var phase = new ExercisePhaseState { CurrentPhase = ExercisePhase.Bottom, Exercise = "squat" };
+            var phase = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasReachedBottomInCurrentRep = true,
+                HasHipToKneeDepth = true,
+                HasReachedHipToKneeDepthInCurrentRep = true,
+                MaximumHipToKneeDepthInCurrentRep = 0.02f
+            };
             var candidates = new RealtimePoseRuleEngine().Evaluate(bottomFeature, stats, phase, settings);
             var hasShallowError = false;
             foreach (var candidate in candidates)
@@ -1121,21 +1350,26 @@ namespace Rag.Healthcare.Editor
                 "Standing frames in the analysis window must not make a sufficiently deep squat look shallow.", failures);
         }
 
-        private static void VerifyShallowDepthInfoBand(ICollection<string> failures)
+        private static void VerifyHipToKneeDepthFloorFeedback(
+            ICollection<string> failures)
         {
             var settings = new RealtimePoseRuleSettings();
             var buffer = new PoseWindowBuffer(8);
-            // Info band: maximumBottomKneeAngle(170) < depth ≤ maximumRecognizableBottomKneeAngle(175)
-            // HasReachedBottom=false so Info shallow can still fire in the rare Bottom-without-flag path.
             for (var i = 0; i < 6; i++) buffer.Add(ReliableFeature(172f, 1000L + i * 50L));
             var bottomFeature = ReliableFeature(172f, 1400L);
+            bottomFeature.HipToKneeDepth = -0.04f;
             buffer.Add(bottomFeature);
             var stats = PoseWindowStats.Calculate(buffer, settings);
             var phase = new ExercisePhaseState
             {
                 CurrentPhase = ExercisePhase.Bottom,
                 Exercise = "squat",
-                HasReachedBottomInCurrentRep = false
+                HasReachedBottomInCurrentRep = false,
+                HasHipToKneeDepth = true,
+                CurrentHipToKneeDepth = -0.04f,
+                MaximumHipToKneeDepthInCurrentRep = -0.04f,
+                RequiredHipToKneeDepth =
+                    settings.MinimumHipToKneeDepth
             };
             var candidates = new RealtimePoseRuleEngine().Evaluate(bottomFeature, stats, phase, settings);
 
@@ -1150,11 +1384,16 @@ namespace Rag.Healthcare.Editor
             }
 
             Check(shallow != null,
-                "170–175° bottom depth (reachedBottom=false) must emit squat_depth_shallow guidance.", failures);
-            Check(shallow != null && shallow.Severity == FeedbackSeverity.Info,
-                "170–175° bottom depth must be Info, not Warning, so CorrectRep is not forced false.", failures);
-            Check(Mathf.Approximately(stats.MinimumKneeAngle, 172f),
-                "Info-band fixture must keep MinimumKneeAngle at 172°.", failures);
+                "A Bottom pose with hips above knee height must emit squat_depth_shallow guidance.", failures);
+            Check(shallow != null &&
+                  shallow.Severity == FeedbackSeverity.Warning,
+                "The absolute hip-to-knee floor must be a Warning so it cannot count as a correct rep.", failures);
+            Check(shallow != null &&
+                  shallow.Evidence.TryGetValue(
+                      "hipToKneeDepth",
+                      out var evidence) &&
+                  Mathf.Approximately(evidence, -0.04f),
+                "Depth-floor feedback must expose the signed normalized hip-to-knee evidence.", failures);
         }
 
         private static void VerifyBottomReachedSuppressesShallowWarning(ICollection<string> failures)
@@ -1367,7 +1606,11 @@ namespace Rag.Healthcare.Editor
                 "Sparse timed windows must expand to the newest minimum samples even if older than the cutoff.", failures);
         }
 
-        private static PoseFeatureFrame PhaseFeature(float kneeAngle, float velocity, long timestamp)
+        private static PoseFeatureFrame PhaseFeature(
+            float kneeAngle,
+            float velocity,
+            long timestamp,
+            float hipToKneeDepth = 0.05f)
         {
             return new PoseFeatureFrame
             {
@@ -1375,6 +1618,8 @@ namespace Rag.Healthcare.Editor
                 TimestampUnixMilliseconds = timestamp,
                 HasLeftKneeAngle = true,
                 HasRightKneeAngle = true,
+                HasHipToKneeDepth = true,
+                HipToKneeDepth = hipToKneeDepth,
                 AverageKneeAngle = kneeAngle,
                 KneeAngleVelocityDegreesPerSecond = velocity
             };
@@ -1390,6 +1635,8 @@ namespace Rag.Healthcare.Editor
                 HasRightKneeAngle = true,
                 HasTorsoTilt = true,
                 HasCenterBalance = true,
+                HasHipToKneeDepth = true,
+                HipToKneeDepth = 0.05f,
                 AverageKneeAngle = kneeAngle
             };
         }

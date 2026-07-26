@@ -30,6 +30,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 return state;
             }
 
+            UpdateCurrentDepthState(feature, settings);
             var nextPhase = ResolvePhase(feature, settings);
             // A direction reversal recognizes the phase bottom, but it does not by
             // itself prove useful squat depth. Keep these two facts separate so a
@@ -45,6 +46,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 state.HasReachedBottomInCurrentRep)
             {
                 state.RepCount++;
+                LearnAcceptedBottom(settings);
                 state.HasReachedBottomInCurrentRep = false;
             }
 
@@ -69,13 +71,18 @@ namespace Rag.Healthcare.Rag.Runtime
             return state;
         }
 
-        public void Reset()
+        public void Reset(bool preserveAdaptiveDepthProfile = false)
         {
             state.CurrentPhase = ExercisePhase.Unknown;
             state.PreviousPhase = ExercisePhase.Unknown;
-            state.RepCount = 0;
             state.PhaseStartedAtUnixMilliseconds = 0L;
             state.HasReachedBottomInCurrentRep = false;
+            if (!preserveAdaptiveDepthProfile)
+            {
+                state.RepCount = 0;
+                state.AdaptiveBottomKneeAngle = 0f;
+                state.AdaptiveBottomSampleCount = 0;
+            }
             ClearStandingReference();
             ResetRepMotion();
         }
@@ -96,6 +103,22 @@ namespace Rag.Healthcare.Rag.Runtime
             if (feature.AverageKneeAngle >= settings.StandingKneeAngle &&
                 isStandingByHip)
             {
+                var isReturningUp =
+                    feature.KneeAngleVelocityDegreesPerSecond >
+                    settings.PhaseVelocityDeadZoneDegreesPerSecond ||
+                    hasHipEvidence &&
+                    feature.HipCenterYVelocityPerSecond <
+                    -settings.PhaseHipVelocityDeadZonePerSecond;
+                if (state.CurrentPhase == ExercisePhase.Descent &&
+                    state.HasReachedBottomInCurrentRep &&
+                    isReturningUp)
+                {
+                    // A fast ascent can move from a qualifying deep frame straight
+                    // into the standing band between camera samples. Preserve one
+                    // Ascent frame so the accepted rep is not discarded.
+                    return ExercisePhase.Ascent;
+                }
+
                 UpdateStandingReference(feature);
                 return ExercisePhase.Standing;
             }
@@ -136,6 +159,7 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             state.MinimumKneeAngleInCurrentRep = minimumKneeAngleInCurrentRep;
+            ObserveHipToKneeDepth(feature, settings);
 
             var velocity = feature.KneeAngleVelocityDegreesPerSecond;
             var deadZone = settings.PhaseVelocityDeadZoneDegreesPerSecond;
@@ -173,7 +197,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 minimumKneeAngleInCurrentRep <= settings.MaximumRecognizableBottomKneeAngle &&
                 hasRecognizableMotion;
             var isWithinBottomZone =
-                feature.AverageKneeAngle <= settings.BottomKneeAngle ||
+                feature.AverageKneeAngle <= state.EffectiveBottomKneeAngle ||
                 hasHipEvidence && hipDrop >= settings.MinimumBottomHipDrop;
 
             if (isWithinBottomZone && hasRecognizableMotion)
@@ -232,18 +256,95 @@ namespace Rag.Healthcare.Rag.Runtime
 
         private bool HasSufficientDepth(RealtimePoseRuleSettings settings)
         {
-            var kneeDepthReached =
-                minimumKneeAngleInCurrentRep <= settings.MaximumBottomKneeAngle;
-            if (!hasStandingHipReference)
-            {
-                return kneeDepthReached;
-            }
-
             var hasUsefulKneeMotion =
                 kneeAngleAtRepStart - minimumKneeAngleInCurrentRep >=
                 settings.MinimumPhaseKneeAngleExcursion;
-            return maximumHipDropInCurrentRep >= settings.MinimumBottomHipDrop &&
-                   (kneeDepthReached || hasUsefulKneeMotion);
+            var hasRecognizableMotion =
+                hasUsefulKneeMotion ||
+                maximumHipDropInCurrentRep >=
+                settings.MinimumRecognizableHipDrop;
+            return state.HasReachedHipToKneeDepthInCurrentRep &&
+                   hasRecognizableMotion;
+        }
+
+        private void UpdateCurrentDepthState(
+            PoseFeatureFrame feature,
+            RealtimePoseRuleSettings settings)
+        {
+            state.RequiredHipToKneeDepth = settings.MinimumHipToKneeDepth;
+            state.AdaptiveBottomSampleTarget = settings.AdaptiveBottomSampleCount;
+            state.HasHipToKneeDepth = feature != null && feature.HasHipToKneeDepth;
+            state.CurrentHipToKneeDepth = state.HasHipToKneeDepth
+                ? feature.HipToKneeDepth
+                : 0f;
+            state.EffectiveBottomKneeAngle = ResolveEffectiveBottomKneeAngle(settings);
+        }
+
+        private void ObserveHipToKneeDepth(
+            PoseFeatureFrame feature,
+            RealtimePoseRuleSettings settings)
+        {
+            if (!repMotionStarted || feature == null || !feature.HasHipToKneeDepth)
+            {
+                state.ConsecutiveHipToKneeDepthFrames = 0;
+                return;
+            }
+
+            state.MaximumHipToKneeDepthInCurrentRep = Mathf.Max(
+                state.MaximumHipToKneeDepthInCurrentRep,
+                feature.HipToKneeDepth);
+            if (feature.HipToKneeDepth >= settings.MinimumHipToKneeDepth)
+            {
+                state.ConsecutiveHipToKneeDepthFrames++;
+                if (state.ConsecutiveHipToKneeDepthFrames >=
+                    settings.MinimumHipToKneeDepthFrames)
+                {
+                    state.HasReachedHipToKneeDepthInCurrentRep = true;
+                }
+            }
+            else
+            {
+                state.ConsecutiveHipToKneeDepthFrames = 0;
+            }
+        }
+
+        private void LearnAcceptedBottom(RealtimePoseRuleSettings settings)
+        {
+            var targetSamples = settings.AdaptiveBottomSampleCount;
+            if (!state.HasReachedHipToKneeDepthInCurrentRep ||
+                minimumKneeAngleInCurrentRep <= 0f ||
+                minimumKneeAngleInCurrentRep >= 180f ||
+                state.AdaptiveBottomSampleCount >= targetSamples)
+            {
+                return;
+            }
+
+            var previousSampleCount = state.AdaptiveBottomSampleCount;
+            state.AdaptiveBottomKneeAngle =
+                previousSampleCount <= 0
+                    ? minimumKneeAngleInCurrentRep
+                    : (state.AdaptiveBottomKneeAngle * previousSampleCount +
+                       minimumKneeAngleInCurrentRep) /
+                      (previousSampleCount + 1);
+            state.AdaptiveBottomSampleCount = previousSampleCount + 1;
+            state.EffectiveBottomKneeAngle =
+                ResolveEffectiveBottomKneeAngle(settings);
+        }
+
+        private float ResolveEffectiveBottomKneeAngle(
+            RealtimePoseRuleSettings settings)
+        {
+            if (state.AdaptiveBottomSampleCount <= 0 ||
+                state.AdaptiveBottomKneeAngle <= 0f)
+            {
+                return settings.BottomKneeAngle;
+            }
+
+            return Mathf.Clamp(
+                state.AdaptiveBottomKneeAngle +
+                settings.AdaptiveBottomKneeAngleMargin,
+                settings.BottomKneeAngle,
+                settings.MaximumRecognizableBottomKneeAngle);
         }
 
         private bool TryGetHipDrop(PoseFeatureFrame feature, out float hipDrop)
@@ -330,6 +431,9 @@ namespace Rag.Healthcare.Rag.Runtime
                 ? standingKneeAngle
                 : 0f;
             state.MinimumKneeAngleInCurrentRep = 180f;
+            state.MaximumHipToKneeDepthInCurrentRep = float.NegativeInfinity;
+            state.ConsecutiveHipToKneeDepthFrames = 0;
+            state.HasReachedHipToKneeDepthInCurrentRep = false;
             previousKneeVelocity = 0f;
             previousHipVelocity = 0f;
             maximumHipDropInCurrentRep = 0f;
