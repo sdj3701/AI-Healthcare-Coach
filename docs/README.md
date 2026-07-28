@@ -50,7 +50,9 @@ TTS, STT, 피드백 UI 및 오버레이 등 서브시스템별 구현 계획입�
 
 * [MediaPipeTroubleshooting.md](file:///Users/sindongju/AI-Healthcare-Coach/docs/troubleshooting/MediaPipeTroubleshooting.md) - MediaPipe 네이티브 플러그인 로딩 문제 해결
 * [ios-black-screen-editor-vs-device.md](file:///Users/sindongju/AI-Healthcare-Coach/docs/troubleshooting/ios-black-screen-editor-vs-device.md) - iOS 기기 블랙 스크린 원인 및 렌더링 검증
+* [ios-black-screen-and-xcode-symbol-runbook.md](file:///Users/sindongju/AI-Healthcare-Coach/docs/troubleshooting/ios-black-screen-and-xcode-symbol-runbook.md) - iOS 검은 화면과 UnityFramework Undefined symbol의 연결 원인, 복구 절차 및 재발 방지 설정
 * [start-stop-restart-failure-trace.md](file:///Users/sindongju/AI-Healthcare-Coach/docs/troubleshooting/start-stop-restart-failure-trace.md) - 세션 시작/중지 재가동 오류 분석
+* [squat-slow-depth-score-tts-2026-07-27.md](file:///Users/sindongju/AI-Healthcare-Coach/docs/troubleshooting/squat-slow-depth-score-tts-2026-07-27.md) - 느린 스쿼트 깊이 판정, 정확 점수 미반영 및 TTS 중복 오류 해결
 
 ---
 

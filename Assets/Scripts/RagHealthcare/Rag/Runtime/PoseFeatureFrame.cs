@@ -17,6 +17,7 @@ namespace Rag.Healthcare.Rag.Runtime
         public bool HasRightKneeValgus;
         public bool HasLeftFootVisibility;
         public bool HasRightFootVisibility;
+        public bool HasKneeWidthRatio;
 
         public float LeftKneeAngle;
         public float RightKneeAngle;
@@ -34,6 +35,9 @@ namespace Rag.Healthcare.Rag.Runtime
         // Signed, body-scale-normalized vertical depth. Zero means the hip
         // center is level with the knee center; positive means it is lower.
         public float HipToKneeDepth;
+        public float KneeWidth;
+        public float AnkleWidth;
+        public float KneeWidthRatio;
         public float HipCenterYVelocityPerSecond;
         public float KneeAngleVelocityDegreesPerSecond;
         public float ValidityScore;
@@ -66,6 +70,7 @@ namespace Rag.Healthcare.Rag.Runtime
             HasRightKneeValgus = source.HasRightKneeValgus;
             HasLeftFootVisibility = source.HasLeftFootVisibility;
             HasRightFootVisibility = source.HasRightFootVisibility;
+            HasKneeWidthRatio = source.HasKneeWidthRatio;
             LeftKneeAngle = source.LeftKneeAngle;
             RightKneeAngle = source.RightKneeAngle;
             AverageKneeAngle = source.AverageKneeAngle;
@@ -78,6 +83,9 @@ namespace Rag.Healthcare.Rag.Runtime
             RightKneeValgusOffset = source.RightKneeValgusOffset;
             HipCenterY = source.HipCenterY;
             HipToKneeDepth = source.HipToKneeDepth;
+            KneeWidth = source.KneeWidth;
+            AnkleWidth = source.AnkleWidth;
+            KneeWidthRatio = source.KneeWidthRatio;
             HipCenterYVelocityPerSecond = source.HipCenterYVelocityPerSecond;
             KneeAngleVelocityDegreesPerSecond = source.KneeAngleVelocityDegreesPerSecond;
             ValidityScore = source.ValidityScore;
@@ -99,6 +107,7 @@ namespace Rag.Healthcare.Rag.Runtime
             HasRightKneeValgus = false;
             HasLeftFootVisibility = false;
             HasRightFootVisibility = false;
+            HasKneeWidthRatio = false;
             LeftKneeAngle = 0f;
             RightKneeAngle = 0f;
             AverageKneeAngle = 0f;
@@ -111,6 +120,9 @@ namespace Rag.Healthcare.Rag.Runtime
             RightKneeValgusOffset = 0f;
             HipCenterY = 0f;
             HipToKneeDepth = 0f;
+            KneeWidth = 0f;
+            AnkleWidth = 0f;
+            KneeWidthRatio = 0f;
             HipCenterYVelocityPerSecond = 0f;
             KneeAngleVelocityDegreesPerSecond = 0f;
             ValidityScore = 0f;

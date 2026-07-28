@@ -408,7 +408,7 @@ MonoBehaviour:
   minimumGlobalFeedbackIntervalSeconds: 1.5
   maxSpokenTextLength: 70
   speakCorrectRepCount: 1
-  correctRepFeedbackFormat: "\uC815\uD655\uD569\uB2C8\uB2E4 {0}\uAC1C"
+  correctRepFeedbackFormat: "\uC62C\uBC14\uB978 \uC790\uC138\uC785\uB2C8\uB2E4. {0}\uAC1C."
   targetCorrectRepCount: 0
   ruleSettings:
     minimumVisibility: 0.45
@@ -433,6 +433,12 @@ MonoBehaviour:
     minimumBottomHipDrop: 0.08
     phaseHipVelocityDeadZonePerSecond: 0.08
     minimumPhaseKneeAngleExcursion: 8
+    minimumHipToKneeDepth: 0
+    hipToKneeLevelTolerance: 0.03
+    minimumHipToKneeDepthFrames: 2
+    maximumCountableBottomKneeAngle: 135
+    adaptiveBottomSampleCount: 3
+    adaptiveBottomKneeAngleMargin: 8
     minimumValidCoreFrameRatio: 0.45
     minimumViolationRatio: 0.35
     minimumRuleEvaluationFrames: 6
@@ -505,6 +511,8 @@ MonoBehaviour:
   hideGeneratedDesktopCanvas: 1
   showUiInEditMode: 1
   refreshIntervalSeconds: 0.2
+  restDurationSeconds: 3
+  hasPaidStretchingAccess: 0
   applyMobilePerformanceDefaults: 1
   mobileCameraWidth: 640
   mobileCameraHeight: 480

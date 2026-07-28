@@ -1,12 +1,17 @@
 {
   "schemaVersion": "1.0",
-  "contentVersion": "2026.07.22.1",
+  "contentVersion": "2026.07.27.5",
   "rules": [
     { "ruleId": "squat_knee_alignment", "exercise": "squat", "severity": "Warning", "title": "무릎-발끝 정렬", "realtimeText": "무릎과 발끝을 같은 방향으로 맞춰 주세요.", "reportText": "무릎이 발끝 방향에서 벗어난 구간을 천천히 다시 연습하세요.", "source": "expert-review-required", "enabled": true },
     { "ruleId": "squat_torso_tilt", "exercise": "squat", "severity": "Warning", "title": "상체 기울기", "realtimeText": "가슴을 열고 상체 기울기를 줄여 주세요.", "reportText": "내려갈 때 상체 기울기가 커지는 구간을 확인하세요.", "source": "expert-review-required", "enabled": true },
     { "ruleId": "squat_pelvic_tilt", "exercise": "squat", "severity": "Warning", "title": "골반 수평", "realtimeText": "양발에 체중을 고르게 싣고 골반을 수평에 가깝게 맞춰 주세요.", "reportText": "골반 높이 차이가 반복되는 구간에서 체중 분배와 골반 수평을 점검하세요.", "source": "expert-review-required", "enabled": true },
     { "ruleId": "squat_center_balance", "exercise": "squat", "severity": "Warning", "title": "중심 균형", "realtimeText": "체중을 양발 중앙에 고르게 실어 주세요.", "reportText": "좌우 중심 이동이 큰 구간을 안정적으로 반복하세요.", "source": "expert-review-required", "enabled": true },
     { "ruleId": "squat_knee_symmetry", "exercise": "squat", "severity": "Info", "title": "좌우 무릎 대칭", "realtimeText": "양쪽 다리에 체중을 고르게 실어 주세요.", "reportText": "좌우 무릎 각도 차이가 반복되는지 확인하세요.", "source": "expert-review-required", "enabled": true },
-    { "ruleId": "squat_depth_shallow", "exercise": "squat", "severity": "Info", "title": "스쿼트 깊이", "realtimeText": "괜찮습니다. 가능하면 조금 더 앉아도 좋아요.", "reportText": "안전한 범위 안에서 깊이를 일정하게 유지하세요.", "source": "expert-review-required", "enabled": true }
+    { "ruleId": "squat_depth_hip_height", "exercise": "squat", "severity": "Warning", "title": "엉덩이-무릎 높이 미달", "realtimeText": "엉덩이와 무릎 높이가 충분히 가까워지지 않았습니다. 엉덩이를 조금 더 내려 주세요.", "reportText": "엉덩이가 무릎 높이에 가까워지는 범위까지 천천히 연습하세요.", "source": "expert-review-required", "enabled": true },
+    { "ruleId": "squat_knee_collapse", "exercise": "squat", "severity": "Warning", "title": "무릎 안쪽 붕괴", "realtimeText": "무릎이 안쪽으로 모입니다. 무릎을 발끝 방향으로 조금 벌려 주세요.", "reportText": "최저점에서 무릎과 발끝 방향을 나란히 유지하세요.", "source": "expert-review-required", "enabled": true },
+    { "ruleId": "squat_depth_personal_target", "exercise": "squat", "severity": "Warning", "title": "개인 목표 깊이 미달", "realtimeText": "정렬은 좋습니다. 현재 가능한 범위에서 조금 더 앉아 주세요.", "reportText": "정렬을 유지하며 현재 가능한 깊이를 점진적으로 늘려 보세요.", "source": "expert-review-required", "enabled": true },
+    { "ruleId": "squat_depth_excessive", "exercise": "squat", "severity": "Info", "title": "이전 버전 깊은 스쿼트 통과", "realtimeText": "올바른 자세입니다.", "reportText": "충분한 깊이로 완료한 반복입니다.", "source": "retired-depth-warning-compatibility", "enabled": false },
+    { "ruleId": "squat_depth_shallow", "exercise": "squat", "severity": "Warning", "title": "이전 버전 스쿼트 깊이 부족", "realtimeText": "엉덩이를 조금 더 내려 주세요.", "reportText": "안전한 범위 안에서 깊이를 일정하게 유지하세요.", "source": "legacy-session-compatibility", "enabled": false },
+    { "ruleId": "squat_depth_deep", "exercise": "squat", "severity": "Info", "title": "이전 버전 깊은 스쿼트 통과", "realtimeText": "올바른 자세입니다.", "reportText": "충분한 깊이로 완료한 반복입니다.", "source": "retired-depth-warning-compatibility", "enabled": false }
   ]
 }

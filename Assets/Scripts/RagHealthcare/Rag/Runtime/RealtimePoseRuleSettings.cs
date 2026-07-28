@@ -44,14 +44,44 @@ namespace Rag.Healthcare.Rag.Runtime
         [Range(1f, 45f)] public float minimumPhaseKneeAngleExcursion = 8f;
 
         [Header("Adaptive squat completion")]
-        [Tooltip("Hard normalized floor for a counted squat. Zero means the hip center must reach knee-center height.")]
+        [Tooltip("Baseline normalized hip/knee level. The accepted 2D gate also applies HipToKneeLevelTolerance.")]
         [Range(0f, 0.15f)] public float minimumHipToKneeDepth = 0f;
-        [Tooltip("Consecutive reliable frames required at or below the hard depth floor.")]
+        [Tooltip("2D measurement tolerance above knee height. This absorbs camera projection and landmark jitter; secondary depth evidence is still required.")]
+        [Range(0f, 0.08f)] public float hipToKneeLevelTolerance = 0.03f;
+        [Tooltip("Consecutive reliable frames required inside the accepted 2D hip/knee level band.")]
         [Range(1, 6)] public int minimumHipToKneeDepthFrames = 2;
+        [Tooltip("Secondary depth guardrail. A near-level hip/knee pose must also reach this knee angle or the configured hip-drop distance.")]
+        [Range(90f, 160f)] public float maximumCountableBottomKneeAngle = 135f;
         [Tooltip("Accepted reps used to learn the session-specific bottom knee angle.")]
         [Range(1, 6)] public int adaptiveBottomSampleCount = 3;
-        [Tooltip("Bounded recognition margin added to the learned knee angle. It never bypasses the hip-to-knee floor.")]
+        [Tooltip("Bounded recognition margin added to the learned knee angle. It never bypasses either stage of the depth gate.")]
         [Range(0f, 20f)] public float adaptiveBottomKneeAngleMargin = 8f;
+
+        [Header("Sequential squat bottom decision")]
+        [Tooltip("Knee width divided by ankle width. Values below this can indicate inward knee collapse.")]
+        [Range(0.5f, 1f)] public float minimumKneeWidthRatio = 0.8f;
+        [Tooltip("Minimum ankle stance width required before the knee-width ratio can be trusted.")]
+        [Range(0.02f, 0.3f)] public float minimumKneeWidthStanceSpan = 0.08f;
+        [Tooltip("Consecutive reliable frames required for inward knee collapse.")]
+        [Range(1, 6)] public int minimumKneeCollapseFrames = 2;
+        [Tooltip("Diagnostic-only count of consecutive frames below the legacy deep-angle threshold. It does not reject or speak feedback for a rep.")]
+        [Range(1, 6)] public int minimumExcessiveDepthFrames = 2;
+
+        [Header("Session squat depth personalization")]
+        [Tooltip("Consecutive high-quality personal-depth failures required before adapting the session target.")]
+        [Range(2, 6)] public int personalDepthFailureSampleCount = 3;
+        [Tooltip("Maximum spread allowed between candidate minimum knee angles.")]
+        [Range(1f, 20f)] public float maximumPersonalDepthKneeAngleSpread = 8f;
+        [Tooltip("Maximum spread allowed between candidate standing-relative hip drops.")]
+        [Range(0.005f, 0.08f)] public float maximumPersonalDepthHipDropSpread = 0.02f;
+        [Tooltip("Margin added to the median failed knee angle when adapting the next rep.")]
+        [Range(0f, 10f)] public float personalizedKneeAngleMargin = 3f;
+        [Tooltip("Margin subtracted from the median failed hip drop when adapting the next rep.")]
+        [Range(0f, 0.04f)] public float personalizedHipDropMargin = 0.01f;
+        [Tooltip("Absolute ceiling for a session-personalized countable knee angle.")]
+        [Range(135f, 160f)] public float maximumPersonalizedBottomKneeAngle = 150f;
+        [Tooltip("Absolute floor for a session-personalized standing-relative hip drop.")]
+        [Range(0.02f, 0.08f)] public float minimumPersonalizedBottomHipDrop = 0.05f;
 
         [Header("Temporal evidence")]
         [Range(0f, 1f)] public float minimumValidCoreFrameRatio = 0.45f;
@@ -136,15 +166,72 @@ namespace Rag.Healthcare.Rag.Runtime
             : 8f;
         public float MinimumHipToKneeDepth =>
             Mathf.Clamp(minimumHipToKneeDepth, 0f, 0.15f);
+        public float HipToKneeLevelTolerance => hipToKneeLevelTolerance > 0f
+            ? Mathf.Clamp(hipToKneeLevelTolerance, 0f, 0.08f)
+            : 0.03f;
+        public float MinimumAcceptedHipToKneeDepth =>
+            MinimumHipToKneeDepth - HipToKneeLevelTolerance;
         public int MinimumHipToKneeDepthFrames => minimumHipToKneeDepthFrames > 0
             ? Mathf.Clamp(minimumHipToKneeDepthFrames, 1, 6)
             : 2;
+        public float MaximumCountableBottomKneeAngle =>
+            maximumCountableBottomKneeAngle > 0f
+                ? Mathf.Clamp(maximumCountableBottomKneeAngle, 90f, 160f)
+                : 135f;
         public int AdaptiveBottomSampleCount => adaptiveBottomSampleCount > 0
             ? Mathf.Clamp(adaptiveBottomSampleCount, 1, 6)
             : 3;
         public float AdaptiveBottomKneeAngleMargin => adaptiveBottomKneeAngleMargin > 0f
             ? Mathf.Clamp(adaptiveBottomKneeAngleMargin, 0f, 20f)
             : 8f;
+        public float MinimumKneeWidthRatio => minimumKneeWidthRatio > 0f
+            ? Mathf.Clamp(minimumKneeWidthRatio, 0.5f, 1f)
+            : 0.8f;
+        public float MinimumKneeWidthStanceSpan =>
+            minimumKneeWidthStanceSpan > 0f
+                ? Mathf.Clamp(minimumKneeWidthStanceSpan, 0.02f, 0.3f)
+                : 0.08f;
+        public int MinimumKneeCollapseFrames => minimumKneeCollapseFrames > 0
+            ? Mathf.Clamp(minimumKneeCollapseFrames, 1, 6)
+            : 2;
+        public int MinimumExcessiveDepthFrames =>
+            minimumExcessiveDepthFrames > 0
+                ? Mathf.Clamp(minimumExcessiveDepthFrames, 1, 6)
+                : 2;
+        public int PersonalDepthFailureSampleCount =>
+            personalDepthFailureSampleCount > 0
+                ? Mathf.Clamp(personalDepthFailureSampleCount, 2, 6)
+                : 3;
+        public float MaximumPersonalDepthKneeAngleSpread =>
+            maximumPersonalDepthKneeAngleSpread > 0f
+                ? Mathf.Clamp(maximumPersonalDepthKneeAngleSpread, 1f, 20f)
+                : 8f;
+        public float MaximumPersonalDepthHipDropSpread =>
+            maximumPersonalDepthHipDropSpread > 0f
+                ? Mathf.Clamp(maximumPersonalDepthHipDropSpread, 0.005f, 0.08f)
+                : 0.02f;
+        public float PersonalizedKneeAngleMargin =>
+            personalizedKneeAngleMargin > 0f
+                ? Mathf.Clamp(personalizedKneeAngleMargin, 0f, 10f)
+                : 3f;
+        public float PersonalizedHipDropMargin =>
+            personalizedHipDropMargin > 0f
+                ? Mathf.Clamp(personalizedHipDropMargin, 0f, 0.04f)
+                : 0.01f;
+        public float MaximumPersonalizedBottomKneeAngle =>
+            maximumPersonalizedBottomKneeAngle > 0f
+                ? Mathf.Clamp(
+                    maximumPersonalizedBottomKneeAngle,
+                    135f,
+                    160f)
+                : 150f;
+        public float MinimumPersonalizedBottomHipDrop =>
+            minimumPersonalizedBottomHipDrop > 0f
+                ? Mathf.Clamp(
+                    minimumPersonalizedBottomHipDrop,
+                    0.02f,
+                    0.08f)
+                : 0.05f;
         public float OffsetNormalizationReferenceBodyScale => offsetNormalizationReferenceBodyScale > 0f
             ? Mathf.Clamp(offsetNormalizationReferenceBodyScale, 0.2f, 0.8f)
             : 0.5f;

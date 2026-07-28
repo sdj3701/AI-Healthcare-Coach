@@ -40,21 +40,28 @@ namespace Rag.Healthcare.Pose
             ReceiveFeedback(feedback);
         }
 
-        public void ReceiveFeedback(PoseFeedbackMessage feedback)
+        public bool ReceiveFeedback(PoseFeedbackMessage feedback)
         {
             if (feedback == null || string.IsNullOrWhiteSpace(feedback.text))
             {
-                return;
+                return false;
+            }
+
+            if (IsRetiredExcessiveDepthFeedback(feedback))
+            {
+                LastVoiceStatusMessage =
+                    "깊은 스쿼트는 올바른 자세로 처리되어 이전 깊이 경고를 읽지 않았습니다.";
+                return false;
             }
 
             if (feedback.confidence < minimumConfidence)
             {
-                return;
+                return false;
             }
 
             if (IsDuplicateCoolingDown(feedback))
             {
-                return;
+                return false;
             }
 
             LatestFeedback = feedback;
@@ -63,36 +70,90 @@ namespace Rag.Healthcare.Pose
 
             FeedbackAccepted?.Invoke(feedback);
 
-            if (VoiceEnabled)
+            if (!VoiceEnabled)
             {
-                var resolvedCoachTts = ResolveCoachTts();
-                if (resolvedCoachTts == null)
-                {
-                    LastVoiceStatusMessage = "음성 코칭 컨트롤러가 연결되지 않아 자세 피드백을 읽을 수 없습니다.";
-                    if (!missingCoachTtsWarningLogged)
-                    {
-                        missingCoachTtsWarningLogged = true;
-                        Debug.LogWarning($"[PoseFeedbackJsonReceiver] {LastVoiceStatusMessage}");
-                    }
-
-                    return;
-                }
-
-                if (!resolvedCoachTts.TrySpeakPoseFeedback(feedback, out var statusMessage))
-                {
-                    LastVoiceStatusMessage = statusMessage;
-                    if (!string.IsNullOrWhiteSpace(statusMessage))
-                    {
-                        Debug.LogWarning(
-                            $"[PoseFeedbackJsonReceiver] TTS request was rejected " +
-                            $"({resolvedCoachTts.ActiveBackend}): {statusMessage}");
-                    }
-
-                    return;
-                }
-
-                LastVoiceStatusMessage = statusMessage;
+                LastVoiceStatusMessage =
+                    "음성 코칭이 꺼져 있어 자세 피드백을 읽지 않았습니다.";
+                return false;
             }
+
+            var resolvedCoachTts = ResolveCoachTts();
+            if (resolvedCoachTts == null)
+            {
+                LastVoiceStatusMessage = "음성 코칭 컨트롤러가 연결되지 않아 자세 피드백을 읽을 수 없습니다.";
+                if (!missingCoachTtsWarningLogged)
+                {
+                    missingCoachTtsWarningLogged = true;
+                    Debug.LogWarning($"[PoseFeedbackJsonReceiver] {LastVoiceStatusMessage}");
+                }
+
+                return false;
+            }
+
+            if (!resolvedCoachTts.TrySpeakPoseFeedback(
+                    feedback,
+                    out var statusMessage,
+                    out var requestScheduled))
+            {
+                LastVoiceStatusMessage = statusMessage;
+                if (!string.IsNullOrWhiteSpace(statusMessage))
+                {
+                    Debug.LogWarning(
+                        $"[PoseFeedbackJsonReceiver] TTS request was rejected " +
+                        $"({resolvedCoachTts.ActiveBackend}): {statusMessage}");
+                }
+
+                return false;
+            }
+
+            LastVoiceStatusMessage = statusMessage;
+            if (!requestScheduled)
+            {
+                return false;
+            }
+
+            MarkSpoken(feedback);
+            return true;
+        }
+
+        public bool CancelPendingFeedback(string semanticId)
+        {
+            var resolvedCoachTts = ResolveCoachTts();
+            if (resolvedCoachTts == null)
+            {
+                return false;
+            }
+
+            var cancelled =
+                resolvedCoachTts.CancelPendingPoseFeedback(semanticId);
+            if (cancelled)
+            {
+                LastVoiceStatusMessage =
+                    resolvedCoachTts.LastStatusMessage;
+            }
+
+            return cancelled;
+        }
+
+        public bool CancelPendingFeedbackPrefix(
+            string semanticIdPrefix)
+        {
+            var resolvedCoachTts = ResolveCoachTts();
+            if (resolvedCoachTts == null)
+            {
+                return false;
+            }
+
+            var cancelled =
+                resolvedCoachTts.CancelPendingPoseFeedbackPrefix(
+                    semanticIdPrefix);
+            if (cancelled)
+            {
+                LastVoiceStatusMessage =
+                    resolvedCoachTts.LastStatusMessage;
+            }
+
+            return cancelled;
         }
 
         private CoachTtsController ResolveCoachTts()
@@ -125,8 +186,36 @@ namespace Rag.Healthcare.Pose
                 return true;
             }
 
-            lastSpokenTimes[key] = now;
             return false;
+        }
+
+        private void MarkSpoken(PoseFeedbackMessage feedback)
+        {
+            var key = string.IsNullOrWhiteSpace(feedback.id)
+                ? feedback.text
+                : feedback.id;
+            lastSpokenTimes[key] = Time.unscaledTime;
+        }
+
+        private static bool IsRetiredExcessiveDepthFeedback(
+            PoseFeedbackMessage feedback)
+        {
+            var id = feedback.id ?? string.Empty;
+            var text = feedback.text ?? string.Empty;
+            return id == "squat_depth_excessive" ||
+                   id == "squat_depth_deep" ||
+                   id.EndsWith(
+                       "_knee_bend_deep",
+                       StringComparison.Ordinal) ||
+                   text.IndexOf(
+                       "너무 깊게",
+                       StringComparison.Ordinal) >= 0 ||
+                   text.IndexOf(
+                       "깊이를 조금 줄",
+                       StringComparison.Ordinal) >= 0 ||
+                   text.IndexOf(
+                       "knee bend is too deep",
+                       StringComparison.OrdinalIgnoreCase) >= 0;
         }
     }
 }

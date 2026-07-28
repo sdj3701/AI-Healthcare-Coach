@@ -64,10 +64,11 @@
 
 **조치 (적용됨)**
 
-- `Assets/Editor/IOSDevelopmentBuild.cs`에서  
-  `connectProfiler = false`, `BuildOptions.ConnectWithProfiler` 미사용  
-- 정상 시 기기 로그: `[Flags] 2`, `Remaining time` 없음, Listen 모드  
-- Profiler는 **수동 IP 연결** (예: `192.168.35.25`)만 사용
+- `Assets/Editor/IOSDevelopmentBuild.cs`에서
+  `BuildOptions.Development`, `ConnectWithProfiler`, `AllowDebugging`을 제거한다.
+- Unity `6000.3.18f1` iOS 빌드는 Unity Development Player를 사용하지 않는다.
+- 정상 시 기기 로그에 `Build type 'Release'`가 기록되고 PlayerConnection
+  대기가 나타나지 않는다.
 
 관련 커밋: `93fb304`
 
@@ -162,8 +163,9 @@ Xcode Issue Navigator에 `unzOpen`, `UCaseMap`, `Thread::Thread` 중복이 많�
 | 로그 / 상태 | 의미 | 조치 |
 |-------------|------|------|
 | `[Flags] 19`, `Remaining time` | Autoconnect 대기 hang | Autoconnect OFF, 메뉴 빌드 사용 |
+| `Build type 'Development'` 뒤 `Splash already finished`에서 정지 | Unity 6000.3.18f1 Development Player의 첫 씬 로드 정지 | Development Player OFF |
 | `[Flags] 2`, `applicationDidBecomeActive`, Metal 정상인데도 검정 | Metal Validation / Debug 경로 의심 | Validation OFF, AllowDebugging OFF |
-| `player-connection-debug=1` | Script Debugging 활성 | Development만 유지, Debugging OFF |
+| `player-connection-debug=1` | Script Debugging 활성 | Development와 Debugging 모두 OFF |
 | CPU/RAM 움직임 + 완전 검정 | 프로세스 생존, 렌더/UI 미표시 | 위 설정 + UI/카메라 시작 여부 확인 |
 | `duplicate symbol '_unz…'` | MediaPipe↔Unity 링크 경고 | `-force_load` 유지(경고 허용). `-load_hidden` 금지 |
 | `Unable to find Calculator ...PoseLandmarkerGraph` | graph 등록 TU 미링크 | Podfile에서 `-force_load` 복구 |
@@ -174,11 +176,12 @@ Xcode Issue Navigator에 `unzOpen`, `UCaseMap`, `Thread::Thread` 중복이 많�
 
 메뉴:
 
-- `AI Healthcare Coach/Build/iOS Development Build` → `Build/iOS`  
-  - Development ON  
-  - Autoconnect / Deep Profiling / Script Debugging / wait-for-debugger **OFF**  
-  - Profiler는 기기 IP **수동 연결**
-- `AI Healthcare Coach/Build/iOS Release Build` → `Build/iOS-Release`  
+- `AI Healthcare Coach/Build/iOS Development Build` → `Build/iOS`
+  - 메뉴 이름은 기존 호환성을 위해 유지하지만 Unity Development Player는 **OFF**
+  - Xcode LaunchAction만 `Debug`로 유지
+  - Clean Build Cache ON, IL2CPP `OptimizeSize`
+  - Autoconnect / Deep Profiling / Script Debugging / wait-for-debugger **OFF**
+- `AI Healthcare Coach/Build/iOS Release Build` → `Build/iOS-Release`
   - 일반 실행·대조 검증용
 
 서명: Team `VBT88ZWM6D`, Automatic Signing  
@@ -186,11 +189,13 @@ Xcode는 반드시 **`Unity-iPhone.xcworkspace`** 로 연다 (`.xcodeproj` 단�
 
 주의:
 
-- Unity Build Settings UI에서 Autoconnect를 다시 켜고 빌드하면 Flags 19 hang이 **재발**한다.
-- Autoconnect / Script Debugging은 `EditorUserBuildSettings`(로컬)에 저장되며 git에 없다.  
+- Unity `6000.3.18f1`의 일반 Build/Build And Run도 빌드 핸들러가
+  Development·Autoconnect·Script Debugging을 제거한다.
+- Autoconnect / Script Debugging은 `EditorUserBuildSettings`(로컬)에 저장되며 git에 없다.
   `Assets/Editor/IOSStableBuildSettings.cs`가 에디터 로드 시 및 메뉴  
   `AI Healthcare Coach/Build/Apply Safe iOS Build Settings`로 안전 값을 다시 강제한다.
-- `/Users/sindongju/aibuild` 같은 별도 export와 `Build/iOS`가 섞이면 설정이 어긋나기 쉽다. 프로파일링은 `Build/iOS`를 기준으로 한다.
+- 검증된 공식 export는 `/Users/sindongju/aibuild`에 둔다. 다시 export할 때는
+  위 메뉴 또는 빌드 핸들러가 적용되는 일반 Build/Build And Run만 사용한다.
 
 ## 7. “에디터 OK / 빌드 검정”을 코드 버그로 단정하면 안 되는 이유
 
@@ -205,8 +210,8 @@ Xcode는 반드시 **`Unity-iPhone.xcworkspace`** 로 연다 (`.xcodeproj` 단�
 
 | 파일 | 역할 |
 |------|------|
-| `Assets/Editor/IOSDevelopmentBuild.cs` | 안정화된 Development/Release iOS 빌드 |
-| `Assets/Editor/IOSStableBuildSettings.cs` | 에디터 로드 시 Autoconnect/디버깅 OFF 강제 |
+| `Assets/Editor/IOSDevelopmentBuild.cs` | Development Player를 쓰지 않는 안정화된 iOS 빌드 |
+| `Assets/Editor/IOSStableBuildSettings.cs` | 에디터 로드/일반 빌드 시 Development·Autoconnect·디버깅 OFF 강제 |
 | `ProjectSettings/ProjectSettings.asset` | `metalAPIValidation`, Team ID, Automatic Signing |
 | `Assets/Editor/MediaPipeIOSBuildPostprocessor.cs` | Podfile (`-force_load` 유지) |
 | `Assets/Scripts/RagHealthcare/Diagnostics/IOSBootDiagnostics.cs` | 기기 콘솔용 시작 breadcrumb |
@@ -217,14 +222,16 @@ Xcode는 반드시 **`Unity-iPhone.xcworkspace`** 로 연다 (`.xcodeproj` 단�
 
 ## 9. 재발 시 최소 재현 절차
 
-1. `iOS Development Build`로 재export (Unity Build Settings에서 Autoconnect 켜지 말 것)  
-2. `pod install` 후 `.xcworkspace` 로 Debug 설치  
-3. 기기 로그에서 `[Flags] 2` / `Remaining time` 없음 확인  
-4. `boot.config`에서 `player-connection-debug=0`, wait-for-debugger 없음 확인  
+1. `iOS Development Build` 메뉴로 안정형 비개발 Player를 재export
+2. `pod install` 후 `.xcworkspace` 로 Debug 설치
+3. 기기 로그에서 `Build type 'Release'`, `BeforeSceneLoad`, `AfterSceneLoad` 확인
+4. `boot.config`에서 PlayerConnection 항목과 debugger 대기 항목이 없는지 확인
 5. 화면이 여전히 검으면: UI(“AI 헬스케어 코치” 헤더) 유무와 카메라 Start 전 어두운 배경 오인 여부를 구분  
-6. Release 빌드(`Build/iOS-Release`)로 한 번 더 대조 — Release에서만 정상이면 Development 전용 설정 문제 확정  
+6. `Build type 'Development'`가 보이면 잘못된 이전 export가 설치된 것이므로
+   `/Users/sindongju/aibuild`를 다시 빌드하고 설치
 
 ---
 
-이 문서는 2026-07-20 실기기 프로파일링 환경 구성 과정에서 확인한 사실을 기준으로 한다.  
+이 문서는 2026-07-20 실기기 프로파일링과 2026-07-27 Unity Development
+Player 첫 씬 정지 재현 결과를 기준으로 한다.
 씬/UI 로직을 먼저 의하기 전에, 위 빌드·연결 설정을 우선 점검할 것.

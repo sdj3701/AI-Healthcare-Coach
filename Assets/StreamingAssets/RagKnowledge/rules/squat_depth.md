@@ -4,7 +4,7 @@ exercise: squat
 ruleId: squat_depth_shallow
 joint: knee
 tags: [depth, squat, knee]
-realtimeText: "괜찮습니다. 가능하면 조금 더 앉아도 좋아요."
+realtimeText: "엉덩이와 무릎 높이가 충분히 가까운 상태가 연속으로 확인되지 않았습니다. 엉덩이를 조금 더 내려 주세요."
 ---
 
 스쿼트 깊이는 사용자의 가동 범위와 목표에 따라 달라진다. 통증이 없는 범위 안에서 무릎과 골반이 안정적으로 움직이는 깊이를 우선한다.

@@ -11,7 +11,6 @@ namespace Rag.Healthcare.Pose.Analysis
         [SerializeField, Range(0f, 1f)] private float minimumVisibility = 0.5f;
         [SerializeField, Range(0f, 0.5f)] private float maximumKneeValgusOffset = 0.08f;
         [SerializeField, Range(0f, 0.5f)] private float maximumKneeForwardOffset = 0.06f;
-        [SerializeField, Range(0f, 180f)] private float minimumSquatKneeAngle = 70f;
         [SerializeField, Range(0f, 180f)] private float maximumSquatKneeAngle = 165f;
         [SerializeField, Range(0f, 90f)] private float maximumLeftRightKneeAngleDelta = 18f;
         [SerializeField, Range(0f, 90f)] private float maximumTorsoTiltDegrees = 35f;
@@ -25,7 +24,6 @@ namespace Rag.Healthcare.Pose.Analysis
         private float MinimumVisibility => config != null ? config.minimumVisibility : minimumVisibility;
         private float MaximumKneeValgusOffset => config != null ? config.maximumKneeValgusOffset : maximumKneeValgusOffset;
         private float MaximumKneeForwardOffset => config != null ? config.maximumKneeForwardOffset : maximumKneeForwardOffset;
-        private float MinimumSquatKneeAngle => config != null ? config.minimumSquatKneeAngle : minimumSquatKneeAngle;
         private float MaximumSquatKneeAngle => config != null ? config.maximumSquatKneeAngle : maximumSquatKneeAngle;
         private float MaximumLeftRightKneeAngleDelta => config != null ? config.maximumLeftRightKneeAngleDelta : maximumLeftRightKneeAngleDelta;
         private float MaximumTorsoTiltDegrees => config != null ? config.maximumTorsoTiltDegrees : maximumTorsoTiltDegrees;
@@ -107,16 +105,6 @@ namespace Rag.Healthcare.Pose.Analysis
                     $"{side} knee bend is shallow. Bend the knee a little more.",
                     kneeName,
                     FeedbackSeverity.Info,
-                    confidence);
-            }
-            else if (kneeAngle < MinimumSquatKneeAngle)
-            {
-                AddFeedback(
-                    results,
-                    $"{side}_knee_bend_deep",
-                    $"{side} knee bend is too deep. Reduce the depth slightly.",
-                    kneeName,
-                    FeedbackSeverity.Warning,
                     confidence);
             }
         }

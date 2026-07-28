@@ -69,7 +69,10 @@ namespace AIHealthcareCoach.Editor
             project.AddBuildProperty(frameworkTarget, "OTHER_LDFLAGS", "$(inherited)");
 
             project.WriteToFile(projectPath);
-            Debug.Log("Updated iOS Xcode project for MediaPipe Swift bridge.");
+            IOSDevelopmentBuild.SanitizeGeneratedXcodeProject(projectPath);
+            Debug.Log(
+                "Updated the iOS Xcode project for the MediaPipe Swift bridge, " +
+                "removed duplicate build phases, and isolated the IL2CPP Bee cache.");
         }
 
         private static void UpdatePlist(string pathToBuiltProject)

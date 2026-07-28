@@ -25,7 +25,8 @@ namespace Rag.Healthcare.Rag.Runtime
                 frameView,
                 exercise,
                 minimumVisibility,
-                LegacyReferenceBodyScale);
+                LegacyReferenceBodyScale,
+                0.08f);
         }
 
         // Prefer this overload in the live pipeline. The float overload remains for
@@ -41,14 +42,18 @@ namespace Rag.Healthcare.Rag.Runtime
                 settings == null ? 0.45f : settings.MinimumVisibility,
                 settings == null
                     ? LegacyReferenceBodyScale
-                    : settings.OffsetNormalizationReferenceBodyScale);
+                    : settings.OffsetNormalizationReferenceBodyScale,
+                settings == null
+                    ? 0.08f
+                    : settings.MinimumKneeWidthStanceSpan);
         }
 
         private PoseFeatureFrame ExtractInternal(
             PoseFrameView frameView,
             string exercise,
             float minimumVisibility,
-            float offsetReferenceBodyScale)
+            float offsetReferenceBodyScale,
+            float minimumKneeWidthStanceSpan)
         {
             var feature = workingFeature;
             feature.Reset();
@@ -61,7 +66,7 @@ namespace Rag.Healthcare.Rag.Runtime
             }
 
             var validFeatureCount = 0;
-            var totalFeatureCount = 9;
+            var totalFeatureCount = 10;
             var hasBodyScale = TryCalculateBodyScale(frameView, out var bodyScale);
             var offsetScale = hasBodyScale
                 ? Mathf.Max(MinimumBodyScale, offsetReferenceBodyScale) / bodyScale
@@ -164,6 +169,18 @@ namespace Rag.Healthcare.Rag.Runtime
 
             feature.HasRightFootVisibility = HasFootVisibility(frameView, PoseJointNames.RightAnkle, PoseJointNames.RightHeel, PoseJointNames.RightFootIndex);
             if (feature.HasRightFootVisibility)
+            {
+                validFeatureCount++;
+            }
+
+            feature.HasKneeWidthRatio = TryCalculateKneeWidthRatio(
+                frameView,
+                hasBodyScale ? bodyScale : 0f,
+                minimumKneeWidthStanceSpan,
+                out feature.KneeWidth,
+                out feature.AnkleWidth,
+                out feature.KneeWidthRatio);
+            if (feature.HasKneeWidthRatio)
             {
                 validFeatureCount++;
             }
@@ -379,6 +396,52 @@ namespace Rag.Healthcare.Rag.Runtime
             return frameView.TryGetJoint(ankleName, out _) &&
                    frameView.TryGetJoint(heelName, out _) &&
                    frameView.TryGetJoint(footIndexName, out _);
+        }
+
+        private static bool TryCalculateKneeWidthRatio(
+            PoseFrameView frameView,
+            float bodyScale,
+            float minimumNormalizedStanceSpan,
+            out float kneeWidth,
+            out float ankleWidth,
+            out float kneeWidthRatio)
+        {
+            kneeWidth = 0f;
+            ankleWidth = 0f;
+            kneeWidthRatio = 0f;
+            if (bodyScale <= MinimumBodyScale ||
+                !TryGetPosition(
+                    frameView,
+                    PoseJointNames.LeftKnee,
+                    out var leftKnee) ||
+                !TryGetPosition(
+                    frameView,
+                    PoseJointNames.RightKnee,
+                    out var rightKnee) ||
+                !TryGetPosition(
+                    frameView,
+                    PoseJointNames.LeftAnkle,
+                    out var leftAnkle) ||
+                !TryGetPosition(
+                    frameView,
+                    PoseJointNames.RightAnkle,
+                    out var rightAnkle))
+            {
+                return false;
+            }
+
+            kneeWidth = Mathf.Abs(leftKnee.x - rightKnee.x);
+            ankleWidth = Mathf.Abs(leftAnkle.x - rightAnkle.x);
+            var normalizedAnkleWidth = ankleWidth / bodyScale;
+            if (normalizedAnkleWidth <
+                    Mathf.Max(0.02f, minimumNormalizedStanceSpan) ||
+                ankleWidth <= Mathf.Epsilon)
+            {
+                return false;
+            }
+
+            kneeWidthRatio = kneeWidth / ankleWidth;
+            return true;
         }
 
         private static bool TryGetPosition(PoseFrameView frameView, string jointName, out Vector2 position)

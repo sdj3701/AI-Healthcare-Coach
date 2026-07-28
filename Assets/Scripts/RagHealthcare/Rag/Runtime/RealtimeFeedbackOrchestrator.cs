@@ -29,7 +29,7 @@ namespace Rag.Healthcare.Rag.Runtime
         [SerializeField, Min(0f)] private float minimumGlobalFeedbackIntervalSeconds = 1.5f;
         [SerializeField, Range(20, 140)] private int maxSpokenTextLength = 70;
         [SerializeField] private bool speakCorrectRepCount = true;
-        [SerializeField] private string correctRepFeedbackFormat = "정확합니다. {0}개.";
+        [SerializeField] private string correctRepFeedbackFormat = "올바른 자세입니다. {0}개.";
         [SerializeField, Min(0)] private int targetCorrectRepCount;
         [SerializeField] private RealtimePoseRuleSettings ruleSettings = new RealtimePoseRuleSettings();
         [SerializeField] private CalibrationSettings calibrationSettings = new CalibrationSettings();
@@ -43,6 +43,10 @@ namespace Rag.Healthcare.Rag.Runtime
         private readonly FeedbackPrioritizer prioritizer = new FeedbackPrioritizer();
         private readonly FeedbackComposer composer = new FeedbackComposer();
         private readonly RepQualityAccumulator repQuality = new RepQualityAccumulator();
+        private readonly Dictionary<string, int> sessionIssueCounts =
+            new Dictionary<string, int>();
+        private readonly List<string> completedRepIssueRules =
+            new List<string>(8);
         private readonly PoseWindowStats reusableStats = new PoseWindowStats();
         private readonly WorkoutSessionStateMachine sessionState = new WorkoutSessionStateMachine();
         private readonly PersonalizedRomEvaluator romEvaluator = new PersonalizedRomEvaluator();
@@ -50,6 +54,7 @@ namespace Rag.Healthcare.Rag.Runtime
         private PoseWindowBuffer windowBuffer;
         private bool currentRepInProgress;
         private bool currentRepHasViolation;
+        private bool currentRepHasBottomSafetyFailure;
         private bool requiresStandingRearm = true;
         private bool poseAnalysisSuspended;
         private long lastSessionFrameTimestampMilliseconds;
@@ -59,6 +64,7 @@ namespace Rag.Healthcare.Rag.Runtime
         public ExercisePhaseState PhaseState => phaseDetector.State;
         public PoseWindowStats LatestStats { get; private set; }
         public PoseTrackingQualityReport LatestTrackingQuality { get; private set; }
+        public int TotalRepCount { get; private set; }
         public int CorrectRepCount { get; private set; }
         public int TargetCorrectRepCount => targetCorrectRepCount;
         public bool HasCorrectRepTarget => targetCorrectRepCount > 0;
@@ -66,6 +72,8 @@ namespace Rag.Healthcare.Rag.Runtime
         public bool CurrentRepHasViolation => currentRepHasViolation;
         public bool LastCompletedRepWasCorrect { get; private set; }
         public bool IsWaitingForStandingRearm => requiresStandingRearm;
+        public IReadOnlyDictionary<string, int> SessionIssueCounts =>
+            sessionIssueCounts;
 
         public WorkoutTrackingState SessionState => sessionState.State;
         public float CountdownRemaining => sessionState.CountdownRemainingSeconds;
@@ -198,15 +206,19 @@ namespace Rag.Healthcare.Rag.Runtime
             LatestTrackingQuality = null;
             if (!preserveCorrectRepCount)
             {
+                TotalRepCount = 0;
                 CorrectRepCount = 0;
+                sessionIssueCounts.Clear();
             }
 
             currentRepInProgress = false;
             currentRepHasViolation = false;
+            currentRepHasBottomSafetyFailure = false;
             LastCompletedRepWasCorrect = false;
             requiresStandingRearm = true;
             poseAnalysisSuspended = false;
             lastSessionFrameTimestampMilliseconds = 0L;
+            CancelPendingPoseFeedback();
         }
 
         public void SetCorrectRepTarget(int targetCount)
@@ -282,6 +294,7 @@ namespace Rag.Healthcare.Rag.Runtime
                 sessionLogger?.LogPhase(phaseState);
             }
 
+            CancelObsoletePoseFeedback(phaseState);
             LatestStats = PoseWindowStats.Calculate(
                 windowBuffer,
                 settings,
@@ -289,6 +302,20 @@ namespace Rag.Healthcare.Rag.Runtime
                 analysisWindowSeconds);
             var candidates = ruleEngine.Evaluate(feature, LatestStats, phaseState, settings);
             UpdateCorrectRepCount(previousPhase, previousRepCount, phaseState, feature, candidates);
+            TrySpeakPersonalizedDepthAnnouncement();
+            // Correct-rep count speech is emitted above on the transition back to
+            // Standing. Ordinary posture coaching is limited to an active movement.
+            if (!AllowsPostureCoaching(phaseState.CurrentPhase))
+            {
+                return;
+            }
+
+            if (phaseState.CurrentPhase == ExercisePhase.Bottom &&
+                phaseState.HasIssuedBottomDecisionFeedbackInCurrentRep)
+            {
+                return;
+            }
+
             if (!prioritizer.TrySelect(candidates, duplicateCooldownSeconds, minimumGlobalFeedbackIntervalSeconds, out var selected))
             {
                 return;
@@ -301,9 +328,23 @@ namespace Rag.Healthcare.Rag.Runtime
                 return;
             }
 
-            sessionLogger?.LogFeedback(selected, message);
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
-            feedbackReceiver?.ReceiveFeedback(message);
+            if (feedbackReceiver == null ||
+                !feedbackReceiver.ReceiveFeedback(message))
+            {
+                return;
+            }
+
+            prioritizer.CommitSelection(selected);
+            if (IsBottomDecisionRule(selected.RuleId))
+            {
+                // The rule engine may retry the candidate until the receiver has
+                // actually admitted it to TTS. Lock only after that handoff succeeds.
+                phaseState.HasIssuedShallowDepthFeedbackInCurrentRep = true;
+                phaseState.HasIssuedBottomDecisionFeedbackInCurrentRep = true;
+            }
+
+            sessionLogger?.LogFeedback(selected, message);
         }
 
         private void SuspendPoseAnalysis(long timestampUnixMilliseconds)
@@ -329,8 +370,10 @@ namespace Rag.Healthcare.Rag.Runtime
             repQuality.Reset();
             currentRepInProgress = false;
             currentRepHasViolation = false;
+            currentRepHasBottomSafetyFailure = false;
             LastCompletedRepWasCorrect = false;
             requiresStandingRearm = true;
+            CancelPendingPoseFeedback();
         }
 
         private void UpdateCorrectRepCount(
@@ -350,6 +393,7 @@ namespace Rag.Healthcare.Rag.Runtime
             {
                 currentRepInProgress = true;
                 currentRepHasViolation = false;
+                currentRepHasBottomSafetyFailure = false;
                 LastCompletedRepWasCorrect = false;
                 repQuality.Reset();
             }
@@ -357,25 +401,68 @@ namespace Rag.Healthcare.Rag.Runtime
             if (currentRepInProgress && IsRepActive(phaseState.CurrentPhase))
             {
                 repQuality.Observe(feature != null && feature.HasReliableSquatCore, candidates, settings);
-                currentRepHasViolation = repQuality.HasConfirmedViolation(settings);
+                if (phaseState.CurrentBottomDecision ==
+                    SquatBottomDecision.KneeCollapseFailed)
+                {
+                    currentRepHasBottomSafetyFailure = true;
+                }
+
+                currentRepHasViolation =
+                    currentRepHasBottomSafetyFailure ||
+                    repQuality.HasConfirmedViolation(settings);
+            }
+
+            if (phaseState.HasCompletedSquatAttemptThisFrame)
+            {
+                UpdatePersonalizedDepthProfile(phaseState, settings);
             }
 
             if (phaseState.RepCount > previousRepCount)
             {
+                TotalRepCount += phaseState.RepCount - previousRepCount;
                 var hasEnoughEvidence = repQuality.HasEnoughEvidence(settings);
-                LastCompletedRepWasCorrect = repQuality.IsCorrect(settings);
+                LastCompletedRepWasCorrect =
+                    phaseState.LastCompletedBottomDecision ==
+                        SquatBottomDecision.Passed &&
+                    !currentRepHasBottomSafetyFailure &&
+                    repQuality.IsCorrect(settings);
                 if (LastCompletedRepWasCorrect && CanIncrementCorrectRepCount())
                 {
                     CorrectRepCount++;
                     SpeakCorrectRepCount();
                 }
-                else if (!hasEnoughEvidence)
+                else if (!hasEnoughEvidence &&
+                         !currentRepHasBottomSafetyFailure)
                 {
+                    IncrementSessionIssue("rep_tracking_uncertain");
                     SpeakUncertainRep();
+                }
+                else
+                {
+                    completedRepIssueRules.Clear();
+                    if (phaseState.LastCompletedBottomDecision ==
+                        SquatBottomDecision.KneeCollapseFailed)
+                    {
+                        completedRepIssueRules.Add(
+                            "squat_knee_collapse");
+                    }
+                    repQuality.CollectConfirmedViolationRuleIds(
+                        settings,
+                        completedRepIssueRules);
+                    foreach (var ruleId in completedRepIssueRules)
+                    {
+                        IncrementSessionIssue(ruleId);
+                    }
+
+                    if (completedRepIssueRules.Count == 0)
+                    {
+                        IncrementSessionIssue("unknown_posture");
+                    }
                 }
 
                 currentRepInProgress = false;
                 currentRepHasViolation = false;
+                currentRepHasBottomSafetyFailure = false;
                 repQuality.Reset();
                 return;
             }
@@ -386,8 +473,61 @@ namespace Rag.Healthcare.Rag.Runtime
             {
                 currentRepInProgress = false;
                 currentRepHasViolation = false;
+                currentRepHasBottomSafetyFailure = false;
                 LastCompletedRepWasCorrect = false;
                 repQuality.Reset();
+            }
+        }
+
+        private void UpdatePersonalizedDepthProfile(
+            ExercisePhaseState phaseState,
+            RealtimePoseRuleSettings settings)
+        {
+            var isEligibleFailure =
+                phaseState.LastCompletedBottomDecision ==
+                    SquatBottomDecision.PersonalDepthFailed &&
+                LatestTrackingQuality != null &&
+                LatestTrackingQuality.State ==
+                    PoseTrackingQualityState.Good &&
+                repQuality.HasEnoughEvidence(settings) &&
+                !repQuality.HasConfirmedViolation(settings) &&
+                !currentRepHasBottomSafetyFailure;
+            if (!isEligibleFailure)
+            {
+                phaseDetector.RejectPersonalDepthFailureCandidate();
+                return;
+            }
+
+            phaseDetector.RegisterPersonalDepthFailureCandidate(
+                phaseState.LastCompletedAttemptMinimumKneeAngle,
+                phaseState.LastCompletedAttemptMaximumHipDrop,
+                settings);
+        }
+
+        private void TrySpeakPersonalizedDepthAnnouncement()
+        {
+            var phaseState = phaseDetector.State;
+            if (phaseState == null ||
+                !phaseState.HasPendingPersonalizedDepthAnnouncement ||
+                phaseState.CurrentPhase != ExercisePhase.Standing)
+            {
+                return;
+            }
+
+            feedbackReceiver ??=
+                FindFirstObjectByType<PoseFeedbackJsonReceiver>();
+            if (feedbackReceiver != null &&
+                feedbackReceiver.ReceiveFeedback(
+                    new PoseFeedbackMessage
+                    {
+                        id = "depth_profile_adjusted",
+                        text = "현재 가능한 깊이에 맞춰 기준을 조정했습니다.",
+                        joint = string.Empty,
+                        confidence = 1f,
+                        severity = FeedbackSeverity.Info
+                    }))
+            {
+                phaseDetector.ConsumePersonalizedDepthAnnouncement();
             }
         }
 
@@ -483,6 +623,17 @@ namespace Rag.Healthcare.Rag.Runtime
             return !HasCorrectRepTarget || CorrectRepCount < targetCorrectRepCount;
         }
 
+        private void IncrementSessionIssue(string ruleId)
+        {
+            if (string.IsNullOrWhiteSpace(ruleId))
+            {
+                ruleId = "unknown_posture";
+            }
+
+            sessionIssueCounts.TryGetValue(ruleId, out var count);
+            sessionIssueCounts[ruleId] = count + 1;
+        }
+
         private void SpeakCorrectRepCount()
         {
             if (!speakCorrectRepCount || CorrectRepCount <= 0)
@@ -492,7 +643,7 @@ namespace Rag.Healthcare.Rag.Runtime
 
             var countText = CorrectRepCount.ToString();
             var text = string.IsNullOrWhiteSpace(correctRepFeedbackFormat)
-                ? $"정확합니다. {countText}개."
+                ? $"올바른 자세입니다. {countText}개."
                 : correctRepFeedbackFormat.Replace("{0}", countText);
 
             feedbackReceiver ??= FindFirstObjectByType<PoseFeedbackJsonReceiver>();
@@ -519,11 +670,97 @@ namespace Rag.Healthcare.Rag.Runtime
             });
         }
 
+        private void CancelObsoletePoseFeedback(
+            ExercisePhaseState phaseState)
+        {
+            if (phaseState == null ||
+                !AllowsPostureCoaching(phaseState.CurrentPhase))
+            {
+                CancelPendingPoseFeedback();
+                return;
+            }
+
+            if (phaseState.CurrentPhase == ExercisePhase.Bottom)
+            {
+                CancelPendingBottomDecisionFeedbackExcept(
+                    phaseState.CurrentBottomDecision);
+                return;
+            }
+
+            CancelPendingDepthFeedback();
+        }
+
+        private void CancelPendingDepthFeedback()
+        {
+            feedbackReceiver ??=
+                FindFirstObjectByType<PoseFeedbackJsonReceiver>();
+            feedbackReceiver?.CancelPendingFeedback(
+                "squat_depth_hip_height");
+            feedbackReceiver?.CancelPendingFeedback(
+                "squat_knee_collapse");
+            feedbackReceiver?.CancelPendingFeedback(
+                "squat_depth_personal_target");
+            feedbackReceiver?.CancelPendingFeedback(
+                "squat_depth_excessive");
+        }
+
+        private void CancelPendingBottomDecisionFeedbackExcept(
+            SquatBottomDecision decision)
+        {
+            feedbackReceiver ??=
+                FindFirstObjectByType<PoseFeedbackJsonReceiver>();
+            if (feedbackReceiver == null)
+            {
+                return;
+            }
+
+            if (decision != SquatBottomDecision.HipHeightFailed)
+            {
+                feedbackReceiver.CancelPendingFeedback(
+                    "squat_depth_hip_height");
+            }
+
+            if (decision != SquatBottomDecision.KneeCollapseFailed)
+            {
+                feedbackReceiver.CancelPendingFeedback(
+                    "squat_knee_collapse");
+            }
+
+            if (decision != SquatBottomDecision.PersonalDepthFailed)
+            {
+                feedbackReceiver.CancelPendingFeedback(
+                    "squat_depth_personal_target");
+            }
+
+            // Retired rule: always cancel any request queued by an older build.
+            feedbackReceiver.CancelPendingFeedback(
+                "squat_depth_excessive");
+        }
+
+        private void CancelPendingPoseFeedback()
+        {
+            feedbackReceiver ??=
+                FindFirstObjectByType<PoseFeedbackJsonReceiver>();
+            feedbackReceiver?.CancelPendingFeedbackPrefix("squat_");
+        }
+
         private static bool IsRepActive(ExercisePhase phase)
         {
             return phase == ExercisePhase.Descent ||
                    phase == ExercisePhase.Bottom ||
                    phase == ExercisePhase.Ascent;
+        }
+
+        public static bool AllowsPostureCoaching(ExercisePhase phase)
+        {
+            return IsRepActive(phase);
+        }
+
+        private static bool IsBottomDecisionRule(string ruleId)
+        {
+            return ruleId == "squat_depth_hip_height" ||
+                   ruleId == "squat_knee_collapse" ||
+                   ruleId == "squat_depth_personal_target";
         }
 
         private void CreateWindowBuffer()

@@ -464,6 +464,65 @@ namespace Rag.Healthcare.Tts
             return true;
         }
 
+        /// <summary>
+        /// Removes speech that has not entered the platform backend yet. Active
+        /// playback is intentionally left alone because it was relevant when it
+        /// started; this only prevents a corrected pose cue from playing late.
+        /// </summary>
+        public bool CancelNotStartedSemantic(string semanticId, double now)
+        {
+            if (string.IsNullOrWhiteSpace(semanticId))
+            {
+                return false;
+            }
+
+            var normalizedSemanticId = semanticId.Trim();
+            var cancelled = false;
+            if (IsSameSemantic(Pending, normalizedSemanticId))
+            {
+                Pending = null;
+                cancelled = true;
+            }
+
+            if (IsSameSemantic(Active, normalizedSemanticId) &&
+                activeState == ActiveRequestState.Queued)
+            {
+                SetActive(null);
+                PromotePendingIfIdle(now);
+                cancelled = true;
+            }
+
+            return cancelled;
+        }
+
+        public bool CancelNotStartedSemanticPrefix(
+            string semanticIdPrefix,
+            double now)
+        {
+            if (string.IsNullOrWhiteSpace(semanticIdPrefix))
+            {
+                return false;
+            }
+
+            var prefix = semanticIdPrefix.Trim();
+            var cancelled = false;
+            if (HasSemanticPrefix(Pending, prefix))
+            {
+                Pending = null;
+                cancelled = true;
+            }
+
+            if (HasSemanticPrefix(Active, prefix) &&
+                activeState == ActiveRequestState.Queued)
+            {
+                SetActive(null);
+                PromotePendingIfIdle(now);
+                cancelled = true;
+            }
+
+            return cancelled;
+        }
+
         private TtsScheduledRequest CreateRequest(
             string text,
             string semanticId,
@@ -632,6 +691,16 @@ namespace Rag.Healthcare.Tts
         {
             return request != null &&
                    string.Equals(request.SemanticId, semanticId, StringComparison.Ordinal);
+        }
+
+        private static bool HasSemanticPrefix(
+            TtsScheduledRequest request,
+            string semanticIdPrefix)
+        {
+            return request != null &&
+                   request.SemanticId.StartsWith(
+                       semanticIdPrefix,
+                       StringComparison.Ordinal);
         }
     }
 }

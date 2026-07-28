@@ -15,7 +15,12 @@ namespace Rag.Healthcare.Rag.Composition
                 return null;
             }
 
-            var text = SelectRetrievedRealtimeText(feedbackEvent, retrievalResults, maxTextLength);
+            var text = feedbackEvent.PreferTemplateText
+                ? feedbackEvent.TemplateText
+                : SelectRetrievedRealtimeText(
+                    feedbackEvent,
+                    retrievalResults,
+                    maxTextLength);
             if (string.IsNullOrWhiteSpace(text))
             {
                 text = feedbackEvent.TemplateText;

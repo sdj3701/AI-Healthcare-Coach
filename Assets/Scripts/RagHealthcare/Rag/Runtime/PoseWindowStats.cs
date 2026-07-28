@@ -32,6 +32,12 @@ namespace Rag.Healthcare.Rag.Runtime
         public float CenterBalanceViolationRatio;
         public float ShallowDepthViolationRatio;
         public float DeepDepthViolationRatio;
+        public float KneeWidthObservationRatio;
+        public float AverageKneeWidthRatio;
+        public float MinimumKneeWidthRatio = float.PositiveInfinity;
+        public float KneeCollapseViolationRatio;
+        public int MaximumConsecutiveKneeCollapseFrames;
+        public int MaximumConsecutiveExcessiveDepthFrames;
         public float AverageValidityScore;
         public PoseFeatureFrame LatestFrame;
 
@@ -76,6 +82,10 @@ namespace Rag.Healthcare.Rag.Runtime
             var balanceViolations = 0;
             var shallowDepthViolations = 0;
             var deepDepthViolations = 0;
+            var kneeWidthCount = 0;
+            var kneeCollapseViolations = 0;
+            var consecutiveKneeCollapseFrames = 0;
+            var consecutiveExcessiveDepthFrames = 0;
 
             var startIndex = ResolveAnalysisStartIndex(buffer, analysisWindowSeconds);
 
@@ -105,10 +115,56 @@ namespace Rag.Healthcare.Rag.Runtime
                     {
                         shallowDepthViolations++;
                     }
-                    else if (frame.AverageKneeAngle < settings.MinimumBottomKneeAngle)
+                    else if (frame.HasLeftKneeAngle &&
+                             frame.HasRightKneeAngle &&
+                             frame.AverageKneeAngle <
+                             settings.MinimumBottomKneeAngle)
                     {
                         deepDepthViolations++;
                     }
+                }
+
+                if (frame.HasLeftKneeAngle &&
+                    frame.HasRightKneeAngle &&
+                    frame.AverageKneeAngle <
+                    settings.MinimumBottomKneeAngle)
+                {
+                    consecutiveExcessiveDepthFrames++;
+                    stats.MaximumConsecutiveExcessiveDepthFrames =
+                        Mathf.Max(
+                            stats.MaximumConsecutiveExcessiveDepthFrames,
+                            consecutiveExcessiveDepthFrames);
+                }
+                else
+                {
+                    consecutiveExcessiveDepthFrames = 0;
+                }
+
+                if (frame.HasKneeWidthRatio)
+                {
+                    stats.AverageKneeWidthRatio += frame.KneeWidthRatio;
+                    stats.MinimumKneeWidthRatio = Mathf.Min(
+                        stats.MinimumKneeWidthRatio,
+                        frame.KneeWidthRatio);
+                    kneeWidthCount++;
+                    if (frame.KneeWidthRatio <
+                        settings.MinimumKneeWidthRatio)
+                    {
+                        kneeCollapseViolations++;
+                        consecutiveKneeCollapseFrames++;
+                        stats.MaximumConsecutiveKneeCollapseFrames =
+                            Mathf.Max(
+                                stats.MaximumConsecutiveKneeCollapseFrames,
+                                consecutiveKneeCollapseFrames);
+                    }
+                    else
+                    {
+                        consecutiveKneeCollapseFrames = 0;
+                    }
+                }
+                else
+                {
+                    consecutiveKneeCollapseFrames = 0;
                 }
 
                 if (frame.HasTorsoTilt)
@@ -190,6 +246,24 @@ namespace Rag.Healthcare.Rag.Runtime
             else
             {
                 stats.MinimumKneeAngle = 0f;
+            }
+
+            if (stats.FrameCount > 0)
+            {
+                stats.KneeWidthObservationRatio =
+                    kneeWidthCount / (float)stats.FrameCount;
+            }
+
+            if (kneeWidthCount > 0)
+            {
+                stats.AverageKneeWidthRatio /=
+                    kneeWidthCount;
+                stats.KneeCollapseViolationRatio =
+                    kneeCollapseViolations / (float)kneeWidthCount;
+            }
+            else
+            {
+                stats.MinimumKneeWidthRatio = 0f;
             }
 
             if (torsoCount > 0)
@@ -317,6 +391,12 @@ namespace Rag.Healthcare.Rag.Runtime
             CenterBalanceViolationRatio = 0f;
             ShallowDepthViolationRatio = 0f;
             DeepDepthViolationRatio = 0f;
+            KneeWidthObservationRatio = 0f;
+            AverageKneeWidthRatio = 0f;
+            MinimumKneeWidthRatio = float.PositiveInfinity;
+            KneeCollapseViolationRatio = 0f;
+            MaximumConsecutiveKneeCollapseFrames = 0;
+            MaximumConsecutiveExcessiveDepthFrames = 0;
             AverageValidityScore = 0f;
             LatestFrame = null;
         }

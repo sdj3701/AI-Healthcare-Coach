@@ -2,7 +2,7 @@
   "schemaVersion": "1.0",
   "poseModelVersion": "mediapipe-pose-landmarker-lite",
   "reportModelVersion": "not-installed",
-  "ruleCatalogVersion": "2026.07.14.1",
+  "ruleCatalogVersion": "2026.07.27.5",
   "promptVersion": "2026.07.14.1",
   "safetyCopyVersion": "2026.07.14.1"
 }

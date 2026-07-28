@@ -13,6 +13,8 @@ using Rag.Healthcare.Pose.Session;
 using Rag.Healthcare.Privacy;
 using Rag.Healthcare.Product;
 using Rag.Healthcare.Qa;
+using Rag.Healthcare.Rag.Composition;
+using Rag.Healthcare.Rag.Knowledge;
 using Rag.Healthcare.Rag.Runtime;
 using Rag.Healthcare.Rag.Rules;
 using Rag.Healthcare.Replay;
@@ -20,6 +22,7 @@ using Rag.Healthcare.Reports;
 using Rag.Healthcare.Tts;
 using Rag.Healthcare.UI;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -31,7 +34,24 @@ namespace Rag.Healthcare.Editor
         public static void RunMenu()
         {
             var failures = Run();
-            EditorUtility.DisplayDialog("AI Healthcare QA", failures.Count == 0 ? "All deterministic QA checks passed." : string.Join("\n", failures), "OK");
+            var passed = failures.Count == 0;
+            if (passed)
+            {
+                Debug.Log("AI_HEALTHCARE_QA_PASSED");
+            }
+            else
+            {
+                Debug.LogError(
+                    "AI_HEALTHCARE_QA_FAILED: " +
+                    string.Join("; ", failures));
+            }
+
+            EditorUtility.DisplayDialog(
+                "AI Healthcare QA",
+                passed
+                    ? "All deterministic QA checks passed."
+                    : string.Join("\n", failures),
+                "OK");
         }
 
         public static void RunBatch()
@@ -56,6 +76,7 @@ namespace Rag.Healthcare.Editor
             VerifyLandmarkStability(failures);
             VerifyFrontCameraTrackingQuality(failures);
             VerifyWorkoutSessionLifecycle(failures);
+            VerifyIosDevelopmentLaunchScheme(failures);
             VerifyPersonalizedRomSafety(failures);
             VerifyProfileCompletionGate(failures);
             VerifyHotPathObjectReuse(failures);
@@ -64,7 +85,10 @@ namespace Rag.Healthcare.Editor
             VerifyJointCoordinateSquatPipeline(failures);
             VerifyDepthUsesMinimumAngle(failures);
             VerifyHipToKneeDepthFloorFeedback(failures);
+            VerifySequentialBottomDecision(failures);
+            VerifySessionDepthPersonalization(failures);
             VerifyBottomReachedSuppressesShallowWarning(failures);
+            VerifyDeepSquatCountsAsCorrect(failures);
             VerifyKneeAlignmentPhaseGateAndSeverity(failures);
             VerifyTorsoAndPelvicGeometry(failures);
             VerifyAnalysisWindowUsesTimestamps(failures);
@@ -85,6 +109,11 @@ namespace Rag.Healthcare.Editor
 
             var entitlements = new EntitlementService();
             Check(entitlements.Has(ProductFeature.LiveSafetyFeedback), "Safety feedback must never require payment.", failures);
+            Check(!entitlements.Has(ProductFeature.ExpertContent),
+                "Expert stretching content must remain locked before payment.", failures);
+            entitlements.Grant(ProductFeature.ExpertContent);
+            Check(entitlements.Has(ProductFeature.ExpertContent),
+                "Payment entitlement must unlock expert stretching content.", failures);
 
             Check(TtsBackendResolver.ResolveAuto(RuntimePlatform.WindowsEditor) == TtsBackend.WindowsPowerShell,
                 "Windows Editor must resolve to the audible PowerShell TTS backend.", failures);
@@ -184,6 +213,128 @@ namespace Rag.Healthcare.Editor
                   first.IndexOf(summary.sessionId, StringComparison.Ordinal) < 0 &&
                   first.IndexOf(summary.exercise, StringComparison.Ordinal) < 0,
                 "Prompt must not leak free-text fields such as topFeedbackIds, sessionId, or exercise.", failures);
+        }
+
+        private static void VerifyIosDevelopmentLaunchScheme(
+            ICollection<string> failures)
+        {
+            const string original =
+                "<Scheme><LaunchAction buildConfiguration = \"ReleaseForRunning\">" +
+                "</LaunchAction><ArchiveAction buildConfiguration = \"Release\">" +
+                "</ArchiveAction></Scheme>";
+            var updated =
+                IOSDevelopmentBuild.UseDebugLaunchConfiguration(original);
+
+            Check(
+                updated.Contains(
+                    "<LaunchAction buildConfiguration = \"Debug\">") &&
+                updated.Contains(
+                    "<ArchiveAction buildConfiguration = \"Release\">"),
+                "The iOS development scheme must use Debug for LaunchAction without changing ArchiveAction.",
+                failures);
+            Check(
+                IOSDevelopmentBuild.UseDebugLaunchConfiguration(updated) ==
+                updated,
+                "Applying the iOS development LaunchAction fix twice must be idempotent.",
+                failures);
+
+            const string sharedCache =
+                "export BEE_CACHE_DIRECTORY=\\\"$HOME/Library/Unity/cache/bee\\\"";
+            var localCache =
+                IOSDevelopmentBuild.UseProjectLocalBeeCache(sharedCache);
+            Check(
+                localCache.Contains(
+                    "$PROJECT_DIR/Il2CppBuildCache/$CONFIGURATION") &&
+                !localCache.Contains("$HOME/Library/Unity/cache/bee"),
+                "The iOS development IL2CPP build must not reuse Unity's shared Bee cache.",
+                failures);
+            Check(
+                IOSDevelopmentBuild.UseProjectLocalBeeCache(localCache) ==
+                localCache,
+                "Applying the export-local Bee cache fix twice must be idempotent.",
+                failures);
+
+            var stableBuildOptions =
+                IOSDevelopmentBuild.UseStableIOSBuildOptions(
+                    BuildOptions.AutoRunPlayer |
+                    BuildOptions.Development |
+                    BuildOptions.ConnectWithProfiler |
+                    BuildOptions.AllowDebugging |
+                    BuildOptions.EnableDeepProfilingSupport |
+                    BuildOptions.WaitForPlayerConnection);
+            Check(
+                (stableBuildOptions & BuildOptions.AutoRunPlayer) != 0 &&
+                (stableBuildOptions & BuildOptions.Development) == 0 &&
+                (stableBuildOptions & BuildOptions.ConnectWithProfiler) == 0 &&
+                (stableBuildOptions & BuildOptions.AllowDebugging) == 0 &&
+                (stableBuildOptions &
+                    BuildOptions.EnableDeepProfilingSupport) == 0 &&
+                (stableBuildOptions &
+                    BuildOptions.WaitForPlayerConnection) == 0 &&
+                (stableBuildOptions & BuildOptions.CleanBuildCache) != 0,
+                "Unity 6000.3.18f1 iOS builds must preserve safe requested options, remove Development/debug/profiler waits, and add Clean Build Cache.",
+                failures);
+
+            const string duplicatePhaseId =
+                "C62A2A42F32E085EF849CF0B";
+            const string sourcePhaseId =
+                "7F4E059C2717216D00A2CBE4";
+            var duplicatePhases =
+                "firstTarget = {\n" +
+                "\tbuildPhases = (\n" +
+                "\t\t" + sourcePhaseId + " /* Sources */,\n" +
+                "\t\t" + duplicatePhaseId + " /* ShellScript */,\n" +
+                "\t\t" + duplicatePhaseId + " /* ShellScript */,\n" +
+                "\t);\n" +
+                "};\n" +
+                "secondTarget = {\n" +
+                "\tbuildPhases = (\n" +
+                "\t\t" + duplicatePhaseId + " /* ShellScript */,\n" +
+                "\t);\n" +
+                "};";
+            var uniquePhases =
+                IOSDevelopmentBuild.RemoveDuplicateBuildPhaseReferences(
+                    duplicatePhases);
+            Check(
+                uniquePhases.Split(
+                    new[] { duplicatePhaseId },
+                    StringSplitOptions.None).Length == 3 &&
+                uniquePhases.Contains(sourcePhaseId),
+                "Each Xcode target must keep one copy of every build phase while preserving other phases.",
+                failures);
+            Check(
+                IOSDevelopmentBuild.RemoveDuplicateBuildPhaseReferences(
+                    uniquePhases) == uniquePhases,
+                "Removing duplicate Xcode build phases twice must be idempotent.",
+                failures);
+
+            var originalCodeGeneration =
+                PlayerSettings.GetIl2CppCodeGeneration(
+                    NamedBuildTarget.iOS);
+            try
+            {
+                PlayerSettings.SetIl2CppCodeGeneration(
+                    NamedBuildTarget.iOS,
+                    Il2CppCodeGeneration.OptimizeSpeed);
+                IOSDevelopmentBuild
+                    .ConfigureStableIOSIl2CppCodeGeneration();
+                Check(
+                    PlayerSettings.GetIl2CppCodeGeneration(
+                        NamedBuildTarget.iOS) ==
+                    Il2CppCodeGeneration.OptimizeSize,
+                    "Every iOS export must use OptimizeSize so URP RenderGraph generic metadata is generated.",
+                    failures);
+                Check(
+                    new IOSIl2CppBuildPreprocessor().callbackOrder < 0,
+                    "The iOS IL2CPP code-generation guard must run before normal build preprocessors.",
+                    failures);
+            }
+            finally
+            {
+                PlayerSettings.SetIl2CppCodeGeneration(
+                    NamedBuildTarget.iOS,
+                    originalCodeGeneration);
+            }
         }
 
         private static void Check(bool condition, string failure, ICollection<string> failures)
@@ -330,6 +481,171 @@ namespace Rag.Healthcare.Editor
             Check(afterCriticalFinished.Type == TtsSchedulerActionType.None && !scheduler.IsBusy,
                 "A displaced lower-priority request must retain its TTL and expire while higher-priority speech runs.",
                 failures);
+
+            scheduler.BeginGeneration(10);
+            var workoutStart = scheduler.Enqueue(
+                "운동을 시작합니다",
+                "workout_start",
+                TtsRequestPriority.Info,
+                3d,
+                3d,
+                10);
+            var startWorkoutSpeech = scheduler.Poll(3d, false);
+            scheduler.AcknowledgeStarted(
+                workoutStart.Request.RequestId,
+                3d,
+                true);
+            var staleDepth = scheduler.Enqueue(
+                "엉덩이를 조금 더 내려 주세요",
+                "squat_depth_shallow",
+                TtsRequestPriority.Warning,
+                3.1d,
+                3d,
+                10);
+            var cancelledPending = scheduler.CancelNotStartedSemantic(
+                "squat_depth_shallow",
+                3.2d);
+            var afterWorkoutSpeech = scheduler.Poll(3.4d, false);
+            Check(startWorkoutSpeech.Type == TtsSchedulerActionType.Start &&
+                  staleDepth.Disposition ==
+                  TtsEnqueueDisposition.AcceptedAsPending &&
+                  cancelledPending &&
+                  afterWorkoutSpeech.Type == TtsSchedulerActionType.None &&
+                  !scheduler.IsBusy,
+                "A corrected pose must remove its pending depth cue before it can play after Standing.",
+                failures);
+
+            scheduler.BeginGeneration(11);
+            scheduler.Enqueue(
+                "엉덩이를 조금 더 내려 주세요",
+                "squat_depth_shallow",
+                TtsRequestPriority.Warning,
+                4d,
+                3d,
+                11);
+            var cancelledQueued = scheduler.CancelNotStartedSemantic(
+                "squat_depth_shallow",
+                4.01d);
+            Check(cancelledQueued &&
+                  scheduler.Poll(4.02d, false).Type ==
+                  TtsSchedulerActionType.None &&
+                  !scheduler.IsBusy,
+                "A depth cue corrected before the next TTS pump must never enter the backend.",
+                failures);
+
+            scheduler.BeginGeneration(12);
+            var standingAnnouncement = scheduler.Enqueue(
+                "운동을 시작합니다",
+                "workout_start",
+                TtsRequestPriority.Info,
+                5d,
+                3d,
+                12);
+            scheduler.Poll(5d, false);
+            scheduler.AcknowledgeStarted(
+                standingAnnouncement.Request.RequestId,
+                5d,
+                true);
+            scheduler.Enqueue(
+                "상체를 세워 주세요",
+                "squat_torso_tilt",
+                TtsRequestPriority.Warning,
+                5.1d,
+                3d,
+                12);
+            var cancelledStandingPose =
+                scheduler.CancelNotStartedSemanticPrefix(
+                    "squat_",
+                    5.2d);
+            var correctAfterStanding = scheduler.Enqueue(
+                "올바른 자세입니다. 1개.",
+                "correct_rep_1",
+                TtsRequestPriority.Info,
+                5.21d,
+                2d,
+                12);
+            var startCorrectCount = scheduler.Poll(5.3d, false);
+            Check(cancelledStandingPose &&
+                  correctAfterStanding.IsScheduled &&
+                  startCorrectCount.Type ==
+                  TtsSchedulerActionType.Start &&
+                  startCorrectCount.Request.SemanticId ==
+                  "correct_rep_1",
+                "Standing must cancel pending squat coaching while preserving the completed-rep count announcement.",
+                failures);
+            Check(!RealtimeFeedbackOrchestrator.AllowsPostureCoaching(
+                      ExercisePhase.Standing) &&
+                  !RealtimeFeedbackOrchestrator.AllowsPostureCoaching(
+                      ExercisePhase.Unknown) &&
+                  RealtimeFeedbackOrchestrator.AllowsPostureCoaching(
+                      ExercisePhase.Descent) &&
+                  RealtimeFeedbackOrchestrator.AllowsPostureCoaching(
+                      ExercisePhase.Bottom) &&
+                  RealtimeFeedbackOrchestrator.AllowsPostureCoaching(
+                      ExercisePhase.Ascent),
+                "Posture TTS must be limited to active squat phases.",
+                failures);
+
+            var admissionPrioritizer = new FeedbackPrioritizer();
+            var retryCandidate = new FeedbackEvent
+            {
+                Id = "squat_depth_shallow",
+                RuleId = "squat_depth_shallow",
+                Severity = FeedbackSeverity.Warning,
+                Confidence = 1f,
+                PersistenceRatio = 1f
+            };
+            var retryCandidates = new[] { retryCandidate };
+            var firstSelection = admissionPrioritizer.TrySelect(
+                retryCandidates,
+                3f,
+                1.5f,
+                out var firstSelected);
+            var retryBeforeCommit = admissionPrioritizer.TrySelect(
+                retryCandidates,
+                3f,
+                1.5f,
+                out var retriedSelected);
+            admissionPrioritizer.CommitSelection(firstSelected);
+            var retryAfterCommit = admissionPrioritizer.TrySelect(
+                retryCandidates,
+                3f,
+                1.5f,
+                out _);
+            Check(firstSelection &&
+                  retryBeforeCommit &&
+                  firstSelected == retryCandidate &&
+                  retriedSelected == retryCandidate &&
+                  !retryAfterCommit,
+                "Feedback cooldown must begin only after downstream TTS admission is committed.",
+                failures);
+
+            var admissionHost =
+                new GameObject("Pose Feedback Admission QA Host");
+            try
+            {
+                var coachTts =
+                    admissionHost.AddComponent<CoachTtsController>();
+                coachTts.BeginSession();
+                var receiver =
+                    admissionHost.AddComponent<PoseFeedbackJsonReceiver>();
+                var feedback = new PoseFeedbackMessage
+                {
+                    id = "squat_depth_shallow",
+                    text = "엉덩이를 조금 더 내려 주세요.",
+                    confidence = 1f,
+                    severity = FeedbackSeverity.Warning
+                };
+                var firstAdmission = receiver.ReceiveFeedback(feedback);
+                var duplicateAdmission = receiver.ReceiveFeedback(feedback);
+                Check(firstAdmission && !duplicateAdmission,
+                    "Pose feedback must report true only when a new TTS request is actually scheduled.",
+                    failures);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(admissionHost);
+            }
         }
 
         private static void VerifyMobileUiStructure(ICollection<string> failures)
@@ -351,6 +667,32 @@ namespace Rag.Healthcare.Editor
                 Check(documentRoot?.Q<VisualElement>("phone-notch") == null &&
                       documentRoot?.Q<VisualElement>("phone-home-indicator") == null,
                     "The app UI must not draw a second phone frame inside the physical screen.", failures);
+                var restDurationField = typeof(MobileWorkoutPrototypeView).GetField(
+                    "restDurationSeconds",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Check(
+                    restDurationField != null &&
+                    (int)restDurationField.GetValue(view) == 3,
+                    "The configurable between-set rest must default to three seconds.",
+                    failures);
+                Check(
+                    MobileWorkoutPrototypeView.ShouldStartSetRest(2, 2, 2, 0) &&
+                    !MobileWorkoutPrototypeView.ShouldStartSetRest(2, 2, 2, 2) &&
+                    !MobileWorkoutPrototypeView.ShouldStartSetRest(4, 2, 2, 2) &&
+                    !MobileWorkoutPrototypeView.ShouldStartSetRest(2, 2, 1, 0),
+                    "Two reps by two sets must rest once after rep two, never again at the final target.",
+                    failures);
+                Check(
+                    MobileWorkoutPrototypeView.CalculateWorkoutScore(5, 4) == 80 &&
+                    MobileWorkoutPrototypeView.CalculateWorkoutScore(0, 0) == 0,
+                    "Workout result score must be the bounded correct/total percentage.",
+                    failures);
+                Check(
+                    typeof(MobileWorkoutPrototypeView).GetMethod(
+                        "SetPaidStretchingAccess",
+                        BindingFlags.Instance | BindingFlags.Public) != null,
+                    "The payment layer must have an explicit stretching entitlement hook.",
+                    failures);
 
                 var buildPreviewMethod = typeof(MobileWorkoutPrototypeView).GetMethod(
                     "BuildPreviewPanel",
@@ -774,6 +1116,46 @@ namespace Rag.Healthcare.Editor
             Check(naturalStandingRecovered.RepCount == 0 &&
                   naturalStandingRecovered.CurrentPhase == ExercisePhase.Standing,
                 "A user standing naturally at 165° with a 7° wobble must not inherit a synthetic 180° baseline or count a rep.", failures);
+
+            var slowDetector = new ExercisePhaseDetector();
+            slowDetector.Update(
+                PhaseFeature(170f, 0f, 3000L, -0.25f),
+                settings);
+            var slowDescentPhase = slowDetector.Update(
+                PhaseFeature(139f, -5f, 3100L, -0.08f),
+                settings).CurrentPhase;
+            slowDetector.Update(
+                PhaseFeature(130f, -5f, 3200L, -0.03f),
+                settings);
+            slowDetector.Update(
+                PhaseFeature(122f, -5f, 3300L, -0.01f),
+                settings);
+            var continuedSlowDescentPhase = slowDetector.Update(
+                PhaseFeature(118f, -5f, 3500L, 0.01f),
+                settings).CurrentPhase;
+            slowDetector.Update(
+                PhaseFeature(116f, -2f, 3600L, 0.02f),
+                settings);
+            var slowBottomPhase = slowDetector.Update(
+                PhaseFeature(116f, 0f, 3700L, 0.02f),
+                settings).CurrentPhase;
+            slowDetector.Update(
+                PhaseFeature(130f, 5f, 3800L, -0.02f),
+                settings);
+            slowDetector.Update(
+                PhaseFeature(145f, 5f, 3900L, -0.10f),
+                settings);
+            var slowCompleted = slowDetector.Update(
+                PhaseFeature(165f, 5f, 4000L, -0.25f),
+                settings);
+            Check(slowDescentPhase == ExercisePhase.Descent &&
+                  continuedSlowDescentPhase == ExercisePhase.Descent,
+                "A slow monotonic squat must remain in Descent instead of becoming Unknown or Bottom too early.",
+                failures);
+            Check(slowBottomPhase == ExercisePhase.Bottom &&
+                  slowCompleted.RepCount == 1,
+                "A slow descent-bottom-ascent sequence must count exactly one complete rep.",
+                failures);
         }
 
         private static void VerifyAdaptiveSquatDepthFloor(
@@ -782,7 +1164,9 @@ namespace Rag.Healthcare.Editor
             var settings = new RealtimePoseRuleSettings
             {
                 minimumHipToKneeDepth = 0f,
+                hipToKneeLevelTolerance = 0.03f,
                 minimumHipToKneeDepthFrames = 2,
+                maximumCountableBottomKneeAngle = 135f,
                 adaptiveBottomSampleCount = 3,
                 adaptiveBottomKneeAngleMargin = 8f
             };
@@ -819,14 +1203,14 @@ namespace Rag.Healthcare.Editor
                 adaptiveDetector,
                 settings,
                 ref timestamp,
-                136f,
+                135f,
                 0.02f,
                 2);
             RunDepthRep(
                 adaptiveDetector,
                 settings,
                 ref timestamp,
-                134f,
+                135f,
                 0.01f,
                 2);
             Check(adaptiveDetector.State.RepCount == 3 &&
@@ -856,18 +1240,43 @@ namespace Rag.Healthcare.Editor
                       learnedAngle),
                 "The adaptive profile must freeze after the configured three accepted samples.", failures);
 
-            var aboveKneeDetector = new ExercisePhaseDetector();
+            var nearLevelDetector = new ExercisePhaseDetector();
             timestamp = 9000L;
+            RunDepthRep(
+                nearLevelDetector,
+                settings,
+                ref timestamp,
+                132f,
+                -0.015f,
+                2);
+            Check(nearLevelDetector.State.RepCount == 1 &&
+                  nearLevelDetector.State.AdaptiveBottomSampleCount == 1,
+                "A hip center visually level with the knees must pass the tolerant 2D gate when secondary depth evidence is valid.",
+                failures);
+
+            var secondaryGuardDetector = new ExercisePhaseDetector();
+            RunDepthRep(
+                secondaryGuardDetector,
+                settings,
+                ref timestamp,
+                139f,
+                -0.015f,
+                3);
+            Check(secondaryGuardDetector.State.RepCount == 0,
+                "Passing the tolerant 2D hip/knee gate alone must not count without secondary knee-flexion or hip-drop depth.",
+                failures);
+
+            var aboveKneeDetector = new ExercisePhaseDetector();
             RunDepthRep(
                 aboveKneeDetector,
                 settings,
                 ref timestamp,
                 90f,
-                -0.01f,
+                -0.04f,
                 3);
             Check(aboveKneeDetector.State.RepCount == 0 &&
                   aboveKneeDetector.State.AdaptiveBottomSampleCount == 0,
-                "Even a deeply bent knee angle must not count while the hip center remains above knee height.", failures);
+                "Even a deeply bent knee angle must not count while the hip center remains clearly above the 2D tolerance band.", failures);
 
             var interruptedEvidenceDetector =
                 new ExercisePhaseDetector();
@@ -1042,12 +1451,17 @@ namespace Rag.Healthcare.Editor
             var transformedBottomFeature = ExtractSinglePoseFeature(
                 transformedBottom,
                 settings);
-            Check(Mathf.Abs(originalLeftValgus - transformedBottomFeature.LeftKneeValgusOffset) < 0.01f &&
+            Check(originalBottomFeature.HasKneeWidthRatio &&
+                  transformedBottomFeature.HasKneeWidthRatio &&
+                  Mathf.Abs(
+                      originalBottomFeature.KneeWidthRatio -
+                      transformedBottomFeature.KneeWidthRatio) < 0.01f &&
+                  Mathf.Abs(originalLeftValgus - transformedBottomFeature.LeftKneeValgusOffset) < 0.01f &&
                   Mathf.Abs(originalHipCoordinate - transformedBottomFeature.HipCenterY) < 0.01f &&
                   Mathf.Abs(
                       originalHipToKneeDepth -
                       transformedBottomFeature.HipToKneeDepth) < 0.01f,
-                "Body-scale normalized knee offset, hip coordinate, and hip-to-knee depth must remain stable after scale/translate/mirror transforms.", failures);
+                "Knee-width ratio, body-scale normalized knee offset, hip coordinate, and hip-to-knee depth must remain stable after scale/translate/mirror transforms.", failures);
 
             VerifyPoseQualityHysteresisAndSquatScale(settings, failures);
         }
@@ -1310,14 +1724,63 @@ namespace Rag.Healthcare.Editor
                 "Low-persistence depth warnings on a minority of frames must keep CorrectRep.", failures);
 
             accumulator.Reset();
+            var correctedDepthWarning = new[]
+            {
+                new FeedbackEvent
+                {
+                    Severity = FeedbackSeverity.Warning,
+                    PersistenceRatio = 1f,
+                    RuleId = "squat_depth_shallow"
+                }
+            };
+            for (var i = 0; i < 8; i++)
+            {
+                accumulator.Observe(
+                    true,
+                    i < 5
+                        ? correctedDepthWarning
+                        : Array.Empty<FeedbackEvent>(),
+                    settings);
+            }
+            Check(accumulator.IsCorrect(settings),
+                "A shallow cue corrected before rep completion must not block the main correct score.",
+                failures);
+
+            accumulator.Reset();
             var persistentWarning = new[]
             {
-                new FeedbackEvent { Severity = FeedbackSeverity.Warning, PersistenceRatio = 0.8f }
+                new FeedbackEvent
+                {
+                    RuleId = "squat_torso_tilt",
+                    Severity = FeedbackSeverity.Warning,
+                    PersistenceRatio = 0.8f
+                }
             };
             accumulator.Observe(true, persistentWarning, settings);
             for (var i = 1; i < 8; i++) accumulator.Observe(true, Array.Empty<FeedbackEvent>(), settings);
+            Check(accumulator.IsCorrect(settings),
+                "One stale high-persistence warning must remain correctable during a slow rep.", failures);
+
+            accumulator.Reset();
+            for (var i = 0; i < 8; i++)
+            {
+                accumulator.Observe(
+                    true,
+                    i < 4
+                        ? persistentWarning
+                        : Array.Empty<FeedbackEvent>(),
+                    settings);
+            }
             Check(!accumulator.IsCorrect(settings),
-                "A high-persistence warning must still invalidate the rep.", failures);
+                "A repeated same-rule posture warning must still invalidate the rep.", failures);
+
+            var confirmedRules = new List<string>();
+            accumulator.CollectConfirmedViolationRuleIds(settings, confirmedRules);
+            Check(
+                confirmedRules.Count == 1 &&
+                confirmedRules[0] == "squat_torso_tilt",
+                "Completed-rep reporting must retain the exact confirmed posture rule.",
+                failures);
         }
 
         private static void VerifyDepthUsesMinimumAngle(ICollection<string> failures)
@@ -1335,13 +1798,21 @@ namespace Rag.Healthcare.Editor
                 HasReachedBottomInCurrentRep = true,
                 HasHipToKneeDepth = true,
                 HasReachedHipToKneeDepthInCurrentRep = true,
-                MaximumHipToKneeDepthInCurrentRep = 0.02f
+                MaximumHipToKneeDepthInCurrentRep = 0.02f,
+                MinimumKneeAngleInCurrentRep = 130f,
+                MaximumCountableBottomKneeAngle =
+                    settings.MaximumCountableBottomKneeAngle,
+                MinimumBottomHipDrop = settings.MinimumBottomHipDrop
             };
             var candidates = new RealtimePoseRuleEngine().Evaluate(bottomFeature, stats, phase, settings);
             var hasShallowError = false;
             foreach (var candidate in candidates)
             {
-                if (candidate.RuleId == "squat_depth_shallow") hasShallowError = true;
+                if (candidate.RuleId == "squat_depth_hip_height" ||
+                    candidate.RuleId == "squat_depth_personal_target")
+                {
+                    hasShallowError = true;
+                }
             }
 
             Check(Mathf.Approximately(stats.MinimumKneeAngle, 130f),
@@ -1369,14 +1840,14 @@ namespace Rag.Healthcare.Editor
                 CurrentHipToKneeDepth = -0.04f,
                 MaximumHipToKneeDepthInCurrentRep = -0.04f,
                 RequiredHipToKneeDepth =
-                    settings.MinimumHipToKneeDepth
+                    settings.MinimumAcceptedHipToKneeDepth
             };
             var candidates = new RealtimePoseRuleEngine().Evaluate(bottomFeature, stats, phase, settings);
 
             FeedbackEvent shallow = null;
             foreach (var candidate in candidates)
             {
-                if (candidate.RuleId == "squat_depth_shallow")
+                if (candidate.RuleId == "squat_depth_hip_height")
                 {
                     shallow = candidate;
                     break;
@@ -1384,7 +1855,7 @@ namespace Rag.Healthcare.Editor
             }
 
             Check(shallow != null,
-                "A Bottom pose with hips above knee height must emit squat_depth_shallow guidance.", failures);
+                "A Bottom pose with hips above knee height must emit squat_depth_hip_height guidance.", failures);
             Check(shallow != null &&
                   shallow.Severity == FeedbackSeverity.Warning,
                 "The absolute hip-to-knee floor must be a Warning so it cannot count as a correct rep.", failures);
@@ -1394,6 +1865,125 @@ namespace Rag.Healthcare.Editor
                       out var evidence) &&
                   Mathf.Approximately(evidence, -0.04f),
                 "Depth-floor feedback must expose the signed normalized hip-to-knee evidence.", failures);
+            Check(shallow != null &&
+                  shallow.PreferTemplateText &&
+                  shallow.TemplateText ==
+                  "엉덩이와 무릎 높이가 충분히 가까워지지 않았습니다. 엉덩이를 조금 더 내려 주세요.",
+                "Stage-1 depth failure must explain that consecutive hip/knee level confirmation failed.",
+                failures);
+            var genericDepthRetrieval = new List<RetrievalResult>
+            {
+                new RetrievalResult
+                {
+                    Chunk = new KnowledgeChunk
+                    {
+                        RealtimeText =
+                            "원인 구분이 없는 공통 깊이 안내입니다."
+                    },
+                    Score = 10f
+                }
+            };
+            var primaryMessage = new FeedbackComposer().Compose(
+                shallow,
+                genericDepthRetrieval,
+                200);
+            Check(primaryMessage != null &&
+                  primaryMessage.text == shallow.TemplateText,
+                "Stage-specific depth guidance must reach TTS without being replaced by generic RAG text.",
+                failures);
+
+            var repeatedCandidates = new RealtimePoseRuleEngine().Evaluate(
+                bottomFeature,
+                stats,
+                phase,
+                settings);
+            var repeatedShallow = false;
+            foreach (var candidate in repeatedCandidates)
+            {
+                if (candidate.RuleId == "squat_depth_hip_height")
+                {
+                    repeatedShallow = true;
+                    break;
+                }
+            }
+
+            Check(repeatedShallow &&
+                  !phase.HasIssuedShallowDepthFeedbackInCurrentRep,
+                "A depth cue not yet admitted to TTS must remain eligible on the next Bottom frame.",
+                failures);
+            phase.HasIssuedBottomDecisionFeedbackInCurrentRep = true;
+            var deliveredCandidates = new RealtimePoseRuleEngine().Evaluate(
+                bottomFeature,
+                stats,
+                phase,
+                settings);
+            var repeatedAfterDelivery = false;
+            foreach (var candidate in deliveredCandidates)
+            {
+                if (candidate.RuleId == "squat_depth_hip_height")
+                {
+                    repeatedAfterDelivery = true;
+                    break;
+                }
+            }
+
+            Check(repeatedAfterDelivery &&
+                  phase.HasIssuedBottomDecisionFeedbackInCurrentRep,
+                "The rule event must remain observable for rep scoring while the orchestrator limits TTS to once per rep.",
+                failures);
+
+            var secondaryPhase = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasHipToKneeDepth = true,
+                CurrentHipToKneeDepth = -0.01f,
+                MaximumHipToKneeDepthInCurrentRep = -0.01f,
+                HasReachedHipToKneeDepthInCurrentRep = true,
+                HasReachedSecondaryDepthInCurrentRep = false,
+                MinimumKneeAngleInCurrentRep = 150f,
+                RequiredHipToKneeDepth =
+                    settings.MinimumAcceptedHipToKneeDepth,
+                MaximumCountableBottomKneeAngle =
+                    settings.MaximumCountableBottomKneeAngle
+            };
+            var secondaryCandidates =
+                new RealtimePoseRuleEngine().Evaluate(
+                    ReliableFeature(150f, 1500L),
+                    stats,
+                    secondaryPhase,
+                    settings);
+            FeedbackEvent secondaryDepth = null;
+            foreach (var candidate in secondaryCandidates)
+            {
+                if (candidate.RuleId == "squat_depth_personal_target")
+                {
+                    secondaryDepth = candidate;
+                    break;
+                }
+            }
+
+            Check(secondaryDepth != null &&
+                  secondaryDepth.Evidence.TryGetValue(
+                      "minimumKneeAngle",
+                      out var secondaryEvidence) &&
+                  Mathf.Approximately(secondaryEvidence, 150f),
+                "A pose that passes 2D hip/knee level must still expose secondary-depth evidence when flexion and hip drop are insufficient.",
+                failures);
+            Check(secondaryDepth != null &&
+                  secondaryDepth.PreferTemplateText &&
+                  secondaryDepth.TemplateText ==
+                  "정렬은 좋습니다. 현재 가능한 범위에서 조금 더 앉아 주세요.",
+                "The personal-depth failure must keep its dedicated TTS text.",
+                failures);
+            var secondaryMessage = new FeedbackComposer().Compose(
+                secondaryDepth,
+                genericDepthRetrieval,
+                200);
+            Check(secondaryMessage != null &&
+                  secondaryMessage.text == secondaryDepth.TemplateText,
+                "Stage-2 depth guidance must reach TTS without being replaced by generic RAG text.",
+                failures);
         }
 
         private static void VerifyBottomReachedSuppressesShallowWarning(ICollection<string> failures)
@@ -1413,7 +2003,11 @@ namespace Rag.Healthcare.Editor
                 CurrentPhase = ExercisePhase.Bottom,
                 Exercise = "squat",
                 HasReachedBottomInCurrentRep = true,
-                MinimumKneeAngleInCurrentRep = 172f
+                HasReachedHipToKneeDepthInCurrentRep = true,
+                MinimumKneeAngleInCurrentRep = 130f,
+                MaximumCountableBottomKneeAngle =
+                    settings.MaximumCountableBottomKneeAngle,
+                MinimumBottomHipDrop = settings.MinimumBottomHipDrop
             };
             var feature = ReliableFeature(172f, 2000L);
             var candidates = new RealtimePoseRuleEngine().Evaluate(feature, stats, phase, settings);
@@ -1421,7 +2015,8 @@ namespace Rag.Healthcare.Editor
             FeedbackEvent shallow = null;
             foreach (var candidate in candidates)
             {
-                if (candidate.RuleId == "squat_depth_shallow")
+                if (candidate.RuleId == "squat_depth_hip_height" ||
+                    candidate.RuleId == "squat_depth_personal_target")
                 {
                     shallow = candidate;
                     break;
@@ -1429,7 +2024,331 @@ namespace Rag.Healthcare.Editor
             }
 
             Check(shallow == null,
-                "Bottom + HasReachedBottomInCurrentRep must not emit squat_depth_shallow (no shallow nagging).", failures);
+                "A sequentially passed Bottom must not emit either shallow-depth decision.", failures);
+        }
+
+        private static void VerifySequentialBottomDecision(
+            ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var feature = ReliableFeature(145f, 1900L);
+            var stableStats = new PoseWindowStats
+            {
+                FrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameCount =
+                    settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameRatio = 1f,
+                MinimumKneeAngle = 145f
+            };
+
+            var hipFailure = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasHipToKneeDepth = true,
+                MaximumHipToKneeDepthInCurrentRep = -0.04f,
+                MinimumKneeAngleInCurrentRep = 145f,
+                MaximumCountableBottomKneeAngle =
+                    settings.MaximumCountableBottomKneeAngle,
+                MinimumBottomHipDrop = settings.MinimumBottomHipDrop
+            };
+            var hipCandidates = new RealtimePoseRuleEngine().Evaluate(
+                feature,
+                stableStats,
+                hipFailure,
+                settings);
+            Check(
+                hipCandidates.Count == 1 &&
+                hipCandidates[0].RuleId ==
+                    "squat_depth_hip_height" &&
+                hipFailure.CurrentBottomDecision ==
+                    SquatBottomDecision.HipHeightFailed,
+                "The first sequential gate must emit only HipHeightFailed.",
+                failures);
+
+            feature.HasKneeWidthRatio = true;
+            feature.KneeWidthRatio = 0.65f;
+            feature.HasLeftKneeValgus = true;
+            feature.LeftKneeValgusOffset = 0.2f;
+            var collapseStats = new PoseWindowStats
+            {
+                FrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameCount =
+                    settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameRatio = 1f,
+                KneeWidthObservationRatio = 1f,
+                MinimumKneeWidthRatio = 0.65f,
+                KneeCollapseViolationRatio = 1f,
+                MaximumConsecutiveKneeCollapseFrames = 2,
+                KneeAlignmentViolationRatio = 1f,
+                MinimumKneeAngle = 145f
+            };
+            var collapsePhase = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasReachedHipToKneeDepthInCurrentRep = true,
+                MinimumKneeAngleInCurrentRep = 145f,
+                MaximumHipDropInCurrentRep = 0.06f,
+                MaximumCountableBottomKneeAngle =
+                    settings.MaximumCountableBottomKneeAngle,
+                MinimumBottomHipDrop = settings.MinimumBottomHipDrop
+            };
+            var collapseCandidates =
+                new RealtimePoseRuleEngine().Evaluate(
+                    feature,
+                    collapseStats,
+                    collapsePhase,
+                    settings);
+            Check(
+                collapseCandidates.Count == 1 &&
+                collapseCandidates[0].RuleId ==
+                    "squat_knee_collapse" &&
+                collapsePhase.CurrentBottomDecision ==
+                    SquatBottomDecision.KneeCollapseFailed,
+                "A confirmed inward knee collapse must be the only second-gate decision.",
+                failures);
+
+            feature.HasKneeWidthRatio = false;
+            feature.HasLeftKneeValgus = false;
+            var personalPhase = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasReachedHipToKneeDepthInCurrentRep = true,
+                MinimumKneeAngleInCurrentRep = 145f,
+                MaximumHipDropInCurrentRep = 0.06f,
+                MaximumCountableBottomKneeAngle =
+                    settings.MaximumCountableBottomKneeAngle,
+                MinimumBottomHipDrop = settings.MinimumBottomHipDrop
+            };
+            var personalCandidates =
+                new RealtimePoseRuleEngine().Evaluate(
+                    feature,
+                    stableStats,
+                    personalPhase,
+                    settings);
+            Check(
+                personalCandidates.Count == 1 &&
+                personalCandidates[0].RuleId ==
+                    "squat_depth_personal_target" &&
+                personalPhase.CurrentBottomDecision ==
+                    SquatBottomDecision.PersonalDepthFailed,
+                "After height and alignment pass, only PersonalDepthFailed may be emitted.",
+                failures);
+
+            var passedPhase = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasReachedHipToKneeDepthInCurrentRep = true,
+                MinimumKneeAngleInCurrentRep = 130f,
+                MaximumHipDropInCurrentRep = 0.06f,
+                MaximumCountableBottomKneeAngle =
+                    settings.MaximumCountableBottomKneeAngle,
+                MinimumBottomHipDrop = settings.MinimumBottomHipDrop
+            };
+            var passedCandidates =
+                new RealtimePoseRuleEngine().Evaluate(
+                    ReliableFeature(130f, 1950L),
+                    stableStats,
+                    passedPhase,
+                    settings);
+            Check(
+                passedCandidates.Count == 0 &&
+                passedPhase.CurrentBottomDecision ==
+                    SquatBottomDecision.Passed &&
+                passedPhase.HasPassedBottomDecisionInCurrentRep,
+                "A passed Bottom must remain silent until Standing completes the rep.",
+                failures);
+
+            var deepStats = new PoseWindowStats
+            {
+                FrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameCount =
+                    settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameRatio = 1f,
+                MinimumKneeAngle = 40f,
+                DeepDepthViolationRatio = 1f,
+                MaximumConsecutiveExcessiveDepthFrames = 3
+            };
+            var deepPhase = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasReachedHipToKneeDepthInCurrentRep = true,
+                MinimumKneeAngleInCurrentRep = 40f,
+                MaximumCountableBottomKneeAngle =
+                    settings.MaximumCountableBottomKneeAngle,
+                MinimumBottomHipDrop = settings.MinimumBottomHipDrop
+            };
+            var deepCandidates =
+                new RealtimePoseRuleEngine().Evaluate(
+                    ReliableFeature(40f, 2000L),
+                    deepStats,
+                    deepPhase,
+                    settings);
+            Check(
+                deepCandidates.Count == 0 &&
+                deepPhase.CurrentBottomDecision ==
+                    SquatBottomDecision.Passed &&
+                deepPhase.HasPassedBottomDecisionInCurrentRep,
+                "A deep squat must pass after the height, alignment, and personal-depth gates.",
+                failures);
+        }
+
+        private static void VerifySessionDepthPersonalization(
+            ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var detector = new ExercisePhaseDetector();
+            var first = detector.RegisterPersonalDepthFailureCandidate(
+                145f,
+                0.06f,
+                settings);
+            var second = detector.RegisterPersonalDepthFailureCandidate(
+                146f,
+                0.061f,
+                settings);
+            var third = detector.RegisterPersonalDepthFailureCandidate(
+                144f,
+                0.059f,
+                settings);
+            Check(
+                !first &&
+                !second &&
+                third &&
+                detector.State.HasPersonalizedDepthProfile &&
+                Mathf.Abs(
+                    detector.State.MaximumCountableBottomKneeAngle -
+                    148f) < 0.001f &&
+                Mathf.Abs(
+                    detector.State.MinimumBottomHipDrop -
+                    0.05f) < 0.001f,
+                "Three consistent personal-depth failures must adapt only the next-rep targets inside the safety clamps.",
+                failures);
+            Check(
+                detector.ConsumePersonalizedDepthAnnouncement() &&
+                !detector.ConsumePersonalizedDepthAnnouncement(),
+                "The personalized-depth announcement must be consumable only once.",
+                failures);
+
+            var inconsistent = new ExercisePhaseDetector();
+            inconsistent.RegisterPersonalDepthFailureCandidate(
+                140f,
+                0.05f,
+                settings);
+            inconsistent.RegisterPersonalDepthFailureCandidate(
+                152f,
+                0.075f,
+                settings);
+            var inconsistentApplied =
+                inconsistent.RegisterPersonalDepthFailureCandidate(
+                    145f,
+                    0.06f,
+                    settings);
+            Check(
+                !inconsistentApplied &&
+                !inconsistent.State.HasPersonalizedDepthProfile &&
+                inconsistent.State.PersonalDepthFailureSampleCount == 0,
+                "Inconsistent failed depths must reset the candidate sequence without relaxing the target.",
+                failures);
+
+            detector.Reset();
+            Check(
+                !detector.State.HasPersonalizedDepthProfile &&
+                detector.State.MaximumCountableBottomKneeAngle == 0f,
+                "A new-session reset must clear the runtime personalized depth profile.",
+                failures);
+        }
+
+        private static void VerifyDeepSquatCountsAsCorrect(
+            ICollection<string> failures)
+        {
+            var settings = new RealtimePoseRuleSettings();
+            var stats = new PoseWindowStats
+            {
+                FrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameCount = settings.minimumRuleEvaluationFrames,
+                ValidCoreFrameRatio = 1f,
+                MinimumKneeAngle = 40f,
+                DeepDepthViolationRatio = 1f,
+                MaximumConsecutiveExcessiveDepthFrames = 2
+            };
+            var phase = new ExercisePhaseState
+            {
+                CurrentPhase = ExercisePhase.Bottom,
+                Exercise = "squat",
+                HasReachedBottomInCurrentRep = true,
+                HasReachedHipToKneeDepthInCurrentRep = true,
+                MinimumKneeAngleInCurrentRep = 40f,
+                MaximumCountableBottomKneeAngle =
+                    settings.MaximumCountableBottomKneeAngle,
+                MinimumBottomHipDrop = settings.MinimumBottomHipDrop
+            };
+            var feature = ReliableFeature(40f, 2100L);
+            var candidates = new RealtimePoseRuleEngine().Evaluate(
+                feature,
+                stats,
+                phase,
+                settings);
+
+            Check(
+                candidates.Count == 0 &&
+                phase.CurrentBottomDecision ==
+                    SquatBottomDecision.Passed &&
+                phase.HasPassedBottomDecisionInCurrentRep,
+                "Consecutive deep frames must be accepted as a passed squat without a warning event.",
+                failures);
+
+            var accumulator = new RepQualityAccumulator();
+            var retiredProviderEvent = new[]
+            {
+                new FeedbackEvent
+                {
+                    RuleId = "squat_depth_excessive",
+                    Severity = FeedbackSeverity.Warning,
+                    PersistenceRatio = 1f
+                }
+            };
+            for (var i = 0; i < settings.minimumValidRepFrames + 2; i++)
+            {
+                accumulator.Observe(
+                    true,
+                    retiredProviderEvent,
+                    settings);
+            }
+
+            Check(
+                accumulator.IsCorrect(settings),
+                "A retired excessive-depth event from an older provider must not invalidate CorrectRep.",
+                failures);
+
+            var receiverObject =
+                new GameObject("Deep Feedback Suppression QA");
+            try
+            {
+                var receiver =
+                    receiverObject.AddComponent<PoseFeedbackJsonReceiver>();
+                var accepted = receiver.ReceiveFeedback(
+                    new PoseFeedbackMessage
+                    {
+                        id = "squat_depth_excessive",
+                        text =
+                            "너무 깊게 내려갔습니다. 깊이를 조금 줄여 주세요.",
+                        confidence = 1f,
+                        severity = FeedbackSeverity.Warning
+                    });
+                Check(
+                    !accepted &&
+                    receiver.LatestFeedback == null,
+                    "Legacy excessive-depth messages must be rejected before UI and TTS delivery.",
+                    failures);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(receiverObject);
+            }
         }
 
         private static void VerifyKneeAlignmentPhaseGateAndSeverity(ICollection<string> failures)
@@ -1458,8 +2377,8 @@ namespace Rag.Healthcare.Editor
                 "Standing phase must not emit knee alignment events even with high valgus.", failures);
 
             feature.RightKneeValgusOffset = settings.MaximumKneeValgusOffset * 1.2f;
-            var bottomPhase = new ExercisePhaseState { CurrentPhase = ExercisePhase.Bottom, Exercise = "squat" };
-            var bottomEvents = new RealtimePoseRuleEngine().Evaluate(feature, stats, bottomPhase, settings);
+            var descentPhase = new ExercisePhaseState { CurrentPhase = ExercisePhase.Descent, Exercise = "squat" };
+            var bottomEvents = new RealtimePoseRuleEngine().Evaluate(feature, stats, descentPhase, settings);
             FeedbackEvent mild = null;
             foreach (var candidate in bottomEvents)
             {
@@ -1471,7 +2390,7 @@ namespace Rag.Healthcare.Editor
             }
 
             Check(mild != null,
-                "Bottom phase with mild valgus must emit a knee alignment event.", failures);
+                "Active descent with mild valgus must emit a knee alignment event.", failures);
             Check(mild != null && mild.Severity == FeedbackSeverity.Info,
                 "Mild valgus (offset <= MaximumKneeValgusOffset * 1.4) must be Info, not Warning.", failures);
             Check(mild != null && mild.Side == "right",

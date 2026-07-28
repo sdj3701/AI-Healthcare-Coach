@@ -24,6 +24,17 @@ namespace Rag.Healthcare.Rag.Runtime
                 return results;
             }
 
+            if (phaseState != null &&
+                phaseState.CurrentPhase == ExercisePhase.Bottom)
+            {
+                EvaluateSquatDepth(
+                    feature,
+                    stats,
+                    phaseState,
+                    settings);
+                return results;
+            }
+
             if (stats.FrameCount < settings.minimumRuleEvaluationFrames)
             {
                 return results;
@@ -31,19 +42,10 @@ namespace Rag.Healthcare.Rag.Runtime
 
             if (stats.ValidCoreFrameRatio < settings.minimumValidCoreFrameRatio)
             {
-                AddEvent(
-                    "squat_visibility_low",
-                    "squat_visibility_low",
-                    "body",
-                    string.Empty,
-                    FeedbackSeverity.Info,
-                    0.7f,
-                    1f - stats.ValidCoreFrameRatio,
-                    feature.TimestampUnixMilliseconds,
-                    "카메라에 전신이 잘 보이도록 한 걸음 뒤로 이동해 주세요.",
-                    phaseState,
-                    "validCoreFrameRatio",
-                    stats.ValidCoreFrameRatio);
+                AddTrackingUnavailableEvent(
+                    feature,
+                    stats,
+                    phaseState);
                 return results;
             }
 
@@ -52,7 +54,6 @@ namespace Rag.Healthcare.Rag.Runtime
             EvaluatePelvicTilt(feature, stats, phaseState, settings);
             EvaluateCenterBalance(feature, stats, phaseState, settings);
             EvaluateKneeSymmetry(feature, stats, phaseState, settings);
-            EvaluateSquatDepth(feature, stats, phaseState, settings);
             return results;
         }
 
@@ -251,78 +252,225 @@ namespace Rag.Healthcare.Rag.Runtime
             ExercisePhaseState phaseState,
             RealtimePoseRuleSettings settings)
         {
-            if (phaseState == null || phaseState.CurrentPhase != ExercisePhase.Bottom)
+            if (phaseState == null ||
+                phaseState.CurrentPhase != ExercisePhase.Bottom)
             {
-                return;
-            }
-
-            // Prefer this-rep minimum when available; window min alone can miss the deepest squat
-            // if those frames rolled out. PoseWindowStats sets MinimumKneeAngle=0 when kneeAngleCount==0.
-            var depthAngle = stats.MinimumKneeAngle;
-            var repMin = phaseState.MinimumKneeAngleInCurrentRep;
-            if (repMin > 0f && repMin < 180f)
-            {
-                depthAngle = depthAngle <= 0f ? repMin : Mathf.Min(depthAngle, repMin);
-            }
-
-            // Once Bottom has been recognized for this rep, never nag about shallow depth.
-            if (phaseState.HasReachedBottomInCurrentRep)
-            {
-                if (depthAngle < settings.MinimumBottomKneeAngle)
+                if (phaseState != null)
                 {
-                    AddEvent(
-                        "squat_depth_deep",
-                        "squat_depth_deep",
-                        PoseJointNames.LeftKnee,
-                        string.Empty,
-                        FeedbackSeverity.Warning,
-                        ConfidenceFromOffset(settings.MinimumBottomKneeAngle, depthAngle),
-                        stats.DeepDepthViolationRatio,
-                        feature.TimestampUnixMilliseconds,
-                        "너무 깊게 내려갔습니다. 무릎과 허리에 부담이 없도록 깊이를 조금 줄여 주세요.",
-                        phaseState,
-                        "averageKneeAngle",
-                        depthAngle);
+                    phaseState.CurrentBottomDecision =
+                        SquatBottomDecision.NotAtBottom;
                 }
 
                 return;
             }
 
-            if (!phaseState.HasHipToKneeDepth ||
-                float.IsNegativeInfinity(
-                    phaseState.MaximumHipToKneeDepthInCurrentRep))
+            phaseState.CurrentKneeWidthRatio =
+                feature.HasKneeWidthRatio
+                    ? feature.KneeWidthRatio
+                    : 0f;
+            if (!feature.HasReliableSquatCore ||
+                stats.FrameCount > 0 &&
+                stats.ValidCoreFrameRatio <
+                settings.MinimumValidCoreFrameRatio)
             {
+                phaseState.CurrentBottomDecision =
+                    SquatBottomDecision.TrackingUnavailable;
+                AddTrackingUnavailableEvent(
+                    feature,
+                    stats,
+                    phaseState);
                 return;
             }
 
-            // The learned knee angle may help recognize Bottom, but it must never
-            // replace this absolute anti-abuse floor.
+            var kneeCollapse =
+                HasConfirmedKneeCollapse(feature, stats, settings);
             if (!phaseState.HasReachedHipToKneeDepthInCurrentRep)
             {
-                var maximumDepth =
-                    phaseState.MaximumHipToKneeDepthInCurrentRep;
-                var shortage = Mathf.Max(
-                    0f,
-                    settings.MinimumHipToKneeDepth - maximumDepth);
+                // Safety exception: do not ask the user to descend farther while
+                // inward knee collapse is already confirmed.
+                if (kneeCollapse)
+                {
+                    EmitKneeCollapse(
+                        feature,
+                        stats,
+                        phaseState);
+                    return;
+                }
+
+                phaseState.CurrentBottomDecision =
+                    SquatBottomDecision.HipHeightFailed;
                 AddEvent(
-                    "squat_depth_shallow",
-                    "squat_depth_shallow",
+                    "squat_depth_hip_height",
+                    "squat_depth_hip_height",
                     PoseJointNames.LeftHip,
                     string.Empty,
                     FeedbackSeverity.Warning,
-                    Mathf.Clamp01(0.65f + shortage * 4f),
+                    0.9f,
                     Mathf.Max(
                         stats.ShallowDepthViolationRatio,
                         0.5f),
                     feature.TimestampUnixMilliseconds,
-                    "엉덩이를 무릎 높이까지 내려가야 횟수로 인정됩니다.",
+                    "엉덩이와 무릎 높이가 충분히 가까워지지 않았습니다. 엉덩이를 조금 더 내려 주세요.",
                     phaseState,
                     "hipToKneeDepth",
-                    maximumDepth);
+                    phaseState.MaximumHipToKneeDepthInCurrentRep,
+                    preferTemplateText: true);
+                return;
             }
+
+            if (kneeCollapse)
+            {
+                EmitKneeCollapse(
+                    feature,
+                    stats,
+                    phaseState);
+                return;
+            }
+
+            var maximumKneeAngle =
+                phaseState.MaximumCountableBottomKneeAngle > 0f
+                    ? phaseState.MaximumCountableBottomKneeAngle
+                    : settings.MaximumCountableBottomKneeAngle;
+            var minimumHipDrop =
+                phaseState.MinimumBottomHipDrop > 0f
+                    ? phaseState.MinimumBottomHipDrop
+                    : settings.MinimumBottomHipDrop;
+            var minimumKneeAngle =
+                phaseState.MinimumKneeAngleInCurrentRep;
+            var maximumHipDrop =
+                phaseState.MaximumHipDropInCurrentRep;
+            var hasPersonalDepth =
+                minimumKneeAngle > 0f &&
+                minimumKneeAngle < 180f &&
+                minimumKneeAngle <= maximumKneeAngle ||
+                maximumHipDrop >= minimumHipDrop;
+            if (!hasPersonalDepth)
+            {
+                phaseState.CurrentBottomDecision =
+                    SquatBottomDecision.PersonalDepthFailed;
+                var personalDepth = AddEvent(
+                    "squat_depth_personal_target",
+                    "squat_depth_personal_target",
+                    PoseJointNames.LeftHip,
+                    string.Empty,
+                    FeedbackSeverity.Warning,
+                    0.9f,
+                    Mathf.Max(
+                        stats.ShallowDepthViolationRatio,
+                        0.5f),
+                    feature.TimestampUnixMilliseconds,
+                    "정렬은 좋습니다. 현재 가능한 범위에서 조금 더 앉아 주세요.",
+                    phaseState,
+                    "minimumKneeAngle",
+                    minimumKneeAngle,
+                    preferTemplateText: true);
+                personalDepth.Evidence["maximumHipDrop"] =
+                    maximumHipDrop;
+                personalDepth.Evidence["activeMaximumKneeAngle"] =
+                    maximumKneeAngle;
+                personalDepth.Evidence["activeMinimumHipDrop"] =
+                    minimumHipDrop;
+                return;
+            }
+
+            // A deep bottom is accepted once height, knee alignment, and the
+            // personal depth target have passed. Minimum-knee-angle statistics
+            // remain available for diagnostics but do not reject the rep.
+            phaseState.CurrentBottomDecision =
+                SquatBottomDecision.Passed;
+            phaseState.HasPassedBottomDecisionInCurrentRep = true;
         }
 
-        private void AddEvent(
+        private static bool HasConfirmedKneeCollapse(
+            PoseFeatureFrame feature,
+            PoseWindowStats stats,
+            RealtimePoseRuleSettings settings)
+        {
+            if (feature == null ||
+                stats == null ||
+                settings == null ||
+                stats.KneeWidthObservationRatio <
+                settings.MinimumKneeObservationRatio)
+            {
+                return false;
+            }
+
+            var widthViolation =
+                stats.MaximumConsecutiveKneeCollapseFrames >=
+                    settings.MinimumKneeCollapseFrames ||
+                stats.KneeCollapseViolationRatio >=
+                    settings.MinimumViolationRatio;
+            if (!widthViolation)
+            {
+                return false;
+            }
+
+            var currentOffsetViolation =
+                feature.HasLeftKneeValgus &&
+                feature.LeftKneeValgusOffset >
+                settings.MaximumKneeValgusOffset ||
+                feature.HasRightKneeValgus &&
+                feature.RightKneeValgusOffset >
+                settings.MaximumKneeValgusOffset;
+            var persistentOffsetViolation =
+                stats.KneeAlignmentViolationRatio >=
+                settings.MinimumViolationRatio;
+            return currentOffsetViolation ||
+                   persistentOffsetViolation;
+        }
+
+        private void EmitKneeCollapse(
+            PoseFeatureFrame feature,
+            PoseWindowStats stats,
+            ExercisePhaseState phaseState)
+        {
+            phaseState.CurrentBottomDecision =
+                SquatBottomDecision.KneeCollapseFailed;
+            phaseState.HasKneeCollapseInCurrentRep = true;
+            AddEvent(
+                "squat_knee_collapse",
+                "squat_knee_collapse",
+                PoseJointNames.LeftKnee,
+                string.Empty,
+                FeedbackSeverity.Warning,
+                0.95f,
+                stats.KneeCollapseViolationRatio,
+                feature.TimestampUnixMilliseconds,
+                "무릎이 안쪽으로 모입니다. 무릎을 발끝 방향으로 조금 벌려 주세요.",
+                phaseState,
+                "kneeWidthRatio",
+                stats.MinimumKneeWidthRatio,
+                preferTemplateText: true);
+        }
+
+        private void AddTrackingUnavailableEvent(
+            PoseFeatureFrame feature,
+            PoseWindowStats stats,
+            ExercisePhaseState phaseState)
+        {
+            if (phaseState != null)
+            {
+                phaseState.CurrentBottomDecision =
+                    SquatBottomDecision.TrackingUnavailable;
+            }
+
+            AddEvent(
+                "squat_visibility_low",
+                "squat_visibility_low",
+                "body",
+                string.Empty,
+                FeedbackSeverity.Info,
+                0.7f,
+                1f - stats.ValidCoreFrameRatio,
+                feature.TimestampUnixMilliseconds,
+                "카메라에 전신이 보이도록 위치를 조정해 주세요.",
+                phaseState,
+                "validCoreFrameRatio",
+                stats.ValidCoreFrameRatio,
+                preferTemplateText: true);
+        }
+
+        private FeedbackEvent AddEvent(
             string id,
             string ruleId,
             string joint,
@@ -334,7 +482,8 @@ namespace Rag.Healthcare.Rag.Runtime
             string text,
             ExercisePhaseState phaseState,
             string evidenceKey,
-            float evidenceValue)
+            float evidenceValue,
+            bool preferTemplateText = false)
         {
             var feedbackEvent = RentEvent();
             feedbackEvent.Id = id;
@@ -347,10 +496,15 @@ namespace Rag.Healthcare.Rag.Runtime
             feedbackEvent.PersistenceRatio = Mathf.Clamp01(persistenceRatio);
             feedbackEvent.TimestampUnixMilliseconds = timestampUnixMilliseconds;
             feedbackEvent.TemplateText = text;
+            feedbackEvent.PreferTemplateText = preferTemplateText;
             feedbackEvent.Phase = phaseState == null ? ExercisePhase.Unknown : phaseState.CurrentPhase;
+            feedbackEvent.BottomDecision = phaseState == null
+                ? SquatBottomDecision.NotAtBottom
+                : phaseState.CurrentBottomDecision;
             feedbackEvent.Evidence.Clear();
             feedbackEvent.Evidence[evidenceKey] = evidenceValue;
             results.Add(feedbackEvent);
+            return feedbackEvent;
         }
 
         private FeedbackEvent RentEvent()

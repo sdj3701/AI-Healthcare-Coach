@@ -6,9 +6,12 @@
 
 ## 결론
 
-현재 구현은 올바른 자세를 별도 점수로 판정하지 않는다.
-
-대신 MediaPipe 관절 프레임에서 스쿼트 관련 feature를 계산하고, 최근 분석 창 안에서 특정 오류 조건이 반복되면 피드백을 발생시킨다. 즉, 현재 기준에서 "올바른 자세"는 필수 관절이 안정적으로 보이고 아래 오류 조건이 임계값을 넘지 않는 상태에 가깝다.
+현재 구현은 최저점에서 `SquatBottomDecision` 하나를 순차적으로 확정한다.
+`HipHeightFailed → KneeCollapseFailed → PersonalDepthFailed →
+Passed` 순서로 판정하므로, 한 최저점에서 서로 반대인 깊이 TTS가 함께
+예약되지 않는다. 이전의 과도한 깊이 실패 판정은 사용하지 않는다. `Passed`는 최저점에서 말하지 않고
+`Ascent` 후 `Standing`으로 복귀해 전체 반복이 끝났을 때만 올바른 반복 TTS로
+출력한다.
 
 ## 현재 동작 경로
 
@@ -83,6 +86,8 @@
 | `ShoulderLevelDelta` | 좌우 shoulder y 차이 | 어깨 높이 차이 참고 |
 | `HipCenterYVelocityPerSecond` | 이전 프레임 대비 hip center y 변화 | 동작 흐름 참고 |
 | `KneeAngleVelocityDegreesPerSecond` | 이전 프레임 대비 무릎 각도 변화 | 하강/상승 phase 판단 |
+| `HipToKneeDepth` | `(hipCenterY - kneeCenterY) / bodyScale` | 1차 엉덩이–무릎 높이 gate |
+| `KneeWidthRatio` | 좌우 무릎 x 간격 / 좌우 발목 x 간격 | 최저점 무릎 안쪽 붕괴 판단 |
 
 현재 실시간 규칙 엔진에서 직접 피드백으로 쓰는 항목은 무릎 정렬, 상체 기울기, 골반 기울기, 중심 균형, 좌우 무릎 대칭, 스쿼트 깊이다.
 
@@ -107,11 +112,17 @@
 | `bottomExitKneeAngle` | `150` | Bottom→Ascent 전환 여유 각도 |
 | `maximumBottomKneeAngle` | `170` | 정상 깊이 상한. 이보다 크면 얕음 계열 피드백 |
 | `maximumRecognizableBottomKneeAngle` | `175` | 이보다 크면 얕음 Warning. 170~175는 Info 권고 |
-| `minimumBottomKneeAngle` | `55` | 바닥 자세에서 이보다 작으면 너무 깊음 |
+| `minimumBottomKneeAngle` | `55` | 기존 깊은 각도 진단 통계 기준. 현재 합격/실패에는 사용하지 않음 |
 | `maximumLeftRightKneeAngleDelta` | `18` | 좌우 무릎 각도 차이 허용치 |
 | `maximumTorsoTiltDegrees` | `42` | 상체 기울기 허용 각도 |
 | `maximumPelvicTiltRatio` | `0.25` | 골반선-어깨선 상대 기울기 허용치 (약 14°) |
 | `maximumCenterBalanceOffset` | `0.16` | 중심 쏠림 허용치 |
+| `minimumKneeWidthRatio` | `0.80` | 이 값 미만이면 무릎 안쪽 붕괴 후보 |
+| `minimumKneeCollapseFrames` | `2` | 무릎 붕괴 최소 연속 프레임 |
+| `minimumExcessiveDepthFrames` | `2` | 기존 깊은 각도 연속 프레임 진단값. 현재 TTS·감점에는 사용하지 않음 |
+| `personalDepthFailureSampleCount` | `3` | 세션 깊이 기준 보정에 필요한 연속 적격 실패 |
+| `maximumPersonalizedBottomKneeAngle` | `150` | 개인화된 무릎 각도 기준의 절대 상한 |
+| `minimumPersonalizedBottomHipDrop` | `0.05` | 개인화된 골반 하강 기준의 절대 하한 |
 | `phaseVelocityDeadZoneDegreesPerSecond` | `12` | phase 변화 무시 구간 |
 | `duplicateCooldownSeconds` | `3` | 같은 피드백 반복 제한 |
 | `minimumGlobalFeedbackIntervalSeconds` | `1.5` | 전체 피드백 최소 간격 |
@@ -168,17 +179,51 @@ hip 또는 shoulder의 화면상 가로 간격이 `0.08` 미만인 옆모습/가
 
 양쪽 무릎 관찰 비율이 모두 `minimumKneeObservationRatio` 이상일 때만 평가한다. 한쪽이 불안정하면 대칭 판정을 건너뛴다. 양쪽이 충분히 관찰되고 각도 차이가 `maximumLeftRightKneeAngleDelta`보다 크며 위반 비율이 `minimumViolationRatio` 이상이면 좌우 무릎 굽힘이 다르다는 피드백을 낸다.
 
-### 7. 스쿼트 깊이
+### 7. 스쿼트 최저점 순차 판정
 
-스쿼트 phase가 `Bottom`일 때만 깊이 피드백을 낸다. 판정 각도 `depthAngle`은 분석 창의 `MinimumKneeAngle`과 이번 rep의 `MinimumKneeAngleInCurrentRep` 중 더 깊은(작은) 값을 쓴다. 창에 무릎 샘플이 없어 `MinimumKneeAngle=0`이면 rep 최저각만 사용한다.
+`Bottom`에서는 다음 순서로 결과 하나만 확정한다.
 
-`HasReachedBottomInCurrentRep`이면 얕음(`squat_depth_shallow`)은 내지 않는다. 너무 깊은 경우(`depthAngle < minimumBottomKneeAngle`)만 Warning한다.
+1. **1차 엉덩이–무릎 높이**:
+   `hipToKneeDepth >= -0.03`이 신뢰 가능한 연속 2프레임에서 확인되어야 한다.
+   실패하면 `squat_depth_hip_height`와
+   `엉덩이와 무릎 높이가 충분히 가까워지지 않았습니다. 엉덩이를 조금 더 내려
+   주세요.`를 사용한다.
+2. **무릎 안쪽 붕괴**:
+   `kneeWidthRatio < 0.80`이 연속 2프레임 또는 유효 관찰의 35% 이상이며 기존
+   hip-knee-ankle 정렬 offset도 위반할 때 `squat_knee_collapse`를 확정한다.
+   1차 높이도 부족하지만 붕괴가 명확하면 안전을 위해 더 내려가라는 안내보다
+   무릎 정렬 안내를 우선한다.
+3. **개인 목표 깊이**:
+   이번 반복의 최소 무릎 각도가 활성 기준(초기 `135°`) 이하이거나 서기 대비
+   최대 골반 하강량이 활성 기준(초기 `0.08`) 이상이면 통과한다. 둘 다
+   부족하면 `squat_depth_personal_target`과
+   `정렬은 좋습니다. 현재 가능한 범위에서 조금 더 앉아 주세요.`를 사용한다.
+4. 위 조건을 모두 통과하면 무릎 각도가 기존 깊은 각도 기준보다 작더라도
+   `Passed`로 표시하고 최저점에서는 TTS를 보류한다. `squat_depth_excessive`
+   이벤트, 감점, 세션 문제 기록은 생성하지 않는다.
 
-- `HasReachedBottomInCurrentRep == false`이고 `depthAngle > maximumRecognizableBottomKneeAngle`(175): `Warning` + `ShallowDepthViolationRatio`
-- `HasReachedBottomInCurrentRep == false`이고 `maximumBottomKneeAngle`(170) < `depthAngle` ≤ 175: `Info` + shallow ratio (권고만)
-- `depthAngle < minimumBottomKneeAngle`(55): `Warning` + `DeepDepthViolationRatio`
+깊이·정렬 판정 TTS는 한 반복당 최대 한 번만 전달한다. 사용자가 계속 내려가
+자세를 고치면 대기 중이던 이전 깊이 TTS를 취소하고 판정 상태는 갱신하지만,
+같은 반복에서 또 다른 최저점 TTS를 연속 재생하지 않는다.
 
-깊이 이벤트의 `PersistenceRatio`는 상수(0.8)가 아니라 창 내 무릎각 프레임 대비 shallow/deep 위반 비율이다. 소수 프레임만 위반이면 즉시 `HasPersistentWarning`로 실패하지 않는다.
+### 8. 세션 개인 깊이 기준
+
+1차 높이와 무릎 정렬을 통과했지만 개인 목표 깊이만 실패한 시도 중 추적 품질이
+`Good`이고 상체·중심·골반의 확정 Warning이 없는 시도만 후보로 수집한다.
+후보 3회의 최소 무릎 각도 범위가 `8°` 이내이고 골반 하강량 범위가 `0.02`
+이내이면 다음 반복부터 아래 기준을 사용한다.
+
+```text
+activeMaximumKneeAngle =
+    clamp(median(3회 최소 무릎 각도) + 3°, 135°, 150°)
+
+activeMinimumHipDrop =
+    clamp(median(3회 최대 골반 하강량) - 0.01, 0.05, 0.08)
+```
+
+세 번째 실패를 성공으로 소급하지 않는다. 새 기준은 현재 운동 세션에만
+유지되며 1차 높이와 무릎 정렬 기준은 완화하지 않는다. 깊은 자세의 최소 무릎
+각도는 현재 올바른 반복 여부를 제한하지 않는다.
 
 Phase는 평균 무릎 각도와 무릎 각도 변화 속도로 추정한다.
 
@@ -199,10 +244,14 @@ Phase는 평균 무릎 각도와 무릎 각도 변화 속도로 추정한다.
 1. rep가 시작되면 `RepQualityAccumulator`의 시간 기반 증거를 초기화한다.
 2. `Descent`, `Bottom`, `Ascent` 중 핵심 관절이 유효한 프레임만 품질 평가에 포함한다.
 3. `Info` 안내는 실패 근거에서 제외하고 `Warning`/`Critical`만 누적한다.
-4. 단일 Warning은 실패로 고정하지 않는다. 최소 4개 유효 프레임과 35% 이상 Warning 비율, 75% 이상 지속 근거 또는 2개 이상 Critical 프레임 중 하나가 있어야 실패로 확정한다.
+4. 단일 Warning은 실패로 고정하지 않는다. 같은 `RuleId`가 최소 2개 프레임에서 관찰되고, 최소 4개 유효 프레임 중 35% 이상을 차지해야 일반 오류로 확정한다. 서로 다른 일시 경고의 합이나 한 번의 오래된 75% 지속 근거만으로는 실패 처리하지 않는다.
 5. `ExercisePhaseDetector`의 `RepCount`가 증가하는 순간 충분한 유효 프레임이 있고 확정 오류가 없으면 `CorrectRepCount`를 1 증가시킨다.
 6. 유효 프레임이 부족한 rep는 성공/실패로 단정하지 않고 `관절 인식이 불안정해 이번 동작은 횟수에 포함하지 않았습니다.`라고 안내한다.
-7. 올바른 rep가 증가하면 `PoseFeedbackJsonReceiver`로 `정확합니다. {N}개.` TTS 메시지를 보낸다.
+7. 최저점 결정이 `Passed`이고 다른 확정 오류가 없는 rep가 증가하면
+   `PoseFeedbackJsonReceiver`로 `올바른 자세입니다. {N}개.` TTS 메시지를
+   보낸다.
+8. 일반 자세 교정 TTS는 `Descent`, `Bottom`, `Ascent`에서만 허용한다. 사용자가 가만히 선 `Standing` 또는 `Unknown` 상태에서는 새 자세 TTS를 발생시키지 않고 대기 중인 `squat_*` 안내도 취소한다. 방금 완료한 반복 수 안내는 예외로 유지한다.
+9. 정확 카운트가 증가하지 않은 완료 반복은 확정 `RuleId`를 세션 문제 집계에 남겨 종료 리포트의 자세 분석에 사용한다.
 
 화면에는 상태 패널의 `PoseTrackingStatusView`가 다음 형식으로 표시한다.
 
@@ -213,7 +262,7 @@ Phase: Standing (clean)
 
 여기서 앞 숫자는 올바른 자세로 완료한 반복 수다. 목표 개수가 설정되어 있으면 뒤 숫자는 목표 개수이고, 목표가 없으면 감지된 전체 반복 수다.
 
-TTS 문구는 `RealtimeFeedbackOrchestrator.correctRepFeedbackFormat`에서 바꿀 수 있다. 기본값은 `정확합니다. {0}개.`이고, `{0}` 자리에 올바른 반복 수가 들어간다.
+TTS 문구는 `RealtimeFeedbackOrchestrator.correctRepFeedbackFormat`에서 바꿀 수 있다. 기본값은 `올바른 자세입니다. {0}개.`이고, `{0}` 자리에 올바른 반복 수가 들어간다.
 
 ### 목표 개수 입력
 
@@ -225,6 +274,8 @@ TTS 문구는 `RealtimeFeedbackOrchestrator.correctRepFeedbackFormat`에서 바�
 확인을 누르면 현재 correct count, 전체 rep count, phase/window 상태를 0부터 다시 시작한다. 이후 올바른 rep만 목표 개수까지 증가한다. 오류가 감지된 rep는 전체 rep에는 포함될 수 있지만 correct count에는 포함되지 않는다.
 
 목표를 `0` 또는 빈 값으로 확인하면 목표 제한 없이 올바른 rep를 계속 누적한다.
+
+모바일 운동 화면은 `repsPerSet`마다 마지막 세트 전까지 세트 휴식을 시작한다. 휴식 중에는 추적 세션을 종료하므로 phase detector의 로컬 `RepCount`는 재시작 시 초기화되지만, `RealtimeFeedbackOrchestrator.TotalRepCount`, `CorrectRepCount`, 자세 문제 집계는 유지된다. 마지막 세트의 전체 목표에 도달하면 휴식을 추가하지 않고 결과 화면으로 이동한다.
 
 ## 3D 캐릭터 리플레이
 
@@ -301,7 +352,8 @@ Stop 이후에는 `CameraPreviewDebugView`가 카메라 프리뷰 대신 `PoseJs
 - 최소 rep 유효 프레임: `4`
 - Pose 추론: 카메라와 동일 `640×480`(inference downscale 끔), Pose `12` FPS, MediaPipe confidence `0.40`
 - rep Warning 비율: `35%`
-- 즉시 확정 지속 비율: `75%`
+- 고지속 경고 진단 비율: `75%` (한 프레임만으로 감점하지 않음)
+- 동일 Warning 최소 관찰: `2`프레임
 - Critical 확인 프레임: `2`
 - Standing 진입/이탈: `150도 / 140도`
 - 기본 Bottom: `125도`
@@ -312,7 +364,25 @@ Stop 이후에는 `CameraPreviewDebugView`가 카메라 프리뷰 대신 `PoseJs
 - 무릎 최소 관찰 비율: `0.6`
 - 속도 dead zone: `12도/초`
 
-깊이 판정은 분석 창 `MinimumKneeAngle`과 이번 rep `MinimumKneeAngleInCurrentRep`의 최솟값을 사용한다. `HasReachedBottomInCurrentRep`이면 얕음 안내를 내지 않고, 너무 깊은 경우만 Warning한다. Bottom 미인식(rare)일 때만 170~175° Info / 175° 초과 Warning을 내며, persistence는 창 내 shallow/deep 위반 비율을 쓴다.
+깊이 판정은 분석 창 `MinimumKneeAngle`과 이번 rep
+`MinimumKneeAngleInCurrentRep`의 최솟값을 개인 목표 깊이 통과 여부에
+사용한다. `HasReachedBottomInCurrentRep`이면 얕음 안내를 내지 않으며, 기존
+최소 각도보다 깊어져도 Warning을 생성하지 않는다. Bottom 미인식(rare)일 때만
+170~175° Info / 175° 초과 Warning을 내며, persistence는 얕은 깊이 위반
+비율을 사용한다.
+
+## 2026-07-27 깊은 스쿼트 판정 정책
+
+- 실기기 테스트 결과에 따라 기존 `squat_depth_excessive` 실패 판정을
+  폐기했다.
+- 1차 엉덩이-무릎 높이, 무릎 안쪽 정렬, 개인 목표 깊이를 통과하면 기존
+  `55°` 미만의 깊은 자세도 `Passed`다.
+- 깊은 자세는 `CorrectRepCount`에 포함되며 반복 완료 시
+  `올바른 자세입니다. {N}개.` 경로를 사용한다.
+- `squat_depth_excessive`, `squat_depth_deep`, `*_knee_bend_deep`는 새
+  Warning이나 TTS를 만들지 않는다.
+- 기존 최소 각도와 연속 프레임 통계는 진단 호환을 위해 남아 있지만 합격,
+  감점, 세션 문제 집계에는 사용하지 않는다.
 
 ## 2026-07-21 팔-다리 가림 오판정 완화
 

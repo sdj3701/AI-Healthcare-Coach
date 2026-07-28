@@ -1,7 +1,10 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.Text;
 using Rag.Healthcare.Diagnostics;
 using Rag.Healthcare.Camera;
+using Rag.Healthcare.Monetization;
 using Rag.Healthcare.Performance;
 using Rag.Healthcare.Pose;
 using Rag.Healthcare.Pose.Rendering;
@@ -50,7 +53,9 @@ namespace Rag.Healthcare.UI
             Calibration = 2,
             Exercise = 3,
             Target = 4,
-            Session = 5
+            Session = 5,
+            Rest = 6,
+            Result = 7
         }
 
         private enum PreviewMode
@@ -110,6 +115,9 @@ namespace Rag.Healthcare.UI
         [SerializeField] private bool hideGeneratedDesktopCanvas = true;
         [SerializeField] private bool showUiInEditMode = true;
         [SerializeField, Min(0.05f)] private float refreshIntervalSeconds = 0.2f;
+        [SerializeField, Range(1, 300)] private int restDurationSeconds = 3;
+        [Tooltip("결제 시스템은 구매 완료 시 SetPaidStretchingAccess(true)를 호출해야 합니다.")]
+        [SerializeField] private bool hasPaidStretchingAccess;
 
         [Header("Mobile Performance")]
         [SerializeField] private bool applyMobilePerformanceDefaults = true;
@@ -153,6 +161,8 @@ namespace Rag.Healthcare.UI
         private Label performanceBenchStatusLabel;
         private TextField repsField;
         private TextField setsField;
+        private TextField restSecondsField;
+        private Label restCountdownLabel;
         private CalibrationOverlayView calibrationOverlay;
         private OnboardingStatusManager profileStatus;
         private bool hasCompletedCalibrationThisLaunch;
@@ -185,6 +195,18 @@ namespace Rag.Healthcare.UI
         private SessionTransitionKind sessionTransitionKind;
         private bool pendingWorkoutStart;
         private bool pendingWorkoutStop;
+        private bool targetCompletionHandled;
+        private bool isSetRest;
+        private int lastRestedCorrectRepCount;
+        private float restEndsAt;
+        private int completedTotalRepCount;
+        private int completedCorrectRepCount;
+        private float completedElapsedSeconds;
+        private float completedCalories;
+        private int completedWorkoutScore;
+        private readonly Dictionary<string, int> completedIssueCounts =
+            new Dictionary<string, int>();
+        private EntitlementService entitlements;
         private bool currentSessionReceivedPoseFrame;
         private string cameraOperationError = string.Empty;
         private Texture lastPreviewLayoutTexture;
@@ -223,6 +245,7 @@ namespace Rag.Healthcare.UI
 
         private void Awake()
         {
+            EnsureEntitlements();
             if (Application.isPlaying && !buildUiSuccessLogged)
             {
                 IOSDeviceConsoleLog.Write("[MobileWorkoutPrototypeView] Awake on " + gameObject.name);
@@ -342,6 +365,12 @@ namespace Rag.Healthcare.UI
             }
 
             ApplySafeAreaInsetsIfNeeded();
+
+            if (Application.isPlaying)
+            {
+                TryHandleWorkoutMilestone();
+                UpdateRestFlow();
+            }
 
             if (Time.unscaledTime < nextRefreshAt)
             {
@@ -864,6 +893,12 @@ namespace Rag.Healthcare.UI
                         cameraSource?.StartCamera();
                     }
                     break;
+                case ScreenStep.Rest:
+                    RenderRestStep();
+                    break;
+                case ScreenStep.Result:
+                    RenderResultStep();
+                    break;
             }
 
             RefreshDynamicText();
@@ -1114,10 +1149,10 @@ namespace Rag.Healthcare.UI
 
         private void RenderTargetStep()
         {
-            AddHeader("목표 설정", "반복 횟수와 세트를 정하면 정확한 자세 카운트 목표가 적용됩니다.");
+            AddHeader("목표 설정", "각 세트의 정확 반복을 채우면 설정한 시간만큼 쉬고 다음 세트를 시작합니다.");
 
             var selected = GetSelectedExercise();
-            var card = Card("target-card", 292f);
+            var card = Card("target-card", 354f);
             card.style.paddingTop = 12f;
             card.style.paddingRight = 12f;
             card.style.paddingBottom = 12f;
@@ -1131,6 +1166,11 @@ namespace Rag.Healthcare.UI
             setsField = AddNumberField(card, "세트 수", sets, value =>
             {
                 sets = Mathf.Clamp(value, 1, 999);
+                RefreshDynamicText();
+            });
+            restSecondsField = AddNumberField(card, "세트 간 휴식(초)", restDurationSeconds, value =>
+            {
+                restDurationSeconds = Mathf.Clamp(value, 1, 300);
                 RefreshDynamicText();
             });
             targetCountLabel = Label(string.Empty, 14, ColorFromHex(0x34D399), FontStyle.Bold);
@@ -1243,6 +1283,138 @@ namespace Rag.Healthcare.UI
             {
                 contentRoot.Add(BuildPerformanceBenchRow());
             }
+        }
+
+        private void RenderRestStep()
+        {
+            var completedSet = Mathf.Clamp(
+                lastRestedCorrectRepCount / Mathf.Max(1, repsPerSet),
+                1,
+                Mathf.Max(1, sets));
+            var nextSet = Mathf.Min(Mathf.Max(1, sets), completedSet + 1);
+            AddHeader(
+                completedSet + "세트 완료",
+                nextSet + "세트 시작 전까지 호흡을 정리해 주세요.");
+
+            var card = Card("rest-card", 214f);
+            card.style.alignItems = Align.Center;
+            card.style.justifyContent = Justify.Center;
+            card.Add(Label(
+                completedSet + " / " + Mathf.Max(1, sets) + "세트 완료",
+                18,
+                ColorFromHex(0x34D399),
+                FontStyle.Bold));
+            restCountdownLabel = Label(
+                Mathf.Max(0, Mathf.CeilToInt(restEndsAt - Time.unscaledTime)) + "초",
+                46,
+                Color.white,
+                FontStyle.Bold);
+            restCountdownLabel.style.marginTop = 14f;
+            restCountdownLabel.style.unityTextAlign = TextAnchor.MiddleCenter;
+            card.Add(restCountdownLabel);
+            card.Add(Label(
+                "휴식이 끝나면 " + nextSet + "세트를 자동으로 시작합니다.",
+                11,
+                ColorFromHex(0x94A3B8)));
+            contentRoot.Add(card);
+
+            contentRoot.Add(Spacer(12f));
+            contentRoot.Add(ActionButton(
+                "다음 세트 바로 시작",
+                ColorFromHex(0x22C55E),
+                ColorFromHex(0x07110C),
+                52f,
+                ContinueAfterSetRest));
+        }
+
+        private void RenderResultStep()
+        {
+            AddHeader("운동 결과", "이번 세션의 횟수, 자세 정확도와 교정이 필요한 부위를 정리했습니다.");
+
+            var scoreCard = Card("result-score-card", 156f);
+            scoreCard.style.alignItems = Align.Center;
+            scoreCard.style.justifyContent = Justify.Center;
+            scoreCard.Add(Label("운동 점수", 12, ColorFromHex(0x94A3B8), FontStyle.Bold));
+            scoreCard.Add(Label(
+                completedWorkoutScore + "점",
+                42,
+                ColorFromHex(0x34D399),
+                FontStyle.Bold));
+            scoreCard.Add(Label(
+                "전체 " + completedTotalRepCount +
+                "회 · 정확 " + completedCorrectRepCount +
+                "회 · " + FormatElapsed(completedElapsedSeconds),
+                11,
+                ColorFromHex(0xCBD5E1)));
+            contentRoot.Add(scoreCard);
+
+            var caloriesCard = Card("result-calories-card", 76f);
+            caloriesCard.style.marginTop = 10f;
+            caloriesCard.style.paddingLeft = 12f;
+            caloriesCard.style.justifyContent = Justify.Center;
+            caloriesCard.Add(Label("예상 소모 칼로리", 10, ColorFromHex(0x94A3B8), FontStyle.Bold));
+            caloriesCard.Add(Label(
+                completedCalories.ToString("0.0") + " kcal",
+                22,
+                ColorFromHex(0xFB7185),
+                FontStyle.Bold));
+            contentRoot.Add(caloriesCard);
+
+            var postureCard = Card("result-posture-card", 138f);
+            postureCard.style.marginTop = 10f;
+            postureCard.style.paddingTop = 10f;
+            postureCard.style.paddingRight = 12f;
+            postureCard.style.paddingBottom = 10f;
+            postureCard.style.paddingLeft = 12f;
+            postureCard.Add(Label("자세 분석", 13, Color.white, FontStyle.Bold));
+            postureCard.Add(Label(
+                BuildPostureIssueSummary(),
+                11,
+                ColorFromHex(0xCBD5E1)));
+            contentRoot.Add(postureCard);
+
+            EnsureEntitlements();
+            var hasStretchingAccess =
+                entitlements.Has(ProductFeature.ExpertContent);
+            var stretchCard = Card("result-stretch-card", hasStretchingAccess ? 164f : 112f);
+            stretchCard.style.marginTop = 10f;
+            stretchCard.style.paddingTop = 10f;
+            stretchCard.style.paddingRight = 12f;
+            stretchCard.style.paddingBottom = 10f;
+            stretchCard.style.paddingLeft = 12f;
+            stretchCard.Add(Label(
+                hasStretchingAccess ? "결제 혜택 · 회복 스트레칭" : "회복 스트레칭",
+                13,
+                hasStretchingAccess ? ColorFromHex(0x34D399) : Color.white,
+                FontStyle.Bold));
+            stretchCard.Add(Label(
+                hasStretchingAccess
+                    ? BuildStretchingRecommendation()
+                    : "결제 완료 사용자에게 이번 자세 분석에 맞춘 스트레칭 추천을 제공합니다.",
+                10,
+                ColorFromHex(0xCBD5E1)));
+            contentRoot.Add(stretchCard);
+
+            contentRoot.Add(Label(
+                "칼로리는 반복 횟수 기반 추정치입니다. 통증이 있으면 운동과 스트레칭을 중단하세요.",
+                9,
+                ColorFromHex(0x64748B)));
+            contentRoot.Add(Spacer(12f));
+
+            var row = Row("result-buttons", 52f, 8f);
+            row.Add(ActionButton(
+                "같은 목표 다시",
+                ColorFromHex(0x22C55E),
+                ColorFromHex(0x07110C),
+                52f,
+                () => StartNewWorkoutFromResult(ScreenStep.Session)));
+            row.Add(ActionButton(
+                "운동 선택",
+                ColorFromHex(0x161B22),
+                Color.white,
+                52f,
+                () => StartNewWorkoutFromResult(ScreenStep.Exercise)));
+            contentRoot.Add(row);
         }
 
         private VisualElement BuildPerformanceBenchRow()
@@ -1565,8 +1737,9 @@ namespace Rag.Healthcare.UI
 
             row.Add(ActionButton("-", ColorFromHex(0x111827), Color.white, 38f, () =>
             {
-                value = Mathf.Clamp(ReadIntField(label == "세트 수" ? setsField : repsField, value) - 1, 1, 999);
-                var target = label == "세트 수" ? setsField : repsField;
+                var maximum = label == "세트 간 휴식(초)" ? 300 : 999;
+                value = Mathf.Clamp(ReadIntField(ResolveNumberField(label), value) - 1, 1, maximum);
+                var target = ResolveNumberField(label);
                 if (target != null)
                 {
                     target.value = value.ToString();
@@ -1594,8 +1767,9 @@ namespace Rag.Healthcare.UI
 
             row.Add(ActionButton("+", ColorFromHex(0x111827), Color.white, 38f, () =>
             {
-                value = Mathf.Clamp(ReadIntField(label == "세트 수" ? setsField : repsField, value) + 1, 1, 999);
-                var target = label == "세트 수" ? setsField : repsField;
+                var maximum = label == "세트 간 휴식(초)" ? 300 : 999;
+                value = Mathf.Clamp(ReadIntField(ResolveNumberField(label), value) + 1, 1, maximum);
+                var target = ResolveNumberField(label);
                 if (target != null)
                 {
                     target.value = value.ToString();
@@ -1605,6 +1779,16 @@ namespace Rag.Healthcare.UI
 
             parent.Add(row);
             return field;
+        }
+
+        private TextField ResolveNumberField(string label)
+        {
+            return label switch
+            {
+                "세트 수" => setsField,
+                "세트 간 휴식(초)" => restSecondsField,
+                _ => repsField
+            };
         }
 
         private Label AddMetric(VisualElement parent, string title, string value)
@@ -1639,10 +1823,9 @@ namespace Rag.Healthcare.UI
 
             if (totalCountLabel != null)
             {
-                totalCountLabel.text =
-                    phaseState == null
-                        ? "0"
-                        : phaseState.RepCount.ToString();
+                totalCountLabel.text = feedbackOrchestrator == null
+                    ? "0"
+                    : feedbackOrchestrator.TotalRepCount.ToString();
             }
 
             if (correctCountLabel != null)
@@ -1669,7 +1852,18 @@ namespace Rag.Healthcare.UI
                     : phaseState.CurrentPhase;
                 var phase = currentPhase.ToString();
                 var status = BuildPoseDecisionStatus(currentPhase);
-                phaseLabel.text = GetSelectedExercise().Name + "\nPhase: " + phase + " / " + status;
+                var currentSet = GetCurrentSetNumber(
+                    feedbackOrchestrator?.CorrectRepCount ?? 0);
+                phaseLabel.text =
+                    GetSelectedExercise().Name +
+                    " · " +
+                    currentSet +
+                    "/" +
+                    Mathf.Max(1, sets) +
+                    "세트\nPhase: " +
+                    phase +
+                    " / " +
+                    status;
             }
 
             if (depthStatusLabel != null)
@@ -1731,17 +1925,15 @@ namespace Rag.Healthcare.UI
                 return "깊이 측정 대기 · 개인 기준 학습 대기";
             }
 
-            var learning =
-                phaseState.AdaptiveBottomSampleCount > 0
-                    ? "개인 무릎각 " +
-                      phaseState.AdaptiveBottomKneeAngle.ToString("0") +
-                      "° (" +
-                      phaseState.AdaptiveBottomSampleCount +
-                      "/" +
-                      phaseState.AdaptiveBottomSampleTarget +
-                      ")"
-                    : "개인 무릎각 학습 0/" +
-                      phaseState.AdaptiveBottomSampleTarget;
+            var learning = phaseState.HasPersonalizedDepthProfile
+                ? "세션 개인 기준 무릎 " +
+                  phaseState.MaximumCountableBottomKneeAngle.ToString("0") +
+                  "° 또는 골반 하강 " +
+                  phaseState.MinimumBottomHipDrop.ToString("0.00")
+                : "개인 기준 후보 " +
+                  phaseState.PersonalDepthFailureSampleCount +
+                  "/" +
+                  phaseState.PersonalDepthFailureSampleTarget;
             if (phaseState.CurrentPhase == ExercisePhase.Standing ||
                 phaseState.CurrentPhase == ExercisePhase.Unknown)
             {
@@ -1757,10 +1949,22 @@ namespace Rag.Healthcare.UI
                        learning;
             }
 
-            var verdict =
-                phaseState.HasReachedHipToKneeDepthInCurrentRep
-                    ? "카운트 깊이 통과"
-                    : "무릎 높이까지 더 내려가세요";
+            var verdict = phaseState.CurrentBottomDecision switch
+            {
+                SquatBottomDecision.TrackingUnavailable =>
+                    "추적 품질 확인 중",
+                SquatBottomDecision.HipHeightFailed =>
+                    "1차 높이 미달",
+                SquatBottomDecision.KneeCollapseFailed =>
+                    "무릎 안쪽 정렬 미달",
+                SquatBottomDecision.PersonalDepthFailed =>
+                    "개인 깊이 미달",
+                SquatBottomDecision.Passed =>
+                    "최저점 통과",
+                _ => !phaseState.HasReachedHipToKneeDepthInCurrentRep
+                    ? "1차 높이 확인 중"
+                    : "다음 판정 대기"
+            };
             return "실시간 깊이 " +
                    phaseState.CurrentHipToKneeDepth.ToString(
                        "+0.00;-0.00;0.00") +
@@ -2088,7 +2292,6 @@ namespace Rag.Healthcare.UI
             yield return null;
             try
             {
-                ApplyTargetCount();
                 previewMode = PreviewMode.Camera;
                 replayPlayer?.StopReplay();
                 // Stop→Start must not keep the previous session's pose mesh. UI Toolkit
@@ -2471,6 +2674,155 @@ namespace Rag.Healthcare.UI
             calibrationOverlay?.SetVisible(false);
         }
 
+        private void TryHandleWorkoutMilestone()
+        {
+            if (targetCompletionHandled ||
+                !workoutRunning ||
+                currentStep != ScreenStep.Session ||
+                sessionTransitionCoroutine != null ||
+                feedbackOrchestrator == null)
+            {
+                return;
+            }
+
+            if (feedbackOrchestrator.IsCorrectRepTargetComplete)
+            {
+                targetCompletionHandled = true;
+                CaptureWorkoutResult();
+                pendingWorkoutStart = false;
+                pendingWorkoutStop = false;
+                sessionTransitionKind = SessionTransitionKind.Stopping;
+                sessionTransitionCoroutine =
+                    StartCoroutine(CompleteTargetWorkoutRoutine());
+                return;
+            }
+
+            var correctRepCount = feedbackOrchestrator.CorrectRepCount;
+            if (!ShouldStartSetRest(
+                    correctRepCount,
+                    repsPerSet,
+                    sets,
+                    lastRestedCorrectRepCount))
+            {
+                return;
+            }
+
+            lastRestedCorrectRepCount = correctRepCount;
+            isSetRest = true;
+            pendingWorkoutStart = false;
+            pendingWorkoutStop = false;
+            sessionTransitionKind = SessionTransitionKind.Stopping;
+            sessionTransitionCoroutine =
+                StartCoroutine(BeginSetRestRoutine());
+        }
+
+        private IEnumerator BeginSetRestRoutine()
+        {
+            yield return null;
+            try
+            {
+                StopWorkoutOnly();
+                yield return WaitForTrackingRequestToFinish();
+                previewMode = PreviewMode.None;
+                replayPlayer?.StopReplay();
+                restEndsAt =
+                    Time.unscaledTime +
+                    Mathf.Clamp(restDurationSeconds, 1, 300);
+                currentStep = ScreenStep.Rest;
+                RenderCurrentStep();
+            }
+            finally
+            {
+                CompleteSessionTransition();
+            }
+        }
+
+        private IEnumerator CompleteTargetWorkoutRoutine()
+        {
+            yield return null;
+            try
+            {
+                StopWorkoutOnly();
+                yield return WaitForTrackingRequestToFinish();
+                previewMode = PreviewMode.None;
+                replayPlayer?.StopReplay();
+                isSetRest = false;
+                currentStep = ScreenStep.Result;
+                RenderCurrentStep();
+            }
+            finally
+            {
+                CompleteSessionTransition();
+            }
+        }
+
+        private void UpdateRestFlow()
+        {
+            if (currentStep != ScreenStep.Rest || !isSetRest)
+            {
+                return;
+            }
+
+            var remaining = Mathf.Max(
+                0,
+                Mathf.CeilToInt(restEndsAt - Time.unscaledTime));
+            if (restCountdownLabel != null)
+            {
+                restCountdownLabel.text = remaining + "초";
+            }
+
+            if (remaining <= 0 && sessionTransitionCoroutine == null)
+            {
+                ContinueAfterSetRest();
+            }
+        }
+
+        private void ContinueAfterSetRest()
+        {
+            if (currentStep != ScreenStep.Rest ||
+                !isSetRest ||
+                sessionTransitionCoroutine != null)
+            {
+                return;
+            }
+
+            isSetRest = false;
+            previewMode = PreviewMode.Camera;
+            currentStep = ScreenStep.Session;
+            RenderCurrentStep();
+            StartWorkout();
+        }
+
+        private void CaptureWorkoutResult()
+        {
+            var elapsed = workoutRunning
+                ? Time.unscaledTime - sessionStartedAt + elapsedBeforePause
+                : elapsedBeforePause;
+            completedElapsedSeconds = Mathf.Max(0f, elapsed);
+            completedTotalRepCount =
+                Mathf.Max(0, feedbackOrchestrator?.TotalRepCount ?? 0);
+            completedCorrectRepCount =
+                Mathf.Max(0, feedbackOrchestrator?.CorrectRepCount ?? 0);
+            completedCalories =
+                completedTotalRepCount *
+                Mathf.Max(0f, GetSelectedExercise().CaloriesPerRep);
+            completedWorkoutScore = CalculateWorkoutScore(
+                completedTotalRepCount,
+                completedCorrectRepCount);
+
+            completedIssueCounts.Clear();
+            var issueCounts = feedbackOrchestrator?.SessionIssueCounts;
+            if (issueCounts == null)
+            {
+                return;
+            }
+
+            foreach (var pair in issueCounts)
+            {
+                completedIssueCounts[pair.Key] = pair.Value;
+            }
+        }
+
         private void SwitchCamera()
         {
             if (!Application.isPlaying || sessionTransitionCoroutine != null)
@@ -2741,6 +3093,10 @@ namespace Rag.Healthcare.UI
         {
             repsPerSet = ReadIntField(repsField, repsPerSet);
             sets = ReadIntField(setsField, sets);
+            restDurationSeconds = Mathf.Clamp(
+                ReadIntField(restSecondsField, restDurationSeconds),
+                1,
+                300);
             ApplyTargetCount();
             RefreshDynamicText();
         }
@@ -2753,7 +3109,194 @@ namespace Rag.Healthcare.UI
             }
 
             feedbackOrchestrator ??= FindFirstObjectByType<RealtimeFeedbackOrchestrator>();
+            targetCompletionHandled = false;
+            isSetRest = false;
+            lastRestedCorrectRepCount = 0;
             feedbackOrchestrator?.SetCorrectRepTarget(GetTargetCount());
+        }
+
+        private void StartNewWorkoutFromResult(ScreenStep targetStep)
+        {
+            elapsedBeforePause = 0f;
+            sessionStartedAt = 0f;
+            completedElapsedSeconds = 0f;
+            currentSessionReceivedPoseFrame = false;
+            targetCompletionHandled = false;
+            isSetRest = false;
+            lastRestedCorrectRepCount = 0;
+            cameraOperationError = string.Empty;
+            previewMode =
+                targetStep == ScreenStep.Session
+                    ? PreviewMode.Camera
+                    : PreviewMode.None;
+            replayPlayer?.ClearReplay();
+            ApplyTargetCount();
+            currentStep = targetStep;
+            RenderCurrentStep();
+        }
+
+        public void SetPaidStretchingAccess(bool paid)
+        {
+            hasPaidStretchingAccess = paid;
+            EnsureEntitlements();
+            if (paid)
+            {
+                entitlements.Grant(ProductFeature.ExpertContent);
+            }
+            else
+            {
+                entitlements.Revoke(ProductFeature.ExpertContent);
+            }
+
+            if (currentStep == ScreenStep.Result)
+            {
+                RenderCurrentStep();
+            }
+        }
+
+        private void EnsureEntitlements()
+        {
+            if (entitlements != null)
+            {
+                return;
+            }
+
+            entitlements = new EntitlementService();
+            if (hasPaidStretchingAccess)
+            {
+                entitlements.Grant(ProductFeature.ExpertContent);
+            }
+        }
+
+        private string BuildPostureIssueSummary()
+        {
+            if (completedIssueCounts.Count == 0)
+            {
+                return "지속적으로 확인된 자세 문제는 없습니다. 현재 속도와 안정성을 유지해 주세요.";
+            }
+
+            var entries = new List<KeyValuePair<string, int>>(
+                completedIssueCounts);
+            entries.Sort((left, right) => right.Value.CompareTo(left.Value));
+            var builder = new StringBuilder();
+            var shown = 0;
+            foreach (var entry in entries)
+            {
+                if (entry.Value <= 0 ||
+                    IsRetiredExcessiveDepthRule(entry.Key))
+                {
+                    continue;
+                }
+
+                if (shown > 0)
+                {
+                    builder.Append("\n");
+                }
+
+                builder
+                    .Append("• ")
+                    .Append(GetIssueDisplayName(entry.Key))
+                    .Append(" ")
+                    .Append(entry.Value)
+                    .Append("회");
+                shown++;
+                if (shown >= 3)
+                {
+                    break;
+                }
+            }
+
+            return shown == 0
+                ? "지속적으로 확인된 자세 문제는 없습니다."
+                : builder.ToString();
+        }
+
+        private string BuildStretchingRecommendation()
+        {
+            var primaryIssue = GetPrimaryIssueRuleId();
+            return primaryIssue switch
+            {
+                "squat_knee_alignment" =>
+                    "둔근 스트레칭과 종아리 스트레칭을 좌우 각 20초씩 2회 진행해 보세요.",
+                "squat_torso_tilt" =>
+                    "무릎을 대고 하는 고관절 앞쪽 스트레칭과 가슴 열기를 각 20초씩 2회 진행해 보세요.",
+                "squat_center_balance" =>
+                    "벽을 짚고 종아리 스트레칭을 좌우 각 20초, 한 발 균형 서기를 각 15초 진행해 보세요.",
+                "squat_pelvic_tilt" =>
+                    "누워서 한쪽 무릎 당기기와 둔근 스트레칭을 좌우 각 20초씩 2회 진행해 보세요.",
+                "rep_tracking_uncertain" =>
+                    "가벼운 종아리·허벅지 뒤쪽 스트레칭을 각 20초 진행하고 다음에는 전신이 보이도록 촬영해 주세요.",
+                _ =>
+                    "종아리, 허벅지 뒤쪽, 고관절 앞쪽을 좌우 각 20초씩 천천히 풀어 주세요."
+            };
+        }
+
+        private string GetPrimaryIssueRuleId()
+        {
+            var primaryRule = string.Empty;
+            var primaryCount = 0;
+            foreach (var pair in completedIssueCounts)
+            {
+                if (pair.Value <= primaryCount ||
+                    IsRetiredExcessiveDepthRule(pair.Key))
+                {
+                    continue;
+                }
+
+                primaryRule = pair.Key;
+                primaryCount = pair.Value;
+            }
+
+            return primaryRule;
+        }
+
+        private static string GetIssueDisplayName(string ruleId)
+        {
+            return ruleId switch
+            {
+                "squat_knee_alignment" => "무릎-발끝 정렬",
+                "squat_torso_tilt" => "상체 과도한 숙임",
+                "squat_center_balance" => "좌우 중심 쏠림",
+                "squat_pelvic_tilt" => "골반 수평",
+                "squat_knee_collapse" => "무릎 안쪽 정렬",
+                "squat_depth_excessive" => "올바른 깊이",
+                "squat_depth_deep" => "올바른 깊이",
+                "rep_tracking_uncertain" => "관절 인식 불안정",
+                "unknown_posture" => "복합 자세 불안정",
+                _ => "자세 안정성"
+            };
+        }
+
+        private static bool IsRetiredExcessiveDepthRule(string ruleId)
+        {
+            return ruleId == "squat_depth_excessive" ||
+                   ruleId == "squat_depth_deep";
+        }
+
+        private static string FormatElapsed(float elapsedSeconds)
+        {
+            var seconds = Mathf.FloorToInt(Mathf.Max(0f, elapsedSeconds));
+            return (seconds / 60).ToString("00") +
+                   ":" +
+                   (seconds % 60).ToString("00");
+        }
+
+        public static int CalculateWorkoutScore(
+            int totalRepCount,
+            int correctRepCount)
+        {
+            if (totalRepCount <= 0)
+            {
+                return 0;
+            }
+
+            return Mathf.Clamp(
+                Mathf.RoundToInt(
+                    Mathf.Max(0, correctRepCount) /
+                    (float)totalRepCount *
+                    100f),
+                0,
+                100);
         }
 
         private void ApplyMobilePerformanceDefaults()
@@ -2802,6 +3345,31 @@ namespace Rag.Healthcare.UI
         private int GetTargetCount()
         {
             return Mathf.Max(1, repsPerSet) * Mathf.Max(1, sets);
+        }
+
+        private int GetCurrentSetNumber(int correctRepCount)
+        {
+            var safeRepsPerSet = Mathf.Max(1, repsPerSet);
+            return Mathf.Clamp(
+                Mathf.Max(0, correctRepCount) / safeRepsPerSet + 1,
+                1,
+                Mathf.Max(1, sets));
+        }
+
+        public static bool ShouldStartSetRest(
+            int correctRepCount,
+            int repsInSet,
+            int setCount,
+            int lastRestedRepCount)
+        {
+            var safeRepsInSet = Mathf.Max(1, repsInSet);
+            var safeSetCount = Mathf.Max(1, setCount);
+            var targetCount = safeRepsInSet * safeSetCount;
+            return safeSetCount > 1 &&
+                   correctRepCount > 0 &&
+                   correctRepCount < targetCount &&
+                   correctRepCount > lastRestedRepCount &&
+                   correctRepCount % safeRepsInSet == 0;
         }
 
         private ExerciseOption GetSelectedExercise()
@@ -2903,6 +3471,14 @@ namespace Rag.Healthcare.UI
                     label = currentStep == ScreenStep.Target ? "3 / 4 목표설정" : "3 / 4 운동선택";
                     activePip = 2;
                     break;
+                case ScreenStep.Rest:
+                    label = "4 / 4 회복";
+                    activePip = 3;
+                    break;
+                case ScreenStep.Result:
+                    label = "4 / 4 운동결과";
+                    activePip = 3;
+                    break;
                 default:
                     label = "4 / 4 운동피드백";
                     activePip = 3;
@@ -2951,6 +3527,8 @@ namespace Rag.Healthcare.UI
             performanceBenchStatusLabel = null;
             repsField = null;
             setsField = null;
+            restSecondsField = null;
+            restCountdownLabel = null;
         }
 
         private string BuildCameraStateText()

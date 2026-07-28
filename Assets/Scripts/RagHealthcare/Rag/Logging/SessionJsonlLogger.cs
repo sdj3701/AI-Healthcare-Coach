@@ -178,7 +178,34 @@ namespace Rag.Healthcare.Rag.Logging
             AppendFloat(builder, message.confidence);
             builder.Append(",\"text\":\"")
                 .Append(Escape(message.text))
-                .Append("\"}");
+                .Append("\",\"bottomDecision\":\"")
+                .Append(feedbackEvent.BottomDecision)
+                .Append("\",\"evidence\":{");
+            var evidenceCount = 0;
+            if (feedbackEvent.Evidence != null)
+            {
+                foreach (var evidence in feedbackEvent.Evidence)
+                {
+                    if (float.IsNaN(evidence.Value) ||
+                        float.IsInfinity(evidence.Value))
+                    {
+                        continue;
+                    }
+
+                    if (evidenceCount > 0)
+                    {
+                        builder.Append(',');
+                    }
+
+                    evidenceCount++;
+                    builder.Append('"')
+                        .Append(Escape(evidence.Key))
+                        .Append("\":");
+                    AppendFloat(builder, evidence.Value);
+                }
+            }
+
+            builder.Append("}}");
 
             WriteRaw(builder.ToString());
         }

@@ -61,9 +61,27 @@ namespace Rag.Healthcare.Rag.Runtime
                 return false;
             }
 
-            lastSpokenTimes[selected.Id] = now;
-            lastSpokenTimes["_global"] = now;
             return true;
+        }
+
+        public void CommitSelection(FeedbackEvent selected)
+        {
+            if (selected == null)
+            {
+                return;
+            }
+
+            var key = string.IsNullOrWhiteSpace(selected.Id)
+                ? selected.RuleId
+                : selected.Id;
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                return;
+            }
+
+            var now = Time.unscaledTime;
+            lastSpokenTimes[key] = now;
+            lastSpokenTimes["_global"] = now;
         }
 
         public void Reset()

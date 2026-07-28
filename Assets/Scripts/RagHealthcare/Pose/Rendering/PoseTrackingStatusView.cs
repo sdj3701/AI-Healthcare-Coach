@@ -111,11 +111,11 @@ namespace Rag.Healthcare.Pose.Rendering
                     .Append("/")
                     .Append(feedbackOrchestrator.HasCorrectRepTarget
                         ? feedbackOrchestrator.TargetCorrectRepCount
-                        : phaseState == null ? 0 : phaseState.RepCount)
+                        : feedbackOrchestrator.TotalRepCount)
                     .Append(feedbackOrchestrator.IsCorrectRepTargetComplete ? " (complete)" : string.Empty)
                     .AppendLine();
                 builder.Append("Total reps: ")
-                    .Append(phaseState == null ? 0 : phaseState.RepCount)
+                    .Append(feedbackOrchestrator.TotalRepCount)
                     .AppendLine();
                 builder.Append("Phase: ")
                     .Append(phaseState == null ? "Unknown" : phaseState.CurrentPhase.ToString())
@@ -130,8 +130,37 @@ namespace Rag.Healthcare.Pose.Rendering
                         .Append(" / ")
                         .Append(phaseState.RequiredHipToKneeDepth.ToString("0.000"))
                         .Append(phaseState.HasReachedHipToKneeDepthInCurrentRep
-                            ? " (passed)"
-                            : " (not passed)")
+                            ? " (stage 1 passed)"
+                            : " (stage 1 pending)")
+                        .Append(phaseState.HasReachedSecondaryDepthInCurrentRep
+                            ? " / stage 2 passed"
+                            : " / stage 2 pending")
+                        .AppendLine();
+                    builder.Append("Bottom decision: ")
+                        .Append(phaseState.CurrentBottomDecision)
+                        .Append(" / knee width ")
+                        .Append(phaseState.CurrentKneeWidthRatio > 0f
+                            ? phaseState.CurrentKneeWidthRatio.ToString("0.00")
+                            : "-")
+                        .AppendLine();
+                    builder.Append("Personal depth target: knee <= ")
+                        .Append(
+                            phaseState.MaximumCountableBottomKneeAngle
+                                .ToString("0"))
+                        .Append(" deg OR hip drop >= ")
+                        .Append(
+                            phaseState.MinimumBottomHipDrop
+                                .ToString("0.000"))
+                        .Append(phaseState.HasPersonalizedDepthProfile
+                            ? " (session adjusted)"
+                            : string.Empty)
+                        .AppendLine();
+                    builder.Append("Depth adaptation candidates: ")
+                        .Append(
+                            phaseState.PersonalDepthFailureSampleCount)
+                        .Append("/")
+                        .Append(
+                            phaseState.PersonalDepthFailureSampleTarget)
                         .AppendLine();
                     builder.Append("Adaptive bottom angle: ")
                         .Append(phaseState.AdaptiveBottomSampleCount > 0

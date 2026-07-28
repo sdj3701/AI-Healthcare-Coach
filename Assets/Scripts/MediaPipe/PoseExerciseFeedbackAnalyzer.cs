@@ -22,7 +22,6 @@ namespace AIHealthcareCoach.MediaPipe
 
         public float minimumConfidence = 0.5f;
         public float maximumKneeValgusOffset = 0.08f;
-        public float minimumSquatKneeAngle = 70f;
         public float maximumSquatKneeAngle = 165f;
         public float maximumLeftRightKneeAngleDelta = 18f;
         public float maximumTorsoTiltDegrees = 35f;
@@ -86,16 +85,6 @@ namespace AIHealthcareCoach.MediaPipe
                     side + " knee bend is shallow. Bend the knee a little more.",
                     kneeId,
                     PoseExerciseFeedbackSeverity.Info,
-                    confidence);
-            }
-            else if (kneeAngle < minimumSquatKneeAngle)
-            {
-                AddFeedback(
-                    results,
-                    side + "_knee_bend_deep",
-                    side + " knee bend is too deep. Reduce the depth slightly.",
-                    kneeId,
-                    PoseExerciseFeedbackSeverity.Warning,
                     confidence);
             }
         }

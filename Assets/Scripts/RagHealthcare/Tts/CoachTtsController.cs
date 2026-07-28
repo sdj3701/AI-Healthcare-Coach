@@ -198,6 +198,24 @@ namespace Rag.Healthcare.Tts
             float ttlSeconds,
             out string statusMessage)
         {
+            return TrySchedule(
+                message,
+                semanticId,
+                priority,
+                ttlSeconds,
+                out statusMessage,
+                out _);
+        }
+
+        public bool TrySchedule(
+            string message,
+            string semanticId,
+            TtsRequestPriority priority,
+            float ttlSeconds,
+            out string statusMessage,
+            out bool requestScheduled)
+        {
+            requestScheduled = false;
             if (string.IsNullOrWhiteSpace(message))
             {
                 statusMessage = "TTS로 읽을 문장이 비어 있습니다.";
@@ -217,7 +235,9 @@ namespace Rag.Healthcare.Tts
             var trimmedMessage = message.Trim();
             if (!requestSchedulingEnabled)
             {
-                return TrySpeakDirect(trimmedMessage, out statusMessage);
+                requestScheduled =
+                    TrySpeakDirect(trimmedMessage, out statusMessage);
+                return requestScheduled;
             }
 
             EnsureScheduler();
@@ -237,6 +257,7 @@ namespace Rag.Healthcare.Tts
                 return result.IsBenignSuppression;
             }
 
+            requestScheduled = true;
             // Pose feedback can arrive inside the tracking result callback. Starting the
             // native synthesizer here would extend that same Unity frame, so admission is
             // intentionally cheap and Update pumps the accepted request on a later tick.
@@ -282,6 +303,18 @@ namespace Rag.Healthcare.Tts
             PoseFeedbackMessage feedback,
             out string statusMessage)
         {
+            return TrySpeakPoseFeedback(
+                feedback,
+                out statusMessage,
+                out _);
+        }
+
+        public bool TrySpeakPoseFeedback(
+            PoseFeedbackMessage feedback,
+            out string statusMessage,
+            out bool requestScheduled)
+        {
+            requestScheduled = false;
             if (feedback == null)
             {
                 statusMessage = "TTS로 읽을 자세 피드백이 없습니다.";
@@ -299,7 +332,48 @@ namespace Rag.Healthcare.Tts
                 semanticId,
                 priority,
                 ttlSeconds,
-                out statusMessage);
+                out statusMessage,
+                out requestScheduled);
+        }
+
+        public bool CancelPendingPoseFeedback(string semanticId)
+        {
+            if (scheduler == null || string.IsNullOrWhiteSpace(semanticId))
+            {
+                return false;
+            }
+
+            var cancelled = scheduler.CancelNotStartedSemantic(
+                semanticId,
+                Time.unscaledTime);
+            if (cancelled)
+            {
+                LastStatusMessage = "교정이 완료되어 대기 중인 이전 자세 안내를 취소했습니다.";
+            }
+
+            return cancelled;
+        }
+
+        public bool CancelPendingPoseFeedbackPrefix(
+            string semanticIdPrefix)
+        {
+            if (scheduler == null ||
+                string.IsNullOrWhiteSpace(semanticIdPrefix))
+            {
+                return false;
+            }
+
+            var cancelled =
+                scheduler.CancelNotStartedSemanticPrefix(
+                    semanticIdPrefix,
+                    Time.unscaledTime);
+            if (cancelled)
+            {
+                LastStatusMessage =
+                    "현재 동작이 끝나 대기 중인 자세 안내를 취소했습니다.";
+            }
+
+            return cancelled;
         }
 
         public void Stop()

@@ -15,7 +15,9 @@ namespace Rag.Healthcare.Rag.Runtime
         public float PersistenceRatio;
         public long TimestampUnixMilliseconds;
         public string TemplateText;
+        public bool PreferTemplateText;
         public ExercisePhase Phase;
+        public SquatBottomDecision BottomDecision;
         public Dictionary<string, float> Evidence;
     }
 }
